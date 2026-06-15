@@ -30,3 +30,12 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+llm-api-router
+config.json
+.info/
+
+
+.claude/
+AGENTS.md
+CLAUDE.md

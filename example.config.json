@@ -1,0 +1,66 @@
+{
+  "servers": {
+    "primary-openai": {
+      "id": "primary-openai",
+      "name": "Primary OpenAI",
+      "url": "api.openai.com/v1",
+      "api_key": "sk-proj-...",
+      "api_types": ["openai"]
+    },
+    "primary-anthropic": {
+      "id": "primary-anthropic",
+      "name": "Primary Anthropic",
+      "url": "api.anthropic.com/v1",
+      "api_key": "sk-ant-...",
+      "api_types": ["anthropic"]
+    },
+    "local-llama": {
+      "id": "local-llama",
+      "name": "Local Llama (Multi-API)",
+      "url": "localhost:8080",
+      "openai_url": "localhost:8080/v1",
+      "anthropic_url": "localhost:8080/anthropic/v1",
+      "api_key": "",
+      "api_types": ["openai", "anthropic"]
+    },
+    "fallback": {
+      "id": "fallback",
+      "name": "Fallback Server",
+      "url": "fallback.example.com/v1",
+      "api_key": "sk-fallback-...",
+      "api_types": ["openai"]
+    }
+  },
+  "rules": [
+    {
+      "incoming_models": ["opus", "sonnet"],
+      "target_model": "o3-mini",
+      "server_id": "primary-openai",
+      "fallbacks": [
+        {
+          "server_id": "fallback",
+          "target_model": "gpt-4o-mini"
+        }
+      ],
+      "enabled": true
+    },
+    {
+      "incoming_models": ["claude-opus"],
+      "target_model": "claude-sonnet-4-6",
+      "server_id": "primary-anthropic",
+      "fallbacks": [
+        {
+          "server_id": "fallback"
+        }
+      ],
+      "enabled": true
+    },
+    {
+      "incoming_models": ["haiku"],
+      "target_model": "claude-haiku-4-5-20251001",
+      "server_id": "primary-anthropic",
+      "fallbacks": [],
+      "enabled": false
+    }
+  ]
+}
