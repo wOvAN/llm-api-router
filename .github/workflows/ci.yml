@@ -55,7 +55,8 @@ jobs:
 
       - name: Build and push image
         run: |
-          IMAGE=ghcr.io/${{ github.repository }}
+          IMAGE=ghcr.io/${{ github.repository_owner }}/llm-api-router
+          IMAGE=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
           SHA_TAG=sha-${GITHUB_SHA::7}
           docker build -t $IMAGE:latest -t $IMAGE:$SHA_TAG .
           docker push $IMAGE:latest
