@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: docker.io/library/llm-api-router
+    image: ghcr.io/wovan/llm-api-router:latest
     container_name: llm-api-router
     restart: unless-stopped
     ports:
