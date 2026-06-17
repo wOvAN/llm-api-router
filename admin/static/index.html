@@ -49,6 +49,12 @@ button.primary:hover { background: #2ea043; }
 .empty { color: #484f58; font-style: italic; padding: 20px; text-align: center; }
 
 .api-key-input { font-family: monospace; }
+
+th.sortable { cursor: pointer; user-select: none; position: relative; }
+th.sortable:hover { color: #c9d1d9; }
+th.sortable::after { content: ' ⇅'; color: #30363d; font-size: 0.75rem; }
+th.sortable.asc::after { content: ' ▲'; color: #58a6ff; }
+th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
 </style>
 </head>
 <body>
@@ -68,7 +74,7 @@ button.primary:hover { background: #2ea043; }
     <button onclick="loadServers()">↻ Refresh</button>
   </div>
   <table>
-    <thead><tr><th>ID</th><th>Name</th><th>URL</th><th>API Type</th><th>API Key</th><th>Actions</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="servers" data-col="id">ID</th><th class="sortable" data-table="servers" data-col="name">Name</th><th class="sortable" data-table="servers" data-col="url">URL</th><th class="sortable" data-table="servers" data-col="api_types">API Type</th><th>API Key</th><th>Actions</th></tr></thead>
     <tbody id="servers-body"></tbody>
   </table>
 </div>
@@ -80,7 +86,7 @@ button.primary:hover { background: #2ea043; }
     <button onclick="loadRules()">↻ Refresh</button>
   </div>
   <table>
-    <thead><tr><th>#</th><th>Enabled</th><th>Incoming Models</th><th>Target Model</th><th>Server</th><th>Fallbacks</th><th>Actions</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="rules" data-col="idx">#</th><th class="sortable" data-table="rules" data-col="enabled">Enabled</th><th class="sortable" data-table="rules" data-col="incoming_models">Incoming Models</th><th class="sortable" data-table="rules" data-col="target_model">Target Model</th><th class="sortable" data-table="rules" data-col="server_id">Server</th><th>Fallbacks</th><th>Actions</th></tr></thead>
     <tbody id="rules-body"></tbody>
   </table>
 </div>
@@ -160,6 +166,73 @@ button.primary:hover { background: #2ea043; }
 <script>
 const API = '/admin/api';
 
+// --- Cookies ---
+function setCookie(name, value, days) {
+  const d = new Date();
+  d.setTime(d.getTime() + days * 864e5);
+  document.cookie = name + '=' + encodeURIComponent(value) + ';expires=' + d.toUTCString() + ';path=/;SameSite=Lax';
+}
+function getCookie(name) {
+  const v = document.cookie.match('(?:^|;\\s*)' + name + '=([^;]*)');
+  return v ? decodeURIComponent(v[1]) : null;
+}
+
+// --- Sort State ---
+const sortState = { servers: {}, rules: {} };
+function sortKey(table, col) { return 'sort_' + table + '_' + col; }
+function loadSort(table, col) {
+  const dir = getCookie(sortKey(table, col));
+  if (dir) sortState[table][col] = dir;
+}
+function saveSort(table, col, dir) {
+  sortState[table][col] = dir;
+  setCookie(sortKey(table, col), dir, 365);
+  // Clear other columns in same table
+  const allCols = table === 'servers'
+    ? ['id', 'name', 'url', 'api_types']
+    : ['idx', 'enabled', 'incoming_models', 'target_model', 'server_id'];
+  for (const c of allCols) {
+    if (c !== col) {
+      setCookie(sortKey(table, c), '', -1);
+      delete sortState[table][c];
+    }
+  }
+}
+function clearSort(table) {
+  const allCols = table === 'servers'
+    ? ['id', 'name', 'url', 'api_types']
+    : ['idx', 'enabled', 'incoming_models', 'target_model', 'server_id'];
+  for (const c of allCols) {
+    setCookie(sortKey(table, c), '', -1);
+  }
+  sortState[table] = {};
+}
+
+// --- Sort Helpers ---
+function sortCompare(a, b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return -1;
+  if (b == null) return 1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b), undefined, { numeric: true });
+}
+function sortData(data, col, dir) {
+  return data.slice().sort((a, b) => {
+    let va, vb;
+    if (col === 'id') { va = a.id; vb = b.id; }
+    else if (col === 'name') { va = a.name; vb = b.name; }
+    else if (col === 'url') { va = a.url; vb = b.url; }
+    else if (col === 'api_types') { va = (a.api_types || []).join(','); vb = (b.api_types || []).join(','); }
+    else if (col === 'idx') { va = data.indexOf(a); vb = data.indexOf(b); }
+    else if (col === 'enabled') { va = a.enabled !== false; vb = b.enabled !== false; }
+    else if (col === 'incoming_models') { va = (a.incoming_models || []).join(','); vb = (b.incoming_models || []).join(','); }
+    else if (col === 'target_model') { va = a.target_model; vb = b.target_model; }
+    else if (col === 'server_id') { va = a.server_id; vb = b.server_id; }
+    else return 0;
+    return sortCompare(va, vb) * (dir === 'desc' ? -1 : 1);
+  });
+}
+
 // --- Tabs ---
 let metricsInterval = null;
 function switchTab(name) {
@@ -179,7 +252,11 @@ function switchTab(name) {
 // --- Servers ---
 async function loadServers() {
   const res = await fetch(API + '/servers');
-  const servers = await res.json();
+  let servers = await res.json();
+  // Apply sort
+  for (const [col, dir] of Object.entries(sortState.servers)) {
+    servers = sortData(servers, col, dir);
+  }
   const tbody = document.getElementById('servers-body');
   if (!servers.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No servers configured</td></tr>'; return; }
   tbody.innerHTML = servers.map(s => {
@@ -301,7 +378,13 @@ async function deleteServer(id) {
 // --- Rules ---
 async function loadRules() {
   const res = await fetch(API + '/rules');
-  const rules = await res.json();
+  let rules = await res.json();
+  // Tag each rule with its original index before sorting
+  rules.forEach((r, i) => { r._idx = i; });
+  // Apply sort
+  for (const [col, dir] of Object.entries(sortState.rules)) {
+    rules = sortData(rules, col, dir);
+  }
   const tbody = document.getElementById('rules-body');
   if (!rules.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No routing rules configured</td></tr>'; return; }
   tbody.innerHTML = rules.map((r, i) => {
@@ -311,17 +394,17 @@ async function loadRules() {
       return `<span class="tag" style="background:#3a3a1a;color:#d29922">${esc(f.server_id)}${tm}</span>`;
     }).join('') || '(none)';
     const models = (r.incoming_models || []).map(m => `<span class="tag" style="background:#1a1a3a;color:#58a6ff">${esc(m)}</span>`).join(' ');
-    const enabled = r.enabled !== false ? '<input type="checkbox" checked onchange="toggleRuleEnabled('+i+',this.checked)" title="Enable rule">' : '<input type="checkbox" onchange="toggleRuleEnabled('+i+',this.checked)" title="Disable rule">';
+    const enabled = r.enabled !== false ? '<input type="checkbox" checked onchange="toggleRuleEnabled(' + r._idx + ',this.checked)" title="Enable rule">' : '<input type="checkbox" onchange="toggleRuleEnabled(' + r._idx + ',this.checked)" title="Disable rule">';
     return `<tr style="opacity:${r.enabled !== false ? '1' : '0.45'}">
-      <td>${i}</td>
+      <td>${r._idx}</td>
       <td>${enabled}</td>
       <td>${models}</td>
       <td>${esc(r.target_model)}</td>
       <td>${esc(r.server_id)}</td>
       <td>${fallbacks}</td>
       <td class="actions">
-        <button onclick="editRule(${i})">Edit</button>
-        <button class="danger" onclick="deleteRule(${i})">Delete</button>
+        <button onclick="editRule(${r._idx})">Edit</button>
+        <button class="danger" onclick="deleteRule(${r._idx})">Delete</button>
       </td>
     </tr>`;
   }).join('');
@@ -563,6 +646,28 @@ function getServersFromDropdown() {
 // --- Init ---
 loadServers();
 loadRules();
+
+// Sortable headers
+document.addEventListener('click', function(e) {
+  const th = e.target.closest('th.sortable');
+  if (!th) return;
+  const table = th.dataset.table;
+  const col = th.dataset.col;
+  loadSort(table, col);
+  const current = sortState[table][col];
+  if (current === 'asc') {
+    sortState[table][col] = 'desc';
+    saveSort(table, col, 'desc');
+  } else {
+    sortState[table][col] = 'asc';
+    saveSort(table, col, 'asc');
+  }
+  // Update header classes
+  th.parentElement.querySelectorAll('th.sortable').forEach(h => h.classList.remove('asc', 'desc'));
+  th.classList.add(sortState[table][col]);
+  if (table === 'servers') loadServers();
+  else loadRules();
+});
 
 // Primary target model select toggle
 document.getElementById('rule-target-sel').addEventListener('change', function() {
