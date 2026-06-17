@@ -195,6 +195,8 @@ func (r *responseRecorder) Write(data []byte) (int, error) {
 }
 
 // StreamProxy forwards the request and streams the response directly to the writer.
+// Returns an error on network failure (before any headers are written to w).
+// HTTP 5xx responses are NOT treated as errors — they are forwarded to the client.
 func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter) (*ProxyMetrics, error) {
 	rawURL := targetURL
 	if !strings.Contains(rawURL, "://") {
@@ -214,6 +216,9 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	start := time.Now()
 	mw := newMetricsWriter(w, start)
 
+	// Capture network errors that ReverseProxy swallows.
+	// Note: HTTP 5xx from the backend are NOT caught here — they are forwarded to the client.
+	var proxyErr error
 	proxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
 			r.URL.Scheme = target.Scheme
@@ -227,10 +232,18 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 			r.Header.Del("Host")
 		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			proxyErr = err
+		},
 	}
 
 	proxyReq := req.Clone(ctx)
 	proxy.ServeHTTP(mw, proxyReq)
+
+	if proxyErr != nil {
+		return nil, proxyErr
+	}
+
 	m := mw.metrics()
 	return &m, nil
 }

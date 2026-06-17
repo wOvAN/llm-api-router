@@ -18,11 +18,12 @@ import (
 type Handler struct {
 	store   *config.Store
 	metrics *metrics.Store
+	health  *config.HealthTracker
 }
 
 // NewHandler creates a new admin handler.
-func NewHandler(store *config.Store, m *metrics.Store) *Handler {
-	return &Handler{store: store, metrics: m}
+func NewHandler(store *config.Store, m *metrics.Store, health *config.HealthTracker) *Handler {
+	return &Handler{store: store, metrics: m, health: health}
 }
 
 // ServeHTTP routes admin API requests.
@@ -79,11 +80,24 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 func (h *Handler) listServers(w http.ResponseWriter, req *http.Request) {
 	cfg := h.store.GetConfig()
-	servers := make([]domain.Server, 0, len(cfg.Servers))
+	var status map[string]bool
+	if h.health != nil {
+		status = h.health.GetStatus()
+	}
+	servers := make([]serverResponse, 0, len(cfg.Servers))
 	for _, srv := range cfg.Servers {
-		servers = append(servers, *srv)
+		servers = append(servers, serverResponse{
+			Server:  *srv,
+			Healthy: status[srv.ID],
+		})
 	}
 	writeJSON(w, http.StatusOK, servers)
+}
+
+// serverResponse wraps a Server with its health status.
+type serverResponse struct {
+	domain.Server
+	Healthy bool `json:"healthy"`
 }
 
 func (h *Handler) addServer(w http.ResponseWriter, req *http.Request) {

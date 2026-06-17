@@ -19,7 +19,7 @@ func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ms := metrics.New(100)
-	return New(store, ms), store, ms
+	return New(store, ms, nil), store, ms
 }
 
 func TestAPITypeFromPath(t *testing.T) {

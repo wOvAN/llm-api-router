@@ -74,7 +74,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <button onclick="loadServers()">↻ Refresh</button>
   </div>
   <table>
-    <thead><tr><th class="sortable" data-table="servers" data-col="id">ID</th><th class="sortable" data-table="servers" data-col="name">Name</th><th class="sortable" data-table="servers" data-col="url">URL</th><th class="sortable" data-table="servers" data-col="api_types">API Type</th><th>API Key</th><th>Actions</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="servers" data-col="id">ID</th><th class="sortable" data-table="servers" data-col="name">Name</th><th class="sortable" data-table="servers" data-col="url">URL</th><th class="sortable" data-table="servers" data-col="api_types">API Type</th><th>Health</th><th>API Key</th><th>Actions</th></tr></thead>
     <tbody id="servers-body"></tbody>
   </table>
 </div>
@@ -258,18 +258,22 @@ async function loadServers() {
     servers = sortData(servers, col, dir);
   }
   const tbody = document.getElementById('servers-body');
-  if (!servers.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No servers configured</td></tr>'; return; }
+  if (!servers.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No servers configured</td></tr>'; return; }
   tbody.innerHTML = servers.map(s => {
     const tags = (s.api_types || []).map(t => {
       const cls = t === 'openai' ? 'tag-openai' : 'tag-anthropic';
       return `<span class="tag ${cls}">${t}</span>`;
     }).join(' ') || '<span style="color:#484f58">(none)</span>';
     const key = s.api_key ? '••••' + s.api_key.slice(-4) : '(none)';
+    const health = s.healthy !== false
+      ? '<span class="tag" style="background:#1a3a1a;color:#3fb950">● healthy</span>'
+      : '<span class="tag" style="background:#3a1a1a;color:#f85149">● down</span>';
     return `<tr>
       <td>${esc(s.id)}</td>
       <td>${esc(s.name)}</td>
       <td>${esc(s.url)}</td>
       <td>${tags}</td>
+      <td>${health}</td>
       <td>${key}</td>
       <td class="actions">
         <button onclick="editServer('${esc(s.id)}')">Edit</button>

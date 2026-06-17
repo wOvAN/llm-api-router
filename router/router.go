@@ -20,11 +20,12 @@ import (
 type Router struct {
 	store   *config.Store
 	metrics *metrics.Store
+	health  *config.HealthTracker
 }
 
 // New creates a new Router.
-func New(store *config.Store, m *metrics.Store) *Router {
-	return &Router{store: store, metrics: m}
+func New(store *config.Store, m *metrics.Store, health *config.HealthTracker) *Router {
+	return &Router{store: store, metrics: m, health: health}
 }
 
 // apiTypeFromPath determines the API type from the request path.
@@ -93,6 +94,13 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		srv := attempt.server
 		targetModel := attempt.targetModel
 
+		// Skip unhealthy servers (except the last attempt — try it anyway)
+		if r.health != nil && !r.health.IsHealthy(srv.ID) && i < len(attempts)-1 {
+			log.Printf("[%s] model=%q — skipping unhealthy server %s (attempt %d/%d)",
+				req.URL.Path, model, srv.Name, i+1, len(attempts))
+			continue
+		}
+
 		rewrittenBody, err := proxy.RewriteModelInBody(body, targetModel)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to rewrite model: %v", err), http.StatusInternalServerError)
@@ -112,8 +120,16 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w)
 		if err != nil {
 			lastErr = err
+			if r.health != nil {
+				r.health.MarkUnhealthy(srv.ID)
+			}
 			log.Printf("[%s] fallback from %s: %v", req.URL.Path, srv.Name, err)
 			continue
+		}
+
+		// Success — mark healthy
+		if r.health != nil {
+			r.health.MarkHealthy(srv.ID)
 		}
 
 		latency := time.Since(requestStart).Milliseconds()

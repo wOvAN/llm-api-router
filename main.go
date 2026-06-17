@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"llm-api-router/admin"
 	"llm-api-router/config"
@@ -42,8 +43,11 @@ func main() {
 
 	metricsStore := metrics.New(100)
 
-	apiRouter := router.New(store, metricsStore)
-	adminHandler := admin.NewHandler(store, metricsStore)
+	healthTracker := config.NewHealthTracker(store, 30*time.Second)
+	healthTracker.Start()
+
+	apiRouter := router.New(store, metricsStore, healthTracker)
+	adminHandler := admin.NewHandler(store, metricsStore, healthTracker)
 
 	adminStatic, _ := fs.Sub(staticFS, "admin/static")
 

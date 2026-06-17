@@ -22,7 +22,7 @@ func newTestHandler(t *testing.T) (*Handler, *config.Store) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ms := metrics.New(100)
-	return NewHandler(store, ms), store
+	return NewHandler(store, ms, nil), store
 }
 
 func TestListServersEmpty(t *testing.T) {
