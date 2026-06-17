@@ -660,6 +660,25 @@ function getServersFromDropdown() {
 }
 
 // --- Init ---
+// Restore sort state from cookies
+function restoreSortState() {
+  const tables = {
+    servers: ['id', 'name', 'url', 'api_types'],
+    rules: ['idx', 'enabled', 'incoming_models', 'target_model', 'server_id'],
+  };
+  for (const [table, cols] of Object.entries(tables)) {
+    for (const col of cols) {
+      const dir = getCookie(sortKey(table, col));
+      if (dir) {
+        sortState[table][col] = dir;
+        // Restore visual indicator
+        const th = document.querySelector(`th.sortable[data-table="${table}"][data-col="${col}"]`);
+        if (th) th.classList.add(dir);
+      }
+    }
+  }
+}
+restoreSortState();
 loadServers();
 loadRules();
 
