@@ -542,7 +542,7 @@ function esc(s) { const d = document.createElement('div'); d.textContent = s; re
 
 // --- Fallbacks ---
 let fallbackCounter = 0;
-function addFallbackRow(serverId, targetModel) {
+async function addFallbackRow(serverId, targetModel) {
   const servers = getServersFromDropdown();
   const container = document.getElementById('fallbacks-container');
   const idx = fallbackCounter++;
@@ -597,15 +597,12 @@ function addFallbackRow(serverId, targetModel) {
     modelSel.innerHTML = '<option value="">(loading...)</option>';
     modelSel.style.display = 'block';
     modelInp.style.display = 'none';
+    modelInp.value = '';
     try {
       const res = await fetch(API + '/servers/' + encodeURIComponent(sid) + '/models');
       if (!res.ok) { modelSel.innerHTML = '<option value="">(failed)</option>'; return; }
       const models = await res.json();
       modelSel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>' + models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
-      if (targetModel) {
-        modelSel.value = targetModel;
-        modelInp.value = targetModel;
-      }
     } catch { modelSel.innerHTML = '<option value="">(error)</option>'; }
   };
   row.appendChild(sel);
@@ -614,7 +611,22 @@ function addFallbackRow(serverId, targetModel) {
   container.appendChild(row);
   // Fetch models if server is pre-selected
   if (serverId) {
-    sel.onchange();
+    await sel.onchange();
+    // Restore manual input if the target model is not in the fetched list
+    if (targetModel) {
+      let found = false;
+      for (const opt of modelSel.options) {
+        if (opt.value === targetModel) { found = true; break; }
+      }
+      if (found) {
+        modelSel.value = targetModel;
+        modelInp.value = targetModel;
+      } else {
+        modelSel.style.display = 'none';
+        modelInp.style.display = 'block';
+        modelInp.value = targetModel;
+      }
+    }
   }
 }
 function getFallbacks() {
