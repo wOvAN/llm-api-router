@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"llm-api-router/config"
 	"llm-api-router/domain"
 	"llm-api-router/metrics"
+	"llm-api-router/pkg/log"
 	"llm-api-router/proxy"
 )
 
@@ -96,7 +96,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 		// Skip unhealthy servers (except the last attempt — try it anyway)
 		if r.health != nil && !r.health.IsHealthy(srv.ID) && i < len(attempts)-1 {
-			log.Printf("[%s] model=%q — skipping unhealthy server %s (attempt %d/%d)",
+			log.Warnf("[%s] model=%q — skipping unhealthy server %s (attempt %d/%d)",
 				req.URL.Path, model, srv.Name, i+1, len(attempts))
 			continue
 		}
@@ -112,7 +112,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 		wasFallback := i > 0
 
-		log.Printf("[%s] model=%q -> %q on %s (attempt %d/%d)",
+		log.Infof("[%s] model=%q -> %q on %s (attempt %d/%d)",
 			req.URL.Path, model, targetModel, srv.Name, i+1, len(attempts))
 
 		apiType := apiTypeFromPath(req.URL.Path)
@@ -123,7 +123,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			if r.health != nil {
 				r.health.MarkUnhealthy(srv.ID)
 			}
-			log.Printf("[%s] fallback from %s: %v", req.URL.Path, srv.Name, err)
+			log.Errorf("[%s] fallback from %s: %v", req.URL.Path, srv.Name, err)
 			continue
 		}
 
@@ -134,21 +134,21 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 		latency := time.Since(requestStart).Milliseconds()
 		r.metrics.Add(domain.RequestMetric{
-			Timestamp:        requestStart,
-			Model:            model,
-			TargetModel:      targetModel,
-			ServerID:         srv.ID,
-			StatusCode:       pm.StatusCode,
-			LatencyMs:        latency,
-			TTFBMs:           pm.TTFBMs,
-			ResponseSize:     pm.ResponseSize,
-			WasFallback:      wasFallback,
-			PromptTokens:     pm.PromptTokens,
-			CompletionTokens: pm.CompletionTokens,
-			TotalTokens:      pm.TotalTokens,
-			CachedTokens:     pm.CachedTokens,
-			NativePromptMs:   pm.PromptMs,
-			NativePredictedMs: pm.PredictedMs,
+			Timestamp:             requestStart,
+			Model:                 model,
+			TargetModel:           targetModel,
+			ServerID:              srv.ID,
+			StatusCode:            pm.StatusCode,
+			LatencyMs:             latency,
+			TTFBMs:                pm.TTFBMs,
+			ResponseSize:          pm.ResponseSize,
+			WasFallback:           wasFallback,
+			PromptTokens:          pm.PromptTokens,
+			CompletionTokens:      pm.CompletionTokens,
+			TotalTokens:           pm.TotalTokens,
+			CachedTokens:          pm.CachedTokens,
+			NativePromptMs:        pm.PromptMs,
+			NativePredictedMs:     pm.PredictedMs,
 			NativePromptTokPerSec: pm.PromptPerSec,
 			NativeDecodeTokPerSec: pm.TokensPerSec,
 		})

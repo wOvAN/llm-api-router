@@ -3,7 +3,6 @@ package main
 import (
 	"embed"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"llm-api-router/admin"
 	"llm-api-router/config"
 	"llm-api-router/metrics"
+	"llm-api-router/pkg/log"
 	"llm-api-router/router"
 )
 
@@ -19,6 +19,8 @@ import (
 var staticFS embed.FS
 
 func main() {
+	log.InitFromEnv()
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -38,7 +40,7 @@ func main() {
 		if err := store.Save(); err != nil {
 			log.Fatalf("Failed to create default config: %v", err)
 		}
-		log.Printf("Created default config file: %s", configFile)
+		log.Infof("Created default config file: %s", configFile)
 	}
 
 	metricsStore := metrics.New(100)
@@ -75,9 +77,9 @@ func main() {
 	})
 
 	addr := ":" + port
-	log.Printf("LLM API Router starting on %s", addr)
-	log.Printf("Admin GUI: http://localhost%s/admin", addr)
-	log.Printf("API routes: http://localhost%s/v1/*", addr)
+	log.Infof("LLM API Router starting on %s", addr)
+	log.Infof("Admin GUI: http://localhost%s/admin", addr)
+	log.Infof("API routes: http://localhost%s/v1/*", addr)
 
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("Server failed: %v", err)

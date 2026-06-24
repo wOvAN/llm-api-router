@@ -18,14 +18,14 @@ type RequestMetric struct {
 	TotalTokens      int       `json:"total_tokens"`
 	CachedTokens     int       `json:"cached_tokens"`
 
-	PrefillTimeMs       int64   `json:"prefill_time_ms"`
-	DecodeTimeMs        int64   `json:"decode_time_ms"`
-	PrefillTokPerSec    float64 `json:"prefill_tok_per_sec"`
-	DecodeTokPerSec     float64 `json:"decode_tok_per_sec"`
-	NativePromptMs      float64 `json:"native_prompt_ms"`
-	NativePredictedMs   float64 `json:"native_predicted_ms"`
+	PrefillTimeMs         int64   `json:"prefill_time_ms"`
+	DecodeTimeMs          int64   `json:"decode_time_ms"`
+	PrefillTokPerSec      float64 `json:"prefill_tok_per_sec"`
+	DecodeTokPerSec       float64 `json:"decode_tok_per_sec"`
+	NativePromptMs        float64 `json:"native_prompt_ms"`
+	NativePredictedMs     float64 `json:"native_predicted_ms"`
 	NativePromptTokPerSec float64 `json:"native_prefill_tok_per_sec"`
-	NativeDecodeTokPerSec  float64 `json:"native_decode_tok_per_sec"`
+	NativeDecodeTokPerSec float64 `json:"native_decode_tok_per_sec"`
 }
 
 // Summary aggregates metrics for a group (by model, server, etc.).

@@ -2,22 +2,22 @@ package config
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"llm-api-router/domain"
+	"llm-api-router/pkg/log"
 )
 
 // HealthTracker tracks server health status with a background checker.
 type HealthTracker struct {
-	mu      sync.RWMutex
-	status  map[string]bool // true = healthy
-	store   *Store
+	mu       sync.RWMutex
+	status   map[string]bool // true = healthy
+	store    *Store
 	interval time.Duration
-	stopCh  chan struct{}
+	stopCh   chan struct{}
 }
 
 // NewHealthTracker creates a tracker with the given check interval.
@@ -68,7 +68,7 @@ func (t *HealthTracker) checkAll() {
 		if !t.IsHealthy(id) {
 			// Server is marked unhealthy — check if it's back
 			if t.checkServer(srv) {
-				log.Printf("[health] %s is back", srv.Name)
+				log.Infof("[health] %s is back", srv.Name)
 				t.MarkHealthy(id)
 			}
 		}
@@ -123,7 +123,7 @@ func (t *HealthTracker) MarkUnhealthy(id string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.status[id] {
-		log.Printf("[health] %s is down", id)
+		log.Warnf("[health] %s is down", id)
 	}
 	t.status[id] = false
 }
