@@ -138,8 +138,8 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		}
 
 		if pm.StatusCode >= 400 {
-			log.Errorf("[%s] model=%q -> %q on %s returned HTTP %d",
-				req.URL.Path, model, targetModel, srv.Name, pm.StatusCode)
+			log.Errorf("[%s] model=%q -> %q on %s returned HTTP %d %s: %s",
+				req.URL.Path, model, targetModel, srv.Name, pm.StatusCode, http.StatusText(pm.StatusCode), pm.ErrorBody)
 		}
 
 		latency := time.Since(requestStart).Milliseconds()

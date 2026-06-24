@@ -16,6 +16,7 @@ import (
 // ProxyMetrics holds performance data for a proxied request.
 type ProxyMetrics struct {
 	StatusCode       int
+	ErrorBody        string
 	TTFBMs           int64
 	ResponseSize     int64
 	PromptTokens     int
@@ -87,6 +88,13 @@ func (m *metricsWriter) metrics() ProxyMetrics {
 	isStream := strings.Contains(m.contentType, "text/event-stream")
 	pm := extractUsageFromResponse(m.bodyBuffer.Bytes(), m.contentEncoding, isStream)
 	pm.StatusCode = m.statusCode
+	if m.statusCode >= 400 {
+		body := m.bodyBuffer.Bytes()
+		if len(body) > 4096 {
+			body = body[:4096]
+		}
+		pm.ErrorBody = string(body)
+	}
 	pm.TTFBMs = ttfb
 	pm.ResponseSize = m.responseSize
 
