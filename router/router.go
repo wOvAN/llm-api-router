@@ -50,6 +50,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
+		log.Errorf("[%s] failed to read request body: %v", req.URL.Path, err)
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -57,18 +58,21 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 	model, err := extractModel(body)
 	if err != nil {
+		log.Errorf("[%s] invalid request body: %v", req.URL.Path, err)
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	rule, ok := r.store.GetRuleByModel(model)
 	if !ok {
+		log.Errorf("[%s] no routing rule for model %q", req.URL.Path, model)
 		http.Error(w, fmt.Sprintf("no routing rule for model %q", model), http.StatusNotFound)
 		return
 	}
 
 	primaryServer, ok := r.store.GetServer(rule.ServerID)
 	if !ok {
+		log.Errorf("[%s] server %q not found for model %q", req.URL.Path, rule.ServerID, model)
 		http.Error(w, fmt.Sprintf("server %q not found", rule.ServerID), http.StatusInternalServerError)
 		return
 	}
@@ -103,6 +107,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 		rewrittenBody, err := proxy.RewriteModelInBody(body, targetModel)
 		if err != nil {
+			log.Errorf("[%s] failed to rewrite model %q -> %q: %v", req.URL.Path, model, targetModel, err)
 			http.Error(w, fmt.Sprintf("failed to rewrite model: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -168,6 +173,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		WasFallback:  len(attempts) > 1,
 	})
 
+	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)
 	http.Error(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
 }
 
