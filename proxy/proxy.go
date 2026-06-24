@@ -60,6 +60,12 @@ func (m *metricsWriter) WriteHeader(code int) {
 	m.ResponseWriter.WriteHeader(code)
 }
 
+func (m *metricsWriter) Flush() {
+	if flusher, ok := m.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func (m *metricsWriter) Write(data []byte) (int, error) {
 	if m.firstWrite.IsZero() {
 		m.firstWrite = time.Now()
