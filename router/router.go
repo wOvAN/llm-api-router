@@ -137,6 +137,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			r.health.MarkHealthy(srv.ID)
 		}
 
+		if pm.StatusCode >= 400 {
+			log.Errorf("[%s] model=%q -> %q on %s returned HTTP %d",
+				req.URL.Path, model, targetModel, srv.Name, pm.StatusCode)
+		}
+
 		latency := time.Since(requestStart).Milliseconds()
 		r.metrics.Add(domain.RequestMetric{
 			Timestamp:             requestStart,
