@@ -48,7 +48,10 @@ func main() {
 	healthTracker := config.NewHealthTracker(store, 30*time.Second)
 	healthTracker.Start()
 
-	apiRouter := router.New(store, metricsStore, healthTracker)
+	// Rate limiter: skip server after 5 failures within 60s, cooldown for 5min.
+	rateLimiter := config.NewRateLimiter(5, 60*time.Second, 5*time.Minute)
+
+	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter)
 	adminHandler := admin.NewHandler(store, metricsStore, healthTracker)
 
 	adminStatic, _ := fs.Sub(staticFS, "admin/static")

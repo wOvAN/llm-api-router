@@ -18,14 +18,15 @@ import (
 
 // Router handles incoming LLM API requests and routes them to configured backends.
 type Router struct {
-	store   *config.Store
-	metrics *metrics.Store
-	health  *config.HealthTracker
+	store     *config.Store
+	metrics   *metrics.Store
+	health    *config.HealthTracker
+	rateLimit *config.RateLimiter
 }
 
 // New creates a new Router.
-func New(store *config.Store, m *metrics.Store, health *config.HealthTracker) *Router {
-	return &Router{store: store, metrics: m, health: health}
+func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter) *Router {
+	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit}
 }
 
 // apiTypeFromPath determines the API type from the request path.
@@ -105,6 +106,14 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 
+		// Skip rate-limited servers (except the last attempt — try it anyway)
+		if r.rateLimit != nil && r.rateLimit.ShouldSkip(srv.ID) && i < len(attempts)-1 {
+			remaining := r.rateLimit.CooldownRemaining(srv.ID)
+			log.Warnf("[%s] model=%q — skipping rate-limited server %s (cooldown %v, attempt %d/%d)",
+				req.URL.Path, model, srv.Name, remaining.Round(time.Second), i+1, len(attempts))
+			continue
+		}
+
 		rewrittenBody, err := proxy.RewriteModelInBody(body, targetModel)
 		if err != nil {
 			log.Errorf("[%s] failed to rewrite model %q -> %q: %v", req.URL.Path, model, targetModel, err)
@@ -141,13 +150,19 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			if r.health != nil {
 				r.health.MarkUnhealthy(srv.ID)
 			}
+			if r.rateLimit != nil {
+				r.rateLimit.RecordFailure(srv.ID)
+			}
 			log.Errorf("[%s] fallback from %s: %v", req.URL.Path, srv.Name, err)
 			continue
 		}
 
-		// Success — mark healthy
+		// Success — mark healthy and clear rate limit
 		if r.health != nil {
 			r.health.MarkHealthy(srv.ID)
+		}
+		if r.rateLimit != nil {
+			r.rateLimit.RecordSuccess(srv.ID)
 		}
 
 		if pm.StatusCode >= 400 {
