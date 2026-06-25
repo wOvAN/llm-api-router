@@ -313,9 +313,21 @@ func rewriteModelInResponse(data []byte, oldModel, newModel string) []byte {
 
 	result, n := replaceJSONModelValue(data, oldModel, newModel)
 	if n == 0 {
+		// Debug: log when no replacement was found in a chunk
+		if bytesIndex(data, []byte(`"model"`)) >= 0 {
+			log.Debugf("modelRewrite: found 'model' key but no match for %q in chunk: %s", oldModel, truncateBytes(data, 256))
+		}
 		return data
 	}
+	log.Debugf("modelRewrite: replaced %d occurrence(s) of %q → %q", n, oldModel, newModel)
 	return result
+}
+
+func truncateBytes(b []byte, max int) []byte {
+	if len(b) <= max {
+		return b
+	}
+	return append(b[:max], byte('.')<<0, byte('.')<<0, byte('.')<<0)
 }
 
 // replaceJSONModelValue finds and replaces "model" values matching oldModel.
