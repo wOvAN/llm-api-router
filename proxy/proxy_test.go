@@ -465,9 +465,9 @@ func TestHeaderInjector(t *testing.T) {
 	recorder := &testResponseWriter{header: make(http.Header)}
 	start := time.Now()
 	mw := newMetricsWriter(recorder, start)
-	hj := newHeaderInjector(recorder, mw)
+	hj := newHeaderInjector(recorder)
 
-	// Simulate WriteHeader (sets TTFB and status)
+	// Simulate WriteHeader (sets status only; TTFB is measured at first Write)
 	hj.WriteHeader(201)
 
 	// Simulate Write (triggers TTFB in metricsWriter)
@@ -484,11 +484,11 @@ func TestHeaderInjector(t *testing.T) {
 		t.Errorf("X-Router-Status = %q, want %q", status, "201")
 	}
 
-	ttfb := recorder.header.Get("X-Router-TTFB-Ms")
-	if ttfb == "" {
-		t.Error("X-Router-TTFB-Ms should be set")
+	// TTFB is measured at first Write() time, not in the header
+	pm := mw.metrics()
+	if pm.TTFBMs < 10 {
+		t.Errorf("TTFBMs = %d, want >= 10 (measured at first Write)", pm.TTFBMs)
 	}
-	// TTFB should be 0 since WriteHeader was called before Write set firstWrite
 }
 
 func TestSetRouterHeaders(t *testing.T) {

@@ -85,8 +85,8 @@ func TestAddComputedFields(t *testing.T) {
 	if got.PrefillTokPerSec < 249 || got.PrefillTokPerSec > 251 {
 		t.Errorf("PrefillTokPerSec = %f, want ~250", got.PrefillTokPerSec)
 	}
-	if got.DecodeTokPerSec < 123 || got.DecodeTokPerSec > 124.5 {
-		t.Errorf("DecodeTokPerSec = %f, want ~123.75", got.DecodeTokPerSec)
+	if got.DecodeTokPerSec < 124.5 || got.DecodeTokPerSec > 125.5 {
+		t.Errorf("DecodeTokPerSec = %f, want ~125", got.DecodeTokPerSec)
 	}
 }
 
@@ -277,5 +277,88 @@ func TestSummariesReturnsCopy(t *testing.T) {
 	summaries2 := s.Summaries()
 	if summaries2["gpt-4"].TotalRequests == 999 {
 		t.Error("Summaries() should return a copy")
+	}
+}
+
+func TestDecodeTokSingleToken(t *testing.T) {
+	s := New(100)
+	s.Add(domain.RequestMetric{
+		Model:            "gpt-4",
+		ServerID:         "s1",
+		StatusCode:       200,
+		LatencyMs:        1000,
+		TTFBMs:           200,
+		PromptTokens:     50,
+		CompletionTokens: 1, // single-token response
+	})
+
+	recent := s.Recent()
+	got := recent[0]
+	// DecodeTimeMs = 1000 - 200 = 800ms
+	// DecodeTokPerSec = 1 / 0.8 = 1.25
+	if got.DecodeTokPerSec <= 0 {
+		t.Errorf("DecodeTokPerSec = %f, want > 0 (single-token response should have non-zero decode speed)", got.DecodeTokPerSec)
+	}
+	if got.DecodeTokPerSec < 1.24 || got.DecodeTokPerSec > 1.26 {
+		t.Errorf("DecodeTokPerSec = %f, want ~1.25", got.DecodeTokPerSec)
+	}
+}
+
+func TestNativeTimingsPreferred(t *testing.T) {
+	s := New(100)
+	s.Add(domain.RequestMetric{
+		Model:               "gpt-4",
+		ServerID:            "s1",
+		StatusCode:          200,
+		LatencyMs:           1000,
+		TTFBMs:              300,
+		PromptTokens:        500,
+		CompletionTokens:    200,
+		NativePromptMs:      150,         // server reports 150ms for prompt processing
+		NativePredictedMs:   600,         // server reports 600ms for token generation
+		NativePromptTokPerSec: 3333.33,  // 500 / 0.15
+		NativeDecodeTokPerSec: 333.33,   // 200 / 0.6
+	})
+
+	recent := s.Recent()
+	got := recent[0]
+
+	// Should use native timings, not wall-clock TTFB
+	if got.PrefillTimeMs != 150 {
+		t.Errorf("PrefillTimeMs = %d, want 150 (from native timings)", got.PrefillTimeMs)
+	}
+	if got.DecodeTimeMs != 600 {
+		t.Errorf("DecodeTimeMs = %d, want 600 (from native timings)", got.DecodeTimeMs)
+	}
+	// Should use native tok/s, not wall-clock calculated
+	if got.PrefillTokPerSec < 3333 || got.PrefillTokPerSec > 3334 {
+		t.Errorf("PrefillTokPerSec = %f, want ~3333.33 (from native)", got.PrefillTokPerSec)
+	}
+	if got.DecodeTokPerSec < 333 || got.DecodeTokPerSec > 334 {
+		t.Errorf("DecodeTokPerSec = %f, want ~333.33 (from native)", got.DecodeTokPerSec)
+	}
+}
+
+func TestNativeTimingsFallbackToWallClock(t *testing.T) {
+	s := New(100)
+	s.Add(domain.RequestMetric{
+		Model:            "gpt-4",
+		ServerID:         "s1",
+		StatusCode:       200,
+		LatencyMs:        1000,
+		TTFBMs:           200,
+		PromptTokens:     50,
+		CompletionTokens: 100,
+		// No native timings — should fall back to wall-clock
+	})
+
+	recent := s.Recent()
+	got := recent[0]
+
+	if got.PrefillTimeMs != 200 {
+		t.Errorf("PrefillTimeMs = %d, want 200 (TTFB fallback)", got.PrefillTimeMs)
+	}
+	if got.DecodeTimeMs != 800 {
+		t.Errorf("DecodeTimeMs = %d, want 800 (latency - TTFB fallback)", got.DecodeTimeMs)
 	}
 }

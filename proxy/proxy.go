@@ -51,39 +51,31 @@ func SetRouterHeaders(w http.ResponseWriter, h *RouterHeaders) {
 }
 
 // headerInjector wraps an http.ResponseWriter to inject X-Router-* headers
-// at WriteHeader time. At that moment, TTFB and status code are known,
-// but latency and token counts are not (streaming may still be in progress).
+// at WriteHeader time. TTFB is measured at first Write() time (first content
+// byte) via metricsWriter, so it's not available here.
 //
-// Headers set at WriteHeader time: X-Router-TTFB-Ms, X-Router-Status.
 // Headers set eagerly (via SetRouterHeaders): X-Router-Server, X-Router-Server-Name.
+// Headers set at WriteHeader time: X-Router-Status.
 // Latency and token headers are NOT set in streaming responses — they are
 // available in /admin/api/metrics after the fact.
 type headerInjector struct {
 	http.ResponseWriter
-	mw      *metricsWriter
 	statusCode int
 	written  bool
 }
 
-func newHeaderInjector(w http.ResponseWriter, mw *metricsWriter) *headerInjector {
-	return &headerInjector{ResponseWriter: w, mw: mw}
+func newHeaderInjector(w http.ResponseWriter) *headerInjector {
+	return &headerInjector{ResponseWriter: w}
 }
 
 func (h *headerInjector) WriteHeader(code int) {
 	h.statusCode = code
 	h.written = true
 
-	// Set firstWrite on metricsWriter so TTFB is captured.
-	// metricsWriter.WriteHeader will be called below (via chain) and will
-	// see firstWrite is already set, so it won't overwrite.
-	if h.mw.firstWrite.IsZero() {
-		h.mw.firstWrite = time.Now()
-	}
-
-	// Inject headers BEFORE forwarding to client
+	// Inject headers BEFORE forwarding to client.
+	// TTFB is measured at first Write() time (first content byte), not here.
+	// At WriteHeader time, we only know the status code.
 	headers := h.Header()
-	ttfb := h.mw.firstWrite.Sub(h.mw.startTime).Milliseconds()
-	headers.Set("X-Router-TTFB-Ms", strconv.FormatInt(ttfb, 10))
 	headers.Set("X-Router-Status", strconv.Itoa(code))
 
 	h.ResponseWriter.WriteHeader(code)
@@ -117,9 +109,6 @@ func newMetricsWriter(w http.ResponseWriter, start time.Time) *metricsWriter {
 }
 
 func (m *metricsWriter) WriteHeader(code int) {
-	if m.firstWrite.IsZero() {
-		m.firstWrite = time.Now()
-	}
 	m.statusCode = code
 	m.contentType = m.ResponseWriter.Header().Get("Content-Type")
 	m.contentEncoding = m.ResponseWriter.Header().Get("Content-Encoding")
@@ -739,7 +728,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// Wrap with headerInjector to inject X-Router-* headers at WriteHeader time.
 	if rh != nil {
 		SetRouterHeaders(rw, rh) // Set ServerID and ServerName eagerly
-		rw = newHeaderInjector(rw, mw)
+		rw = newHeaderInjector(rw)
 	}
 
 	// Wrap with loop detector to catch backends that get stuck repeating content.
