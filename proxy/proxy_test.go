@@ -456,19 +456,20 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 	})
 }
 
-func TestRewriteModelWriterBuffersOriginal(t *testing.T) {
-	// Verify that metricsWriter receives original data (not rewritten)
+func TestRewriteModelWriterChain(t *testing.T) {
+	// Verify that modelRewriteWriter wraps metricsWriter in the response chain:
+	// modelRewriteWriter → metricsWriter → client
+	// Both client and metrics buffer see the rewritten data.
 	recorder := &testResponseWriter{}
 	start := time.Now()
 	mw := newMetricsWriter(recorder, start)
-	rw := newModelRewriteWriter(recorder, mw, "target", "opus")
+	rw := newModelRewriteWriter(mw, "target", "opus")
 
 	data := []byte(`{"model":"target","choices":[]}`)
 	n, err := rw.Write(data)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	// n is bytes written to client (rewritten data), which is shorter
 	if n == 0 {
 		t.Error("Write returned 0 bytes")
 	}
@@ -478,9 +479,9 @@ func TestRewriteModelWriterBuffersOriginal(t *testing.T) {
 		t.Errorf("client saw %s, want rewritten model", recorder.buf)
 	}
 
-	// metricsWriter buffer should have original data
-	if !bytes.Contains(mw.bodyBuffer.Bytes(), []byte(`"model":"target"`)) {
-		t.Errorf("metrics buffer has %s, want original model", mw.bodyBuffer.Bytes())
+	// metricsWriter buffer also has rewritten data (it's in the chain)
+	if !bytes.Contains(mw.bodyBuffer.Bytes(), []byte(`"model":"opus"`)) {
+		t.Errorf("metrics buffer has %s, want rewritten model", mw.bodyBuffer.Bytes())
 	}
 }
 

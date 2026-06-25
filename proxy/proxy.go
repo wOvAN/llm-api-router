@@ -208,19 +208,19 @@ func (r *responseRecorder) Write(data []byte) (int, error) {
 	return r.body.Write(data)
 }
 
-// modelRewriteWriter wraps an http.ResponseWriter to replace the target model name
+// modelRewriteWriter wraps a metricsWriter to replace the target model name
 // with the original model name in JSON responses (both streaming and non-streaming).
+// It wraps the metricsWriter so that metrics (TTFB, size, buffer) are captured
+// for the actual data sent to the client.
 type modelRewriteWriter struct {
 	http.ResponseWriter
-	mw       *metricsWriter
 	oldModel string
 	newModel string
 }
 
-func newModelRewriteWriter(w http.ResponseWriter, mw *metricsWriter, oldModel, newModel string) *modelRewriteWriter {
+func newModelRewriteWriter(mw *metricsWriter, oldModel, newModel string) *modelRewriteWriter {
 	return &modelRewriteWriter{
-		ResponseWriter: w,
-		mw:             mw,
+		ResponseWriter: mw,
 		oldModel:       oldModel,
 		newModel:       newModel,
 	}
@@ -228,8 +228,6 @@ func newModelRewriteWriter(w http.ResponseWriter, mw *metricsWriter, oldModel, n
 
 func (r *modelRewriteWriter) Write(data []byte) (int, error) {
 	rewritten := rewriteModelInResponse(data, r.oldModel, r.newModel)
-	// Always pass original data to metricsWriter for correct usage extraction
-	r.mw.Write(data) //nolint:errcheck // buffering for usage extraction
 	return r.ResponseWriter.Write(rewritten)
 }
 
@@ -379,9 +377,10 @@ func isWhitespace(b byte) bool {
 // StreamProxy forwards the request and streams the response directly to the writer.
 // Returns an error on network failure (before any headers are written to w).
 // HTTP 5xx responses are NOT treated as errors — they are forwarded to the client.
-// If originalModel is non-empty, the "model" field in the response is rewritten
-// from the target model back to originalModel so the client sees its own model name.
-func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, originalModel string) (*ProxyMetrics, error) {
+// If originalModel is non-empty and differs from targetModel, the "model" field
+// in the response is rewritten from targetModel back to originalModel so the
+// client sees its own model name.
+func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, targetModel, originalModel string) (*ProxyMetrics, error) {
 	rawURL := targetURL
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "https://" + rawURL
@@ -399,7 +398,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 	start := time.Now()
 	mw := newMetricsWriter(w, start)
-	rw := newModelRewriteWriter(w, mw, "", originalModel)
+	rw := newModelRewriteWriter(mw, targetModel, originalModel)
 
 	// Capture network errors that ReverseProxy swallows.
 	// Note: HTTP 5xx from the backend are NOT caught here — they are forwarded to the client.
