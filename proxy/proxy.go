@@ -374,6 +374,145 @@ func isWhitespace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 
+// loopDetector wraps an http.ResponseWriter to detect when the backend
+// gets stuck in an infinite loop, repeatedly sending the same content.
+// Based on LiteLLM's REPEATED_STREAMING_CHUNK_LIMIT pattern.
+//
+// When a loop is detected, the detector cancels the request context
+// (which cancels the upstream request) and sends an error frame to the client.
+const loopDetectionWindow = 20 // number of recent SSE contents to track
+
+type loopDetector struct {
+	http.ResponseWriter
+	ctx context.Context
+	// Ring buffer of recent SSE text contents
+	recent  []string
+	index   int
+	count   int      // number of contents seen
+	detected bool    // loop already detected
+	written bool    // WriteHeader already called
+}
+
+func newLoopDetector(w http.ResponseWriter, ctx context.Context) *loopDetector {
+	return &loopDetector{
+		ResponseWriter: w,
+		ctx:            ctx,
+		recent:         make([]string, loopDetectionWindow),
+	}
+}
+
+func (d *loopDetector) Write(data []byte) (int, error) {
+	if d.detected {
+		return 0, fmt.Errorf("stream loop detected: backend is repeating content")
+	}
+
+	// Extract text content from SSE events
+	contents := extractSSEContents(data)
+	for _, content := range contents {
+		if content == "" {
+			continue
+		}
+		// Skip non-content events (role, tool calls, etc.)
+		if len(content) > 1024 {
+			content = content[:1024]
+		}
+		d.recent[d.index%loopDetectionWindow] = content
+		d.index++
+		d.count++
+
+		if d.count >= loopDetectionWindow {
+			if d.allRecentIdentical() {
+				d.detected = true
+				// Cancel upstream request
+				if err := d.sendLoopError(); err != nil {
+					return 0, err
+				}
+				return 0, fmt.Errorf("stream loop detected: backend is repeating content")
+			}
+		}
+	}
+
+	return d.ResponseWriter.Write(data)
+}
+
+func (d *loopDetector) allRecentIdentical() bool {
+	first := d.recent[0]
+	if first == "" {
+		return false
+	}
+	for i := 1; i < loopDetectionWindow; i++ {
+		if d.recent[i] != first {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *loopDetector) sendLoopError() error {
+	errJSON := `{"choices":[{"finish_reason":"error","delta":{"content":"Generation stopped: model appears to be stuck in a loop."}}]}`
+	if d.written {
+		// Headers already sent — append error event to existing stream
+		_, err := d.ResponseWriter.Write([]byte("data: " + errJSON + "\n\n"))
+		return err
+	}
+	d.written = true
+	h := d.ResponseWriter.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	d.ResponseWriter.WriteHeader(http.StatusInternalServerError)
+	_, err := d.ResponseWriter.Write([]byte("data: " + errJSON + "\n\n"))
+	return err
+}
+
+// extractSSEContents extracts text content from SSE data events.
+// It handles both OpenAI (delta.content) and Anthropic (delta.text) formats.
+func extractSSEContents(data []byte) []string {
+	var contents []string
+	dataStr := string(data)
+
+	// Split by "data:" prefix
+	for _, line := range strings.Split(dataStr, "data: ") {
+		if len(line) < 2 {
+			continue
+		}
+		// Take only up to the newline
+		if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+			line = line[:nl]
+		}
+		if line == "[DONE]" {
+			continue
+		}
+		if len(line) < 2 {
+			continue
+		}
+
+		// Extract content from JSON
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			continue
+		}
+
+		// OpenAI format: choices[0].delta.content
+		if choices, ok := obj["choices"].([]interface{}); ok && len(choices) > 0 {
+			if choice, ok := choices[0].(map[string]interface{}); ok {
+				if delta, ok := choice["delta"].(map[string]interface{}); ok {
+					if content, ok := delta["content"].(string); ok && content != "" {
+						contents = append(contents, content)
+					}
+				}
+			}
+		}
+		// Anthropic format: delta.text
+		if delta, ok := obj["delta"].(map[string]interface{}); ok {
+			if text, ok := delta["text"].(string); ok && text != "" {
+				contents = append(contents, text)
+			}
+		}
+	}
+
+	return contents
+}
+
 // StreamProxy forwards the request and streams the response directly to the writer.
 // Returns an error on network failure (before any headers are written to w).
 // HTTP 5xx responses are NOT treated as errors — they are forwarded to the client.
@@ -400,6 +539,9 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	mw := newMetricsWriter(w, start)
 	rw := newModelRewriteWriter(mw, targetModel, originalModel)
 
+	// Wrap with loop detector to catch backends that get stuck repeating content.
+	ld := newLoopDetector(rw, ctx)
+
 	// Capture network errors that ReverseProxy swallows.
 	// Note: HTTP 5xx from the backend are NOT caught here — they are forwarded to the client.
 	var proxyErr error
@@ -422,7 +564,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	}
 
 	proxyReq := req.Clone(ctx)
-	proxy.ServeHTTP(rw, proxyReq)
+	proxy.ServeHTTP(ld, proxyReq)
 
 	if proxyErr != nil {
 		// Detect client disconnect: when the client closes the connection,
@@ -432,6 +574,12 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 			return nil, ctx.Err()
 		}
 		return nil, proxyErr
+	}
+
+	// Check if loop was detected (proxy may have returned after context cancellation)
+	if ld.detected {
+		m := mw.metrics()
+		return &m, fmt.Errorf("stream loop detected: backend is repeating content")
 	}
 
 	m := mw.metrics()
