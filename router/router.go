@@ -149,7 +149,36 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					req.URL.Path, model, i+1, len(attempts))
 				return
 			}
-			// Network error: mark unhealthy and try fallback
+			// Mid-stream error: headers already sent to client, fallback impossible
+			if _, isMidStream := err.(*proxy.MidStreamError); isMidStream {
+				if r.health != nil {
+					r.health.MarkUnhealthy(srv.ID)
+				}
+				if r.rateLimit != nil {
+					r.rateLimit.RecordFailure(srv.ID)
+				}
+				log.Errorf("[%s] model=%q — mid-stream error on %s (attempt %d/%d): %v",
+					req.URL.Path, model, srv.Name, i+1, len(attempts), err)
+				// Record whatever metrics we have
+				latency := time.Since(requestStart).Milliseconds()
+				r.metrics.Add(domain.RequestMetric{
+					Timestamp:        requestStart,
+					Model:            model,
+					TargetModel:      targetModel,
+					ServerID:         srv.ID,
+					StatusCode:       pm.StatusCode,
+					LatencyMs:        latency,
+					TTFBMs:           pm.TTFBMs,
+					ResponseSize:     pm.ResponseSize,
+					WasFallback:      wasFallback,
+					PromptTokens:     pm.PromptTokens,
+					CompletionTokens: pm.CompletionTokens,
+					TotalTokens:      pm.TotalTokens,
+					CachedTokens:     pm.CachedTokens,
+				})
+				return
+			}
+			// Network error (pre-response): mark unhealthy and try fallback
 			lastErr = err
 			if r.health != nil {
 				r.health.MarkUnhealthy(srv.ID)

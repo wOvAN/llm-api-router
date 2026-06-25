@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"llm-api-router/pkg/log"
 )
 
 // ProxyMetrics holds performance data for a proxied request.
@@ -577,6 +579,22 @@ func extractSSEContents(data []byte) []string {
 	return contents
 }
 
+// MidStreamError is returned when the backend fails after headers have already
+// been sent to the client. Unlike pre-response errors, mid-stream errors cannot
+// trigger fallback because the client already received a partial response.
+type MidStreamError struct {
+	Err      error
+	Written  int64 // bytes written to client before the error
+}
+
+func (e *MidStreamError) Error() string {
+	return fmt.Sprintf("mid-stream error after %d bytes: %v", e.Written, e.Err)
+}
+
+func (e *MidStreamError) Unwrap() error {
+	return e.Err
+}
+
 // StreamProxy forwards the request and streams the response directly to the writer.
 // Returns an error on network failure (before any headers are written to w).
 // HTTP 5xx responses are NOT treated as errors — they are forwarded to the client.
@@ -584,6 +602,10 @@ func extractSSEContents(data []byte) []string {
 // in the response is rewritten from targetModel back to originalModel so the
 // client sees its own model name.
 // If rh is non-nil, X-Router-* headers are injected into the response.
+//
+// Mid-stream errors (backend disconnects after headers are sent) are detected
+// and returned as *MidStreamError. The client receives an error event appended
+// to the stream, but fallback is not possible because headers are already sent.
 func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, targetModel, originalModel string, rh *RouterHeaders) (*ProxyMetrics, error) {
 	rawURL := targetURL
 	if !strings.Contains(rawURL, "://") {
@@ -613,38 +635,78 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// Wrap with loop detector to catch backends that get stuck repeating content.
 	ld := newLoopDetector(rw, ctx)
 
-	// Capture network errors that ReverseProxy swallows.
-	// Note: HTTP 5xx from the backend are NOT caught here — they are forwarded to the client.
-	var proxyErr error
-	proxy := &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
-			r.URL.Scheme = target.Scheme
-			r.URL.Host = target.Host
-			r.URL.Path = targetPath
-			r.URL.RawQuery = req.URL.RawQuery
-
-			if apiKey != "" {
-				r.Header.Set("Authorization", "Bearer "+apiKey)
-			}
-
-			r.Header.Del("Host")
-		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			proxyErr = err
-		},
-	}
-
+	// Direct the request
 	proxyReq := req.Clone(ctx)
-	proxy.ServeHTTP(ld, proxyReq)
+	proxyReq.URL.Scheme = target.Scheme
+	proxyReq.URL.Host = target.Host
+	proxyReq.URL.Path = targetPath
+	proxyReq.URL.RawQuery = req.URL.RawQuery
+	proxyReq.Header.Clone()
+	if apiKey != "" {
+		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	proxyReq.Header.Del("Host")
+	proxyReq.GetBody = nil
+	proxyReq.RequestURI = "" // Must be empty for client requests (Clone preserves the server-side value)
 
-	if proxyErr != nil {
-		// Detect client disconnect: when the client closes the connection,
-		// the HTTP server cancels req.Context(), which cancels the upstream
-		// request. In this case, no fallback is needed — the client is gone.
+	// Execute the upstream request
+	client := &http.Client{
+		Transport: http.DefaultTransport,
+		Timeout:   0, // no timeout — let the request context handle it
+	}
+	upstreamResp, err := client.Do(proxyReq)
+	if err != nil {
+		// Pre-response error — no headers written to client yet.
+		// Fallback is possible.
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, proxyErr
+		return nil, fmt.Errorf("upstream request failed: %w", err)
+	}
+	defer upstreamResp.Body.Close() //nolint:errcheck
+
+	// Copy response headers
+	headers := ld.Header()
+	for k, vv := range upstreamResp.Header {
+		headers[k] = vv
+	}
+	// Remove Transfer-Encoding — we handle chunking ourselves
+	headers.Del("Transfer-Encoding")
+
+	// Write status code (this triggers TTFB / headerInjector)
+	ld.WriteHeader(upstreamResp.StatusCode)
+
+	// Stream the response body, chunk by chunk, to detect mid-stream errors
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := upstreamResp.Body.Read(buf)
+		if n > 0 {
+			_, writeErr := ld.Write(buf[:n])
+			if writeErr != nil {
+				// Error writing to client (e.g., client disconnect)
+				if ctx.Err() != nil {
+					m := mw.metrics()
+					return &m, ctx.Err()
+				}
+				m := mw.metrics()
+				return &m, fmt.Errorf("write to client: %w", writeErr)
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			// Mid-stream error from upstream
+			if ctx.Err() != nil {
+				m := mw.metrics()
+				return &m, ctx.Err()
+			}
+			// Send error event to the client
+			sendMidStreamError(ld, readErr)
+			m := mw.metrics()
+			return &m, &MidStreamError{Err: readErr, Written: m.ResponseSize}
+		}
 	}
 
 	// Check if loop was detected (proxy may have returned after context cancellation)
@@ -655,4 +717,25 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 	m := mw.metrics()
 	return &m, nil
+}
+
+// sendMidStreamError appends an error event to the ongoing stream to inform
+// the client that the backend disconnected mid-stream.
+func sendMidStreamError(w http.ResponseWriter, err error) {
+	// Sanitize error message
+	msg := strings.ReplaceAll(err.Error(), "\n", " ")
+	msg = strings.ReplaceAll(msg, "\"", "\\\"")
+
+	errEvent := fmt.Sprintf(
+		`data: {"choices":[{"finish_reason":"error","delta":{"content":"[error: %s]"}}]}\n\n`,
+		msg,
+	)
+	_, writeErr := w.Write([]byte(errEvent))
+	if writeErr != nil {
+		log.Errorf("failed to send mid-stream error event to client: %v", writeErr)
+	}
+	// Flush immediately
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
