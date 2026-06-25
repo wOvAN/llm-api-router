@@ -863,3 +863,48 @@ func TestStreamProxyAnthropicStreamingRewrite(t *testing.T) {
 		t.Errorf("response should contain client model %q: %s", clientModel, respBody)
 	}
 }
+
+func TestRewriteAnyModelValue(t *testing.T) {
+	// When oldModel == newModel, any "model":"X" should be replaced with newModel.
+	// This handles the case where the backend returns its actual model name
+	// even when we sent the same model name as the client requested.
+
+	t.Run("replaces different backend model", func(t *testing.T) {
+		// Backend returns its real model, client expects "opus"
+		data := []byte(`{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","content":[]}`)
+		got := rewriteModelInResponse(data, "opus", "opus")
+		want := `{"model":"opus","content":[]}`
+		if string(got) != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("replaces in SSE event", func(t *testing.T) {
+		data := []byte(`data: {"type":"message_start","message":{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","id":"msg_123"}}`)
+		got := rewriteModelInResponse(data, "opus", "opus")
+		want := `data: {"type":"message_start","message":{"model":"opus","id":"msg_123"}}`
+		if string(got) != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("skips if already correct", func(t *testing.T) {
+		data := []byte(`{"model":"opus","content":[]}`)
+		got := rewriteModelInResponse(data, "opus", "opus")
+		want := `{"model":"opus","content":[]}`
+		if string(got) != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("does not replace model_id", func(t *testing.T) {
+		data := []byte(`{"model_id":"123","model":"backend-model","content":[]}`)
+		got := rewriteModelInResponse(data, "opus", "opus")
+		if !strings.Contains(string(got), `"model_id":"123"`) {
+			t.Errorf("model_id was incorrectly modified: %s", got)
+		}
+		if !strings.Contains(string(got), `"model":"opus"`) {
+			t.Errorf("model was not replaced: %s", got)
+		}
+	})
+}

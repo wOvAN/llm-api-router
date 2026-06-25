@@ -303,17 +303,23 @@ func (r *modelRewriteWriter) Flush() {
 	}
 }
 
-// rewriteModelInResponse replaces "model":"oldModel" with "model":"newModel" in JSON data.
-// It handles flexible whitespace around the colon and both single/multi-line formatting.
-// For streaming responses (SSE), it rewrites each data: event fragment.
+// rewriteModelInResponse replaces model names in JSON response data.
+// When oldModel != newModel: replaces "model":"oldModel" with "model":"newModel".
+// When oldModel == newModel: replaces ANY "model":"X" with "model":"newModel"
+// (the backend may return its actual model name even when we sent a different one).
 func rewriteModelInResponse(data []byte, oldModel, newModel string) []byte {
-	if oldModel == "" || newModel == "" || oldModel == newModel {
+	if oldModel == "" || newModel == "" {
 		return data
+	}
+
+	if oldModel == newModel {
+		// Backend may return its real model name (e.g., "unsloth/Qwen3...")
+		// even when we sent "opus". Replace any model value with the client's model.
+		return replaceAnyModelValue(data, newModel)
 	}
 
 	result, n := replaceJSONModelValue(data, oldModel, newModel)
 	if n == 0 {
-		// Debug: log when no replacement was found in a chunk
 		if bytesIndex(data, []byte(`"model"`)) >= 0 {
 			log.Debugf("modelRewrite: found 'model' key but no match for %q in chunk: %s", oldModel, truncateBytes(data, 256))
 		}
@@ -321,6 +327,93 @@ func rewriteModelInResponse(data []byte, oldModel, newModel string) []byte {
 	}
 	log.Debugf("modelRewrite: replaced %d occurrence(s) of %q → %q", n, oldModel, newModel)
 	return result
+}
+
+// replaceAnyModelValue replaces any "model":"X" with "model":"newModel".
+// Used when oldModel == newModel but the backend returns its actual model name.
+func replaceAnyModelValue(data []byte, newModel string) []byte {
+	key := []byte(`"model"`)
+	var result []byte
+	start := 0
+	escaped := escapeJSONString(newModel)
+
+	for {
+		keyIdx := bytesIndex(data[start:], key)
+		if keyIdx < 0 {
+			break
+		}
+		absKeyIdx := start + keyIdx
+		endOfKey := absKeyIdx + len(key)
+
+		// Skip if it's a longer key like "model_id"
+		if endOfKey < len(data) && isJSONNameChar(data[endOfKey]) {
+			start = endOfKey
+			continue
+		}
+
+		// Find colon
+		colonIdx := bytesIndex(data[endOfKey:], []byte{':'})
+		if colonIdx < 0 {
+			break
+		}
+		valueStart := endOfKey + colonIdx + 1
+
+		// Skip whitespace
+		for valueStart < len(data) && isWhitespace(data[valueStart]) {
+			valueStart++
+		}
+		if valueStart >= len(data) || data[valueStart] != '"' {
+			start = valueStart
+			continue
+		}
+
+		// Find end of string value
+		strStart := valueStart + 1
+		strEnd := findJSONStringEnd(data, strStart)
+		if strEnd < 0 {
+			start = valueStart
+			continue
+		}
+		// strEnd points to the closing quote
+		currentValue := data[strStart:strEnd]
+
+		// Skip if already the target model
+		if bytesEqual(currentValue, escaped) {
+			start = strEnd + 1
+			continue
+		}
+
+		// Replace
+		if result == nil {
+			result = make([]byte, 0, len(data))
+		}
+		result = append(result, data[start:valueStart]...)
+		result = append(result, '"')
+		result = append(result, escaped...)
+		result = append(result, '"')
+		start = strEnd + 1
+	}
+
+	if result == nil {
+		return data
+	}
+	return append(result, data[start:]...)
+}
+
+// findJSONStringEnd finds the closing quote of a JSON string starting at pos.
+// Returns the index of the closing quote, or -1 if not found.
+func findJSONStringEnd(data []byte, pos int) int {
+	for pos < len(data) {
+		if data[pos] == '\\' {
+			pos += 2 // skip escaped character
+			continue
+		}
+		if data[pos] == '"' {
+			return pos
+		}
+		pos++
+	}
+	return -1
 }
 
 func truncateBytes(b []byte, max int) []byte {
