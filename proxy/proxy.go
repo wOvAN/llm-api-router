@@ -336,6 +336,7 @@ func replaceAnyModelValue(data []byte, newModel string) []byte {
 	var result []byte
 	start := 0
 	escaped := escapeJSONString(newModel)
+	replacements := 0
 
 	for {
 		keyIdx := bytesIndex(data[start:], key)
@@ -392,10 +393,14 @@ func replaceAnyModelValue(data []byte, newModel string) []byte {
 		result = append(result, escaped...)
 		result = append(result, '"')
 		start = strEnd + 1
+		replacements++
 	}
 
 	if result == nil {
 		return data
+	}
+	if replacements > 0 {
+		log.Debugf("modelRewrite(any): replaced %d model value(s) → %q", replacements, newModel)
 	}
 	return append(result, data[start:]...)
 }
