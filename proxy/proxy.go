@@ -425,6 +425,12 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	proxy.ServeHTTP(rw, proxyReq)
 
 	if proxyErr != nil {
+		// Detect client disconnect: when the client closes the connection,
+		// the HTTP server cancels req.Context(), which cancels the upstream
+		// request. In this case, no fallback is needed — the client is gone.
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, proxyErr
 	}
 

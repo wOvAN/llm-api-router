@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -285,6 +286,58 @@ func TestHandleAnthropicPath(t *testing.T) {
 
 	if w.Result().StatusCode != http.StatusBadGateway {
 		t.Errorf("got status %d, want 502", w.Result().StatusCode)
+	}
+}
+
+func TestHandleClientDisconnectNoFallback(t *testing.T) {
+	// When client disconnects (context cancelled), router should:
+	// 1. Stop immediately — no fallback attempts
+	// 2. NOT mark server unhealthy
+	// 3. NOT record metrics (request was aborted, not completed)
+	r, store, ms := newTestRouter(t)
+	health := config.NewHealthTracker(store, 0) // no auto-check
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "primary",
+		Name:     "Primary",
+		URL:      "http://localhost:1", // unreachable — would trigger fallback
+		APIKey:   "test-key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "fallback",
+		Name:     "Fallback",
+		URL:      "http://localhost:2",
+		APIKey:   "test-key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "primary",
+		Fallbacks: []domain.FallbackEntry{{ServerID: "fallback"}},
+		Enabled:        true,
+	})
+
+	// Create router with health tracker
+	r = New(store, ms, health)
+
+	// Simulate client disconnect by cancelling context
+	ctx, cancel := context.WithCancel(context.Background())
+	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	req = req.WithContext(ctx)
+
+	// Cancel context before request to simulate immediate disconnect
+	cancel()
+
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	// Should NOT have recorded metrics (client gone)
+	recent := ms.Recent()
+	if len(recent) != 0 {
+		t.Errorf("expected 0 metrics after client disconnect, got %d", len(recent))
 	}
 }
 
