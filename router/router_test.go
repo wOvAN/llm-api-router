@@ -294,7 +294,7 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 	// 1. Stop immediately — no fallback attempts
 	// 2. NOT mark server unhealthy
 	// 3. NOT record metrics (request was aborted, not completed)
-	r, store, ms := newTestRouter(t)
+	_, store, ms := newTestRouter(t)
 	health := config.NewHealthTracker(store, 0) // no auto-check
 
 	_ = store.AddServer(&domain.Server{
@@ -320,7 +320,7 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 	})
 
 	// Create router with health tracker
-	r = New(store, ms, health, nil)
+	r := New(store, ms, health, nil)
 
 	// Simulate client disconnect by cancelling context
 	ctx, cancel := context.WithCancel(context.Background())

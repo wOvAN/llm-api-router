@@ -79,7 +79,7 @@ func (h *headerInjector) WriteHeader(code int) {
 	}
 
 	// Inject headers BEFORE forwarding to client
-	headers := h.ResponseWriter.Header()
+	headers := h.Header()
 	ttfb := h.mw.firstWrite.Sub(h.mw.startTime).Milliseconds()
 	headers.Set("X-Router-TTFB-Ms", strconv.FormatInt(ttfb, 10))
 	headers.Set("X-Router-Status", strconv.Itoa(code))
@@ -516,15 +516,15 @@ func (d *loopDetector) sendLoopError() error {
 	errJSON := `{"choices":[{"finish_reason":"error","delta":{"content":"Generation stopped: model appears to be stuck in a loop."}}]}`
 	if d.written {
 		// Headers already sent — append error event to existing stream
-		_, err := d.ResponseWriter.Write([]byte("data: " + errJSON + "\n\n"))
+		_, err := d.Write([]byte("data: " + errJSON + "\n\n"))
 		return err
 	}
 	d.written = true
-	h := d.ResponseWriter.Header()
+	h := d.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
-	d.ResponseWriter.WriteHeader(http.StatusInternalServerError)
-	_, err := d.ResponseWriter.Write([]byte("data: " + errJSON + "\n\n"))
+	d.WriteHeader(http.StatusInternalServerError)
+	_, err := d.Write([]byte("data: " + errJSON + "\n\n"))
 	return err
 }
 
