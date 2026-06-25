@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -27,6 +28,69 @@ type ProxyMetrics struct {
 	PredictedMs      float64
 	PromptPerSec     float64
 	TokensPerSec     float64
+}
+
+// RouterHeaders are custom response headers injected by the router
+// to expose routing and performance metadata to the client.
+// Set these before calling StreamProxy.
+type RouterHeaders struct {
+	ServerID   string // Sets X-Router-Server
+	ServerName string // Sets X-Router-Server-Name
+}
+
+// SetRouterHeaders sets eager headers (server info) on the given ResponseWriter.
+// These are safe to set before the proxy runs since they don't depend on response data.
+func SetRouterHeaders(w http.ResponseWriter, h *RouterHeaders) {
+	if h == nil {
+		return
+	}
+	w.Header().Set("X-Router-Server", h.ServerID)
+	w.Header().Set("X-Router-Server-Name", h.ServerName)
+}
+
+// headerInjector wraps an http.ResponseWriter to inject X-Router-* headers
+// at WriteHeader time. At that moment, TTFB and status code are known,
+// but latency and token counts are not (streaming may still be in progress).
+//
+// Headers set at WriteHeader time: X-Router-TTFB-Ms, X-Router-Status.
+// Headers set eagerly (via SetRouterHeaders): X-Router-Server, X-Router-Server-Name.
+// Latency and token headers are NOT set in streaming responses — they are
+// available in /admin/api/metrics after the fact.
+type headerInjector struct {
+	http.ResponseWriter
+	mw      *metricsWriter
+	statusCode int
+	written  bool
+}
+
+func newHeaderInjector(w http.ResponseWriter, mw *metricsWriter) *headerInjector {
+	return &headerInjector{ResponseWriter: w, mw: mw}
+}
+
+func (h *headerInjector) WriteHeader(code int) {
+	h.statusCode = code
+	h.written = true
+
+	// Set firstWrite on metricsWriter so TTFB is captured.
+	// metricsWriter.WriteHeader will be called below (via chain) and will
+	// see firstWrite is already set, so it won't overwrite.
+	if h.mw.firstWrite.IsZero() {
+		h.mw.firstWrite = time.Now()
+	}
+
+	// Inject headers BEFORE forwarding to client
+	headers := h.ResponseWriter.Header()
+	ttfb := h.mw.firstWrite.Sub(h.mw.startTime).Milliseconds()
+	headers.Set("X-Router-TTFB-Ms", strconv.FormatInt(ttfb, 10))
+	headers.Set("X-Router-Status", strconv.Itoa(code))
+
+	h.ResponseWriter.WriteHeader(code)
+}
+
+func (h *headerInjector) Flush() {
+	if flusher, ok := h.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // metricsWriter wraps an http.ResponseWriter to track TTFB and response size.
@@ -380,7 +444,8 @@ func isWhitespace(b byte) bool {
 // If originalModel is non-empty and differs from targetModel, the "model" field
 // in the response is rewritten from targetModel back to originalModel so the
 // client sees its own model name.
-func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, targetModel, originalModel string) (*ProxyMetrics, error) {
+// If rh is non-nil, X-Router-* headers are injected into the response.
+func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, targetModel, originalModel string, rh *RouterHeaders) (*ProxyMetrics, error) {
 	rawURL := targetURL
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "https://" + rawURL
@@ -398,7 +463,13 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 	start := time.Now()
 	mw := newMetricsWriter(w, start)
-	rw := newModelRewriteWriter(mw, targetModel, originalModel)
+	var rw http.ResponseWriter = newModelRewriteWriter(mw, targetModel, originalModel)
+
+	// Wrap with headerInjector to inject X-Router-* headers at WriteHeader time.
+	if rh != nil {
+		SetRouterHeaders(rw, rh) // Set ServerID and ServerName eagerly
+		rw = newHeaderInjector(rw, mw)
+	}
 
 	// Capture network errors that ReverseProxy swallows.
 	// Note: HTTP 5xx from the backend are NOT caught here — they are forwarded to the client.
