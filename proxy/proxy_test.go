@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -456,11 +458,145 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 	})
 }
 
+func TestExtractSSEContents(t *testing.T) {
+	t.Run("OpenAI format", func(t *testing.T) {
+		data := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n")
+		contents := extractSSEContents(data)
+		if len(contents) != 2 {
+			t.Fatalf("got %d contents, want 2", len(contents))
+		}
+		if contents[0] != "hello" {
+			t.Errorf("contents[0] = %q, want %q", contents[0], "hello")
+		}
+		if contents[1] != " world" {
+			t.Errorf("contents[1] = %q, want %q", contents[1], " world")
+		}
+	})
+
+	t.Run("Anthropic format", func(t *testing.T) {
+		data := []byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n")
+		contents := extractSSEContents(data)
+		if len(contents) != 1 {
+			t.Fatalf("got %d contents, want 1", len(contents))
+		}
+		if contents[0] != "hello" {
+			t.Errorf("contents[0] = %q, want %q", contents[0], "hello")
+		}
+	})
+
+	t.Run("skips DONE", func(t *testing.T) {
+		data := []byte("data: [DONE]\n")
+		contents := extractSSEContents(data)
+		if len(contents) != 0 {
+			t.Errorf("got %d contents, want 0", len(contents))
+		}
+	})
+
+	t.Run("skips empty content", func(t *testing.T) {
+		data := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n")
+		contents := extractSSEContents(data)
+		if len(contents) != 0 {
+			t.Errorf("got %d contents, want 0", len(contents))
+		}
+	})
+
+	t.Run("skips non-content events", func(t *testing.T) {
+		data := []byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n")
+		contents := extractSSEContents(data)
+		if len(contents) != 0 {
+			t.Errorf("got %d contents, want 0", len(contents))
+		}
+	})
+}
+
+func TestLoopDetectorNoLoop(t *testing.T) {
+	// Different content should not trigger loop detection
+	recorder := &testResponseWriter{header: make(http.Header)}
+	ctx := context.Background()
+	ld := newLoopDetector(recorder, ctx)
+
+	// Send 25 different contents
+	for i := 0; i < 25; i++ {
+		sse := fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":\"word-%d\"}}]}\n", i)
+		_, err := ld.Write([]byte(sse))
+		if err != nil {
+			t.Fatalf("Write(%d): %v", i, err)
+		}
+	}
+
+	if ld.detected {
+		t.Error("loop should not be detected for different content")
+	}
+}
+
+func TestLoopDetectorDetectsLoop(t *testing.T) {
+	// Same content repeated should trigger loop detection
+	recorder := &testResponseWriter{header: make(http.Header)}
+	ctx := context.Background()
+	ld := newLoopDetector(recorder, ctx)
+
+	repeated := "data: {\"choices\":[{\"delta\":{\"content\":\" repeated \"}}]}\n"
+	for i := 0; i < loopDetectionWindow+5; i++ {
+		_, err := ld.Write([]byte(repeated))
+		if err != nil {
+			// Loop detected — this is expected
+			break
+		}
+	}
+
+	if !ld.detected {
+		t.Error("loop should be detected for repeated content")
+	}
+}
+
+func TestLoopDetectorMixedContent(t *testing.T) {
+	// Mix of different content should not trigger detection
+	recorder := &testResponseWriter{header: make(http.Header)}
+	ctx := context.Background()
+	ld := newLoopDetector(recorder, ctx)
+
+	// Send varied content
+	for i := 0; i < loopDetectionWindow + 10; i++ {
+		sse := fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":\"word %d \"}}]}\n", i)
+		_, err := ld.Write([]byte(sse))
+		if err != nil {
+			t.Fatalf("unexpected error at %d: %v", i, err)
+		}
+	}
+
+	if ld.detected {
+		t.Error("loop should not be detected for varied content")
+	}
+}
+
+func TestLoopDetectorAllRecentIdentical(t *testing.T) {
+	ld := &loopDetector{
+		recent:  make([]string, loopDetectionWindow),
+		ctx:     context.Background(),
+	}
+	ld.count = loopDetectionWindow
+	ld.index = loopDetectionWindow
+
+	// Fill with same content
+	for i := 0; i < loopDetectionWindow; i++ {
+		ld.recent[i] = "same"
+	}
+	if !ld.allRecentIdentical() {
+		t.Error("should detect identical content")
+	}
+
+	// Change one
+	ld.recent[5] = "different"
+	if ld.allRecentIdentical() {
+		t.Error("should not detect identical content when one differs")
+	}
+}
+
 func TestRewriteModelWriterChain(t *testing.T) {
 	// Verify that modelRewriteWriter wraps metricsWriter in the response chain:
 	// modelRewriteWriter → metricsWriter → client
 	// Both client and metrics buffer see the rewritten data.
-	recorder := &testResponseWriter{}
+	recorder := &testResponseWriter{header: make(http.Header)}
 	start := time.Now()
 	mw := newMetricsWriter(recorder, start)
 	rw := newModelRewriteWriter(mw, "target", "opus")
@@ -487,11 +623,12 @@ func TestRewriteModelWriterChain(t *testing.T) {
 
 type testResponseWriter struct {
 	buf          []byte
+	header       http.Header
 	headerCalled bool
 	statusCode   int
 }
 
-func (w *testResponseWriter) Header() http.Header { return make(http.Header) }
+func (w *testResponseWriter) Header() http.Header { return w.header }
 
 func (w *testResponseWriter) Write(b []byte) (int, error) {
 	w.buf = append(w.buf, b...)
