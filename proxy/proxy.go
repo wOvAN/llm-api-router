@@ -690,9 +690,19 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 	// Stream the response body, chunk by chunk, to detect mid-stream errors
 	buf := make([]byte, 32*1024)
+	firstChunk := true
 	for {
 		n, readErr := upstreamResp.Body.Read(buf)
 		if n > 0 {
+			// Log first chunk for debugging model rewrite
+			if firstChunk {
+				firstChunk = false
+				chunk := buf[:n]
+				if len(chunk) > 512 {
+					chunk = chunk[:512]
+				}
+				log.Debugf("upstream first chunk: %s", chunk)
+			}
 			_, writeErr := ld.Write(buf[:n])
 			if writeErr != nil {
 				// Error writing to client (e.g., client disconnect)
