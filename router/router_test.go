@@ -591,3 +591,79 @@ func TestFallbackLogsActualModel(t *testing.T) {
 	}
 	_ = fmt.Sprintf // suppress unused import
 }
+
+func TestMidStreamErrorNoFallback(t *testing.T) {
+	// When a mid-stream error occurs, the router should NOT try fallback
+	// because headers are already sent to the client. Instead, it should
+	// record whatever metrics it has and return.
+	
+	faultyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")) //nolint:errcheck
+		// Force disconnect
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				conn.Close() //nolint:errcheck
+			}
+		}
+	}))
+	defer faultyServer.Close()
+
+	// Fallback server that should NOT be called
+	fallbackCalled := false
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"backup","choices":[]}`)) //nolint:errcheck
+	}))
+	defer fallbackServer.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "faulty",
+		Name:     "Faulty",
+		URL:      faultyServer.URL,
+		APIKey:   "key1",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "backup",
+		Name:     "Backup",
+		URL:      fallbackServer.URL,
+		APIKey:   "key2",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"test-model"},
+		TargetModel:    "gpt-4",
+		ServerID:       "faulty",
+		Fallbacks: []domain.FallbackEntry{
+			{ServerID: "backup", TargetModel: "backup-model"},
+		},
+		Enabled: true,
+	})
+
+	body := strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	// The response should contain the partial data from the faulty server
+	// (or at least not be a 502, since mid-stream error sends data to client)
+	respBody, _ := io.ReadAll(w.Result().Body)
+	
+	// Fallback server should NOT have been called
+	if fallbackCalled {
+		t.Error("fallback server should NOT have been called on mid-stream error")
+	}
+	
+	// Response should either contain partial data or an error event
+	// (not a 502 "all backends failed" error)
+	if len(respBody) > 0 && strings.Contains(string(respBody), "all backends failed") {
+		t.Errorf("should not return 'all backends failed' for mid-stream error, got: %s", respBody)
+	}
+}
