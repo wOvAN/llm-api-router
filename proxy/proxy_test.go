@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -775,5 +776,90 @@ func TestSendMidStreamError(t *testing.T) {
 	}
 	if !strings.Contains(string(recorder.buf), "error") {
 		t.Errorf("expected 'error' in error event, got: %s", recorder.buf)
+	}
+}
+
+func TestStreamProxyAnthropicRewrite(t *testing.T) {
+	// Full integration test: Anthropic API response should have model rewritten
+	backendModel := "unsloth/Qwen3.6-27B-MTP-GGUF:BF16"
+	clientModel := "opus"
+
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify the request has the target model (rewritten by router before StreamProxy)
+		body, _ := io.ReadAll(r.Body)
+		var obj map[string]interface{}
+		_ = json.Unmarshal(body, &obj)
+		if model, ok := obj["model"].(string); ok && model != backendModel {
+			t.Errorf("backend received model %q, want %q", model, backendModel)
+		}
+
+		// Return Anthropic-style response
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"model":"%s","content":[],"usage":{"input_tokens":10,"output_tokens":20}}`, backendModel) //nolint:errcheck
+	}))
+	defer primaryServer.Close()
+
+	// Pre-rewrite the request body (router does this before calling StreamProxy)
+	rewrittenBody, err := RewriteModelInBody([]byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, clientModel)), backendModel)
+	if err != nil {
+		t.Fatalf("RewriteModelInBody: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(rewrittenBody)))
+	w := httptest.NewRecorder()
+
+	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil)
+	if err != nil {
+		t.Fatalf("StreamProxy: %v", err)
+	}
+	if pm.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", pm.StatusCode)
+	}
+
+	// Check the response has the client's model name
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if model, ok := resp["model"].(string); !ok || model != clientModel {
+		t.Errorf("response model = %q, want %q (client model)", model, clientModel)
+	}
+}
+
+func TestStreamProxyAnthropicStreamingRewrite(t *testing.T) {
+	// Full integration test: Anthropic streaming response should have model rewritten
+	backendModel := "unsloth/Qwen3.6-27B-MTP-GGUF:BF16"
+	clientModel := "opus"
+
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, `data: {"type":"message_start","message":{"model":"%s","id":"msg_123"}}\n\n`, backendModel) //nolint:errcheck
+		w.Write([]byte(`data: {"type":"content_block_delta","delta":{"text":"hello"}}\n\n`)) //nolint:errcheck
+		w.Write([]byte(`data: {"type":"message_stop"}\n\n`)) //nolint:errcheck
+	}))
+	defer primaryServer.Close()
+
+	// Pre-rewrite the request body (router does this before calling StreamProxy)
+	rewrittenBody, err := RewriteModelInBody([]byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, clientModel)), backendModel)
+	if err != nil {
+		t.Fatalf("RewriteModelInBody: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(rewrittenBody)))
+	w := httptest.NewRecorder()
+
+	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil)
+	if err != nil {
+		t.Fatalf("StreamProxy: %v", err)
+	}
+	if pm.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", pm.StatusCode)
+	}
+
+	respBody := w.Body.String()
+	// The response should contain the client model, not the backend model
+	if strings.Contains(respBody, backendModel) {
+		t.Errorf("response contains backend model %q, should be rewritten: %s", backendModel, respBody)
+	}
+	if !strings.Contains(respBody, clientModel) {
+		t.Errorf("response should contain client model %q: %s", clientModel, respBody)
 	}
 }
