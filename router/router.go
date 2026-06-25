@@ -122,7 +122,13 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 		apiType := apiTypeFromPath(req.URL.Path)
 		serverURL := srv.GetURLForAPIType(apiType)
-		pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, model)
+		// On fallback, preserve the actual model used (don't rewrite back to
+		// the original) so the client knows which model actually responded.
+		responseModel := model
+		if wasFallback {
+			responseModel = targetModel
+		}
+		pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, responseModel)
 		if err != nil {
 			lastErr = err
 			if r.health != nil {
