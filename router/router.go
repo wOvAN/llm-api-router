@@ -137,6 +137,12 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		if wasFallback {
 			responseModel = targetModel
 		}
+		// Log the response rewrite parameters
+		if responseModel != targetModel {
+			log.Debugf("[%s] response rewrite: %q → %q", req.URL.Path, targetModel, responseModel)
+		} else {
+			log.Debugf("[%s] response rewrite: skipped (target == response: %q)", req.URL.Path, targetModel)
+		}
 		rh := &proxy.RouterHeaders{
 			ServerID:   srv.ID,
 			ServerName: srv.Name,
