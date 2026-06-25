@@ -2,6 +2,8 @@ package router
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -318,4 +320,221 @@ func TestMetricsAreRecorded(t *testing.T) {
 	if recent[0].StatusCode != http.StatusBadGateway {
 		t.Errorf("metric status = %d, want %d", recent[0].StatusCode, http.StatusBadGateway)
 	}
+}
+
+func TestFallbackPreservesActualModel(t *testing.T) {
+	// When fallback occurs, the response should contain the actual model
+	// used by the fallback server, not the original client model.
+	// Primary server fails, fallback succeeds.
+
+	// Create fallback server that returns a known model name
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"fallback-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer fallbackServer.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "primary",
+		Name:     "Primary",
+		URL:      "http://localhost:1", // unreachable
+		APIKey:   "test-key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "fallback",
+		Name:     "Fallback",
+		URL:      fallbackServer.URL,
+		APIKey:   "test-key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"opus"},
+		TargetModel:    "gpt-4",
+		ServerID:       "primary",
+		Fallbacks:      []domain.FallbackEntry{{ServerID: "fallback", TargetModel: "fallback-model"}},
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"opus","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200", w.Result().StatusCode)
+	}
+
+	respBody, _ := io.ReadAll(w.Result().Body)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(respBody, &resp)
+
+	// Response should contain the actual fallback model, not "opus"
+	model, ok := resp["model"].(string)
+	if !ok {
+		t.Fatalf("no 'model' field in response: %s", respBody)
+	}
+	if model != "fallback-model" {
+		t.Errorf("response model = %q, want %q (actual fallback model)", model, "fallback-model")
+	}
+}
+
+func TestPrimaryAttemptRewritesModel(t *testing.T) {
+	// When primary succeeds, response should contain the original client model
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer primaryServer.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "primary",
+		Name:     "Primary",
+		URL:      primaryServer.URL,
+		APIKey:   "test-key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"opus"},
+		TargetModel:    "gpt-4",
+		ServerID:       "primary",
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"opus","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200", w.Result().StatusCode)
+	}
+
+	respBody, _ := io.ReadAll(w.Result().Body)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(respBody, &resp)
+
+	model, ok := resp["model"].(string)
+	if !ok {
+		t.Fatalf("no 'model' field in response: %s", respBody)
+	}
+	// Primary attempt: response should contain original client model
+	if model != "opus" {
+		t.Errorf("response model = %q, want %q (original client model)", model, "opus")
+	}
+}
+
+func TestNoRewriteWhenModelsMatch(t *testing.T) {
+	// When targetModel == originalModel, no rewriting occurs
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer primaryServer.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "primary",
+		Name:     "Primary",
+		URL:      primaryServer.URL,
+		APIKey:   "test-key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4", // Same as incoming
+		ServerID:       "primary",
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200", w.Result().StatusCode)
+	}
+
+	respBody, _ := io.ReadAll(w.Result().Body)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(respBody, &resp)
+
+	model, ok := resp["model"].(string)
+	if !ok {
+		t.Fatalf("no 'model' field in response: %s", respBody)
+	}
+	// Models match, so response should contain gpt-4
+	if model != "gpt-4" {
+		t.Errorf("response model = %q, want %q", model, "gpt-4")
+	}
+}
+
+func TestFallbackLogsActualModel(t *testing.T) {
+	// Verify that when fallback occurs, the log message includes the actual model
+	// This is a structural test to ensure wasFallback is set correctly in metrics
+	r, store, ms := newTestRouter(t)
+
+	// Create fallback server that succeeds
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"haiku","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":10}}`)) //nolint:errcheck
+	}))
+	defer fallbackServer.Close()
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "primary",
+		Name:     "Primary",
+		URL:      "http://localhost:1", // unreachable
+		APIKey:   "test-key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "fallback",
+		Name:     "Fallback",
+		URL:      fallbackServer.URL,
+		APIKey:   "test-key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"opus"},
+		TargetModel:    "gpt-4",
+		ServerID:       "primary",
+		Fallbacks:      []domain.FallbackEntry{{ServerID: "fallback", TargetModel: "haiku"}},
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"opus","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200", w.Result().StatusCode)
+	}
+
+	recent := ms.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("expected 1 metric, got %d", len(recent))
+	}
+	m := recent[0]
+	if !m.WasFallback {
+		t.Error("WasFallback should be true")
+	}
+	if m.TargetModel != "haiku" {
+		t.Errorf("TargetModel = %q, want %q", m.TargetModel, "haiku")
+	}
+	if m.ServerID != "fallback" {
+		t.Errorf("ServerID = %q, want %q", m.ServerID, "fallback")
+	}
+	// Model in metric should be the original client model
+	if m.Model != "opus" {
+		t.Errorf("Model = %q, want %q", m.Model, "opus")
+	}
+	_ = fmt.Sprintf // suppress unused import
 }
