@@ -458,6 +458,60 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 	})
 }
 
+func TestHeaderInjector(t *testing.T) {
+	recorder := &testResponseWriter{header: make(http.Header)}
+	start := time.Now()
+	mw := newMetricsWriter(recorder, start)
+	hj := newHeaderInjector(recorder, mw)
+
+	// Simulate WriteHeader (sets TTFB and status)
+	hj.WriteHeader(201)
+
+	// Simulate Write (triggers TTFB in metricsWriter)
+	time.Sleep(10 * time.Millisecond)
+	mw.Write([]byte("hello")) //nolint:errcheck
+
+	// Check headers were set
+	if recorder.statusCode != 201 {
+		t.Errorf("statusCode = %d, want 201", recorder.statusCode)
+	}
+
+	status := recorder.header.Get("X-Router-Status")
+	if status != "201" {
+		t.Errorf("X-Router-Status = %q, want %q", status, "201")
+	}
+
+	ttfb := recorder.header.Get("X-Router-TTFB-Ms")
+	if ttfb == "" {
+		t.Error("X-Router-TTFB-Ms should be set")
+	}
+	// TTFB should be 0 since WriteHeader was called before Write set firstWrite
+}
+
+func TestSetRouterHeaders(t *testing.T) {
+	recorder := &testResponseWriter{header: make(http.Header)}
+	rh := &RouterHeaders{
+		ServerID:   "srv-1",
+		ServerName: "Primary Backend",
+	}
+	SetRouterHeaders(recorder, rh)
+
+	if recorder.header.Get("X-Router-Server") != "srv-1" {
+		t.Errorf("X-Router-Server = %q, want %q", recorder.header.Get("X-Router-Server"), "srv-1")
+	}
+	if recorder.header.Get("X-Router-Server-Name") != "Primary Backend" {
+		t.Errorf("X-Router-Server-Name = %q, want %q", recorder.header.Get("X-Router-Server-Name"), "Primary Backend")
+	}
+}
+
+func TestSetRouterHeadersNil(t *testing.T) {
+	recorder := &testResponseWriter{header: make(http.Header)}
+	SetRouterHeaders(recorder, nil) // Should not panic
+	if len(recorder.header) > 0 {
+		t.Error("no headers should be set for nil RouterHeaders")
+	}
+}
+
 func TestExtractSSEContents(t *testing.T) {
 	t.Run("OpenAI format", func(t *testing.T) {
 		data := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n")

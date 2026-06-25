@@ -320,7 +320,7 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 	})
 
 	// Create router with health tracker
-	r = New(store, ms, health)
+	r = New(store, ms, health, nil)
 
 	// Simulate client disconnect by cancelling context
 	ctx, cancel := context.WithCancel(context.Background())

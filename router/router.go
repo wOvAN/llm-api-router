@@ -137,7 +137,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		if wasFallback {
 			responseModel = targetModel
 		}
-		pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, responseModel)
+		rh := &proxy.RouterHeaders{
+			ServerID:   srv.ID,
+			ServerName: srv.Name,
+		}
+		pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, responseModel, rh)
 		if err != nil {
 			// Client disconnect: stop immediately, no fallback needed
 			if req.Context().Err() != nil {
