@@ -124,6 +124,13 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		serverURL := srv.GetURLForAPIType(apiType)
 		pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, model)
 		if err != nil {
+			// Client disconnect: stop immediately, no fallback needed
+			if req.Context().Err() != nil {
+				log.Warnf("[%s] model=%q — client disconnected during proxy (attempt %d/%d)",
+					req.URL.Path, model, i+1, len(attempts))
+				return
+			}
+			// Network error: mark unhealthy and try fallback
 			lastErr = err
 			if r.health != nil {
 				r.health.MarkUnhealthy(srv.ID)
