@@ -208,10 +208,180 @@ func (r *responseRecorder) Write(data []byte) (int, error) {
 	return r.body.Write(data)
 }
 
+// modelRewriteWriter wraps an http.ResponseWriter to replace the target model name
+// with the original model name in JSON responses (both streaming and non-streaming).
+type modelRewriteWriter struct {
+	http.ResponseWriter
+	mw       *metricsWriter
+	oldModel string
+	newModel string
+}
+
+func newModelRewriteWriter(w http.ResponseWriter, mw *metricsWriter, oldModel, newModel string) *modelRewriteWriter {
+	return &modelRewriteWriter{
+		ResponseWriter: w,
+		mw:             mw,
+		oldModel:       oldModel,
+		newModel:       newModel,
+	}
+}
+
+func (r *modelRewriteWriter) Write(data []byte) (int, error) {
+	rewritten := rewriteModelInResponse(data, r.oldModel, r.newModel)
+	// Always pass original data to metricsWriter for correct usage extraction
+	r.mw.Write(data) //nolint:errcheck // buffering for usage extraction
+	return r.ResponseWriter.Write(rewritten)
+}
+
+func (r *modelRewriteWriter) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// rewriteModelInResponse replaces "model":"oldModel" with "model":"newModel" in JSON data.
+// It handles flexible whitespace around the colon and both single/multi-line formatting.
+// For streaming responses (SSE), it rewrites each data: event fragment.
+func rewriteModelInResponse(data []byte, oldModel, newModel string) []byte {
+	if oldModel == "" || newModel == "" || oldModel == newModel {
+		return data
+	}
+
+	result, n := replaceJSONModelValue(data, oldModel, newModel)
+	if n == 0 {
+		return data
+	}
+	return result
+}
+
+// replaceJSONModelValue finds and replaces "model" values matching oldModel.
+func replaceJSONModelValue(data []byte, oldModel, newModel string) ([]byte, int) {
+	key := []byte(`"model"`)
+	replacements := 0
+	var result []byte
+	start := 0
+
+	for {
+		keyIdx := bytesIndex(data[start:], key)
+		if keyIdx < 0 {
+			break
+		}
+		absKeyIdx := start + keyIdx
+		endOfKey := absKeyIdx + len(key)
+
+		// Verify it's the exact key
+		if endOfKey < len(data) && isJSONNameChar(data[endOfKey]) {
+			start = endOfKey
+			continue
+		}
+
+		// Find colon
+		colonIdx := bytesIndex(data[endOfKey:], []byte{':'})
+		if colonIdx < 0 {
+			break
+		}
+		valueStart := endOfKey + colonIdx + 1
+
+		// Skip whitespace after colon
+		for valueStart < len(data) && isWhitespace(data[valueStart]) {
+			valueStart++
+		}
+		if valueStart >= len(data) || data[valueStart] != '"' {
+			start = valueStart
+			continue
+		}
+
+		// Check if value matches oldModel
+		escOld := escapeJSONString(oldModel)
+		pattern := append([]byte{'"'}, escOld...)
+		pattern = append(pattern, '"')
+
+		if valueStart+len(pattern) > len(data) {
+			break
+		}
+		if !bytesEqual(data[valueStart:valueStart+len(pattern)], pattern) {
+			start = valueStart + 1
+			continue
+		}
+
+		// Replace
+		if result == nil {
+			result = make([]byte, 0, len(data))
+		}
+		result = append(result, data[start:valueStart]...)
+		result = append(result, '"')
+		result = append(result, escapeJSONString(newModel)...)
+		result = append(result, '"')
+		start = valueStart + len(pattern)
+		replacements++
+	}
+
+	if replacements == 0 {
+		return data, 0
+	}
+	return append(result, data[start:]...), replacements
+}
+
+// escapeJSONString escapes a string for use in JSON.
+func escapeJSONString(s string) []byte {
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '"':
+			b = append(b, '\\', '"')
+		case '\\':
+			b = append(b, '\\', '\\')
+		case '\n':
+			b = append(b, '\\', 'n')
+		case '\r':
+			b = append(b, '\\', 'r')
+		case '\t':
+			b = append(b, '\\', 't')
+		default:
+			b = append(b, c)
+		}
+	}
+	return b
+}
+
+func bytesIndex(data, sub []byte) int {
+	for i := 0; i <= len(data)-len(sub); i++ {
+		if bytesEqual(data[i:i+len(sub)], sub) {
+			return i
+		}
+	}
+	return -1
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// isJSONNameChar reports whether b is a valid JSON object key character.
+func isJSONNameChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
+}
+
+// isWhitespace reports whether b is a JSON whitespace character.
+func isWhitespace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
 // StreamProxy forwards the request and streams the response directly to the writer.
 // Returns an error on network failure (before any headers are written to w).
 // HTTP 5xx responses are NOT treated as errors — they are forwarded to the client.
-func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter) (*ProxyMetrics, error) {
+// If originalModel is non-empty, the "model" field in the response is rewritten
+// from the target model back to originalModel so the client sees its own model name.
+func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, originalModel string) (*ProxyMetrics, error) {
 	rawURL := targetURL
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "https://" + rawURL
@@ -229,6 +399,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 	start := time.Now()
 	mw := newMetricsWriter(w, start)
+	rw := newModelRewriteWriter(w, mw, "", originalModel)
 
 	// Capture network errors that ReverseProxy swallows.
 	// Note: HTTP 5xx from the backend are NOT caught here — they are forwarded to the client.
@@ -252,7 +423,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	}
 
 	proxyReq := req.Clone(ctx)
-	proxy.ServeHTTP(mw, proxyReq)
+	proxy.ServeHTTP(rw, proxyReq)
 
 	if proxyErr != nil {
 		return nil, proxyErr

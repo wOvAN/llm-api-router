@@ -122,7 +122,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 		apiType := apiTypeFromPath(req.URL.Path)
 		serverURL := srv.GetURLForAPIType(apiType)
-		pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w)
+		pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, model)
 		if err != nil {
 			lastErr = err
 			if r.health != nil {

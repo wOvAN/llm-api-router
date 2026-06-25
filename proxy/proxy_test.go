@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -344,4 +347,157 @@ func TestNewMetricsWriter(t *testing.T) {
 	if mw.bodyBuffer == nil {
 		t.Error("bodyBuffer should not be nil")
 	}
+}
+
+func TestRewriteModelInResponse(t *testing.T) {
+	t.Run("replaces model in JSON response", func(t *testing.T) {
+		data := []byte(`{"model":"target-model","choices":[],"usage":{}}`)
+		got := rewriteModelInResponse(data, "target-model", "opus")
+		want := `{"model":"opus","choices":[],"usage":{}}`
+		if string(got) != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("replaces model with whitespace", func(t *testing.T) {
+		data := []byte(`{"model": "target-model", "choices": []}`)
+		got := rewriteModelInResponse(data, "target-model", "opus")
+		want := `{"model": "opus", "choices": []}`
+		if string(got) != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("replaces model in SSE event", func(t *testing.T) {
+		data := []byte(`data: {"type":"message_start","message":{"model":"target-model","id":"msg_123"}}`)
+		got := rewriteModelInResponse(data, "target-model", "opus")
+		want := `data: {"type":"message_start","message":{"model":"opus","id":"msg_123"}}`
+		if string(got) != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("replaces multiple model fields", func(t *testing.T) {
+		data := []byte(`data: {"model":"target"}
+data: {"model":"target","usage":{"prompt_tokens":5}}
+`)
+		got := rewriteModelInResponse(data, "target", "opus")
+		if !strings.Contains(string(got), `"model":"opus"`) {
+			t.Errorf("missing replacement in: %s", got)
+		}
+		count := strings.Count(string(got), `"model":"opus"`)
+		if count != 2 {
+			t.Errorf("expected 2 replacements, got %d: %s", count, got)
+		}
+	})
+
+	t.Run("does not replace non-matching model", func(t *testing.T) {
+		data := []byte(`{"model":"other-model","choices":[]}`)
+		got := rewriteModelInResponse(data, "target-model", "opus")
+		if string(got) != string(data) {
+			t.Errorf("got %s, want unchanged %s", got, data)
+		}
+	})
+
+	t.Run("empty oldModel skips rewriting", func(t *testing.T) {
+		data := []byte(`{"model":"target","choices":[]}`)
+		got := rewriteModelInResponse(data, "", "opus")
+		if string(got) != string(data) {
+			t.Errorf("got %s, want unchanged %s", got, data)
+		}
+	})
+
+	t.Run("same model skips rewriting", func(t *testing.T) {
+		data := []byte(`{"model":"same","choices":[]}`)
+		got := rewriteModelInResponse(data, "same", "same")
+		if string(got) != string(data) {
+			t.Errorf("got %s, want unchanged %s", got, data)
+		}
+	})
+
+	t.Run("does not replace model-like key", func(t *testing.T) {
+		data := []byte(`{"model_id":"123","model":"target","choices":[]}`)
+		got := rewriteModelInResponse(data, "target", "opus")
+		// model_id should not be affected
+		if !strings.Contains(string(got), `"model_id":"123"`) {
+			t.Errorf("model_id was incorrectly modified: %s", got)
+		}
+		if !strings.Contains(string(got), `"model":"opus"`) {
+			t.Errorf("model was not replaced: %s", got)
+		}
+	})
+
+	t.Run("preserves non-model fields", func(t *testing.T) {
+		data := []byte(`{"model":"target","choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":10,"completion_tokens":20}}`)
+		got := rewriteModelInResponse(data, "target", "opus")
+
+		var obj map[string]interface{}
+		if err := json.Unmarshal(got, &obj); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		if obj["model"] != "opus" {
+			t.Errorf("model = %v, want opus", obj["model"])
+		}
+		if obj["choices"] == nil {
+			t.Error("choices should be preserved")
+		}
+		if obj["usage"] == nil {
+			t.Error("usage should be preserved")
+		}
+	})
+
+	t.Run("model name with slashes", func(t *testing.T) {
+		data := []byte(`{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","choices":[]}`)
+		got := rewriteModelInResponse(data, "unsloth/Qwen3.6-27B-MTP-GGUF:BF16", "opus")
+		want := `{"model":"opus","choices":[]}`
+		if string(got) != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+}
+
+func TestRewriteModelWriterBuffersOriginal(t *testing.T) {
+	// Verify that metricsWriter receives original data (not rewritten)
+	recorder := &testResponseWriter{}
+	start := time.Now()
+	mw := newMetricsWriter(recorder, start)
+	rw := newModelRewriteWriter(recorder, mw, "target", "opus")
+
+	data := []byte(`{"model":"target","choices":[]}`)
+	n, err := rw.Write(data)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// n is bytes written to client (rewritten data), which is shorter
+	if n == 0 {
+		t.Error("Write returned 0 bytes")
+	}
+
+	// Client should see rewritten data
+	if !strings.Contains(string(recorder.buf), `"model":"opus"`) {
+		t.Errorf("client saw %s, want rewritten model", recorder.buf)
+	}
+
+	// metricsWriter buffer should have original data
+	if !bytes.Contains(mw.bodyBuffer.Bytes(), []byte(`"model":"target"`)) {
+		t.Errorf("metrics buffer has %s, want original model", mw.bodyBuffer.Bytes())
+	}
+}
+
+type testResponseWriter struct {
+	buf          []byte
+	headerCalled bool
+	statusCode   int
+}
+
+func (w *testResponseWriter) Header() http.Header { return make(http.Header) }
+
+func (w *testResponseWriter) Write(b []byte) (int, error) {
+	w.buf = append(w.buf, b...)
+	return len(b), nil
+}
+
+func (w *testResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.headerCalled = true
 }
