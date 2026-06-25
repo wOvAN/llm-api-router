@@ -29,22 +29,33 @@ func (s *Store) Add(m domain.RequestMetric) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	m.PrefillTimeMs = m.TTFBMs
-	m.DecodeTimeMs = m.LatencyMs - m.TTFBMs
-	if m.DecodeTimeMs < 0 {
-		m.DecodeTimeMs = 0
+	// Use native llama-server timings when available; fall back to wall-clock.
+	if m.NativePromptMs > 0 {
+		m.PrefillTimeMs = int64(m.NativePromptMs)
+	} else {
+		m.PrefillTimeMs = m.TTFBMs
 	}
 
-	if m.PrefillTimeMs > 0 && m.PromptTokens > 0 {
+	if m.NativePredictedMs > 0 {
+		m.DecodeTimeMs = int64(m.NativePredictedMs)
+	} else {
+		m.DecodeTimeMs = m.LatencyMs - m.TTFBMs
+		if m.DecodeTimeMs < 0 {
+			m.DecodeTimeMs = 0
+		}
+	}
+
+	// Use native tok/s when available; fall back to wall-clock calculation.
+	if m.NativePromptTokPerSec > 0 {
+		m.PrefillTokPerSec = m.NativePromptTokPerSec
+	} else if m.PrefillTimeMs > 0 && m.PromptTokens > 0 {
 		m.PrefillTokPerSec = float64(m.PromptTokens) / (float64(m.PrefillTimeMs) / 1000.0)
 	}
 
-	decodeTokens := m.CompletionTokens - 1
-	if decodeTokens < 0 {
-		decodeTokens = 0
-	}
-	if m.DecodeTimeMs > 0 && decodeTokens > 0 {
-		m.DecodeTokPerSec = float64(decodeTokens) / (float64(m.DecodeTimeMs) / 1000.0)
+	if m.NativeDecodeTokPerSec > 0 {
+		m.DecodeTokPerSec = m.NativeDecodeTokPerSec
+	} else if m.DecodeTimeMs > 0 && m.CompletionTokens > 0 {
+		m.DecodeTokPerSec = float64(m.CompletionTokens) / (float64(m.DecodeTimeMs) / 1000.0)
 	}
 
 	if len(s.recentRequests) >= s.maxRecent {
