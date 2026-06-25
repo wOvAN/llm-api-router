@@ -908,3 +908,26 @@ func TestRewriteAnyModelValue(t *testing.T) {
 		}
 	})
 }
+
+func TestRewriteAnyModelValueOpenAI(t *testing.T) {
+	// Same fix applies to OpenAI format — backend may return its actual model
+
+	t.Run("replaces in OpenAI JSON response", func(t *testing.T) {
+		data := []byte(`{"id":"chatcmpl-123","model":"llama-3.1-70b","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20}}`)
+		got := rewriteModelInResponse(data, "gpt-4", "gpt-4")
+		if !strings.Contains(string(got), `"model":"gpt-4"`) {
+			t.Errorf("model was not replaced: %s", got)
+		}
+		if strings.Contains(string(got), "llama-3.1-70b") {
+			t.Errorf("backend model leaked: %s", got)
+		}
+	})
+
+	t.Run("replaces in OpenAI SSE chunk", func(t *testing.T) {
+		data := []byte(`data: {"id":"chatcmpl-123","model":"llama-3.1-70b","choices":[{"delta":{"content":"hello"}}]}`)
+		got := rewriteModelInResponse(data, "gpt-4", "gpt-4")
+		if !strings.Contains(string(got), `"model":"gpt-4"`) {
+			t.Errorf("model was not replaced: %s", got)
+		}
+	})
+}
