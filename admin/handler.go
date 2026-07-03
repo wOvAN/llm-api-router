@@ -206,13 +206,13 @@ func (h *Handler) getServerModels(w http.ResponseWriter, req *http.Request, id s
 	}
 
 	// Determine which models are "loaded" by checking recent successful requests.
-	// A model is considered loaded if it was used as target_model in a recent
-	// successful (2xx) request to this server.
+	// A model is considered loaded if the backend returned it as the actual model
+	// name in a recent successful (2xx) response.
 	recent := h.metrics.Recent()
 	loadedSet := make(map[string]bool)
 	for _, r := range recent {
-		if r.ServerID == id && r.StatusCode >= 200 && r.StatusCode < 300 {
-			loadedSet[r.TargetModel] = true
+		if r.ServerID == id && r.StatusCode >= 200 && r.StatusCode < 300 && r.BackendModel != "" {
+			loadedSet[r.BackendModel] = true
 		}
 	}
 

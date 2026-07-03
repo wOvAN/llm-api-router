@@ -30,6 +30,7 @@ type ProxyMetrics struct {
 	PredictedMs      float64
 	PromptPerSec     float64
 	TokensPerSec     float64
+	BackendModel     string // model name returned by the backend (before rewriting)
 }
 
 // RouterHeaders are custom response headers injected by the router
@@ -551,11 +552,12 @@ type loopDetector struct {
 	http.ResponseWriter
 	ctx context.Context
 	// Ring buffer of recent SSE text contents
-	recent  []string
-	index   int
-	count   int      // number of contents seen
-	detected bool    // loop already detected
-	written bool    // WriteHeader already called
+	recent        []string
+	index         int
+	count         int     // number of contents seen
+	detected      bool    // loop already detected
+	written       bool    // WriteHeader already called
+	capturedModel string  // backend model name extracted from raw response
 }
 
 func newLoopDetector(w http.ResponseWriter, ctx context.Context) *loopDetector {
@@ -569,6 +571,13 @@ func newLoopDetector(w http.ResponseWriter, ctx context.Context) *loopDetector {
 func (d *loopDetector) Write(data []byte) (int, error) {
 	if d.detected {
 		return 0, fmt.Errorf("stream loop detected: backend is repeating content")
+	}
+
+	// Capture backend model name from raw response (before rewriting)
+	if d.capturedModel == "" {
+		if m := extractModelFromData(data); m != "" {
+			d.capturedModel = m
+		}
 	}
 
 	// Extract text content from SSE events
@@ -676,6 +685,55 @@ func extractSSEContents(data []byte) []string {
 	}
 
 	return contents
+}
+
+// extractModelFromData extracts the "model" field from raw JSON or SSE data.
+// It handles both streaming (data: {...}) and non-streaming ({...}) formats.
+// Returns the first model name found, or empty string if not found.
+func extractModelFromData(data []byte) string {
+	// Try to extract from SSE data: lines
+	prefix := []byte("data:")
+	for offset := 0; offset < len(data); {
+		nl := bytes.IndexByte(data[offset:], '\n')
+		var line []byte
+		if nl == -1 {
+			line = data[offset:]
+			offset = len(data)
+		} else {
+			line = data[offset : offset+nl]
+			offset += nl + 1
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || !bytes.HasPrefix(line, prefix) {
+			continue
+		}
+		jsonData := bytes.TrimSpace(line[len(prefix):])
+		if len(jsonData) == 0 {
+			continue
+		}
+		if m := extractModelFromJSON(jsonData); m != "" {
+			return m
+		}
+	}
+	// Try as plain JSON (non-streaming or data doesn't come in SSE format)
+	return extractModelFromJSON(data)
+}
+
+// extractModelFromJSON extracts the "model" field from a JSON object.
+func extractModelFromJSON(data []byte) string {
+	var obj map[string]interface{}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return ""
+	}
+	if m, ok := obj["model"].(string); ok && m != "" {
+		return m
+	}
+	// OpenAI streaming: model appears in the top-level object
+	// Anthropic: model appears in the top-level object or in a nested "model" field
+	if model, ok := obj["model"].(string); ok {
+		return model
+	}
+	return ""
 }
 
 // MidStreamError is returned when the backend fails after headers have already
@@ -795,9 +853,11 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 				// Error writing to client (e.g., client disconnect)
 				if ctx.Err() != nil {
 					m := mw.metrics()
+					m.BackendModel = ld.capturedModel
 					return &m, ctx.Err()
 				}
 				m := mw.metrics()
+				m.BackendModel = ld.capturedModel
 				return &m, fmt.Errorf("write to client: %w", writeErr)
 			}
 		}
@@ -809,11 +869,13 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 			// Mid-stream error from upstream
 			if ctx.Err() != nil {
 				m := mw.metrics()
+				m.BackendModel = ld.capturedModel
 				return &m, ctx.Err()
 			}
 			// Send error event to the client
 			sendMidStreamError(ld, readErr)
 			m := mw.metrics()
+			m.BackendModel = ld.capturedModel
 			return &m, &MidStreamError{Err: readErr, Written: m.ResponseSize}
 		}
 	}
@@ -821,10 +883,12 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// Check if loop was detected (proxy may have returned after context cancellation)
 	if ld.detected {
 		m := mw.metrics()
+		m.BackendModel = ld.capturedModel
 		return &m, fmt.Errorf("stream loop detected: backend is repeating content")
 	}
 
 	m := mw.metrics()
+	m.BackendModel = ld.capturedModel
 	return &m, nil
 }
 
