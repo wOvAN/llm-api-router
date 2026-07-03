@@ -270,8 +270,9 @@ func (r *responseRecorder) Write(data []byte) (int, error) {
 // for the actual data sent to the client.
 type modelRewriteWriter struct {
 	http.ResponseWriter
-	oldModel string
-	newModel string
+	oldModel       string
+	newModel       string
+	capturedModel  string // backend model name captured before rewriting
 }
 
 func newModelRewriteWriter(mw *metricsWriter, oldModel, newModel string) *modelRewriteWriter {
@@ -283,7 +284,10 @@ func newModelRewriteWriter(mw *metricsWriter, oldModel, newModel string) *modelR
 }
 
 func (r *modelRewriteWriter) Write(data []byte) (int, error) {
-	rewritten := rewriteModelInResponse(data, r.oldModel, r.newModel)
+	rewritten, captured := rewriteModelInResponse(data, r.oldModel, r.newModel)
+	if r.capturedModel == "" && captured != "" {
+		r.capturedModel = captured
+	}
 	return r.ResponseWriter.Write(rewritten)
 }
 
@@ -297,15 +301,17 @@ func (r *modelRewriteWriter) Flush() {
 // When oldModel != newModel: replaces "model":"oldModel" with "model":"newModel".
 // When oldModel == newModel: replaces ANY "model":"X" with "model":"newModel"
 // (the backend may return its actual model name even when we sent a different one).
-func rewriteModelInResponse(data []byte, oldModel, newModel string) []byte {
+// Returns the rewritten data and the captured backend model name (if any replacement was made).
+func rewriteModelInResponse(data []byte, oldModel, newModel string) ([]byte, string) {
 	if oldModel == "" || newModel == "" {
-		return data
+		return data, ""
 	}
 
 	if oldModel == newModel {
 		// Backend may return its real model name (e.g., "unsloth/Qwen3...")
 		// even when we sent "opus". Replace any model value with the client's model.
-		return replaceAnyModelValue(data, newModel)
+		result, captured := replaceAnyModelValue(data, newModel)
+		return result, captured
 	}
 
 	result, n := replaceJSONModelValue(data, oldModel, newModel)
@@ -313,17 +319,19 @@ func rewriteModelInResponse(data []byte, oldModel, newModel string) []byte {
 		if bytesIndex(data, []byte(`"model"`)) >= 0 {
 			log.Debugf("modelRewrite: found 'model' key but no match for %q in chunk: %s", oldModel, truncateBytes(data, 256))
 		}
-		return data
+		return data, ""
 	}
 	log.Debugf("modelRewrite: replaced %d occurrence(s) of %q → %q", n, oldModel, newModel)
-	return result
+	return result, ""
 }
 
 // replaceAnyModelValue replaces any "model":"X" with "model":"newModel".
 // Used when oldModel == newModel but the backend returns its actual model name.
-func replaceAnyModelValue(data []byte, newModel string) []byte {
+// Returns the rewritten data and the first captured backend model name.
+func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 	key := []byte(`"model"`)
 	var result []byte
+	var captured string
 	start := 0
 	escaped := escapeJSONString(newModel)
 	replacements := 0
@@ -374,6 +382,11 @@ func replaceAnyModelValue(data []byte, newModel string) []byte {
 			continue
 		}
 
+		// Capture the first backend model name
+		if captured == "" {
+			captured = string(currentValue)
+		}
+
 		// Replace
 		if result == nil {
 			result = make([]byte, 0, len(data))
@@ -387,12 +400,12 @@ func replaceAnyModelValue(data []byte, newModel string) []byte {
 	}
 
 	if result == nil {
-		return data
+		return data, ""
 	}
 	if replacements > 0 {
 		log.Debugf("modelRewrite(any): replaced %d model value(s) → %q", replacements, newModel)
 	}
-	return append(result, data[start:]...)
+	return append(result, data[start:]...), captured
 }
 
 // findJSONStringEnd finds the closing quote of a JSON string starting at pos.
@@ -781,7 +794,8 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 	start := time.Now()
 	mw := newMetricsWriter(w, start)
-	var rw http.ResponseWriter = newModelRewriteWriter(mw, targetModel, originalModel)
+	mrw := newModelRewriteWriter(mw, targetModel, originalModel)
+	var rw http.ResponseWriter = mrw
 
 	// Wrap with headerInjector to inject X-Router-* headers at WriteHeader time.
 	if rh != nil {
@@ -853,11 +867,11 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 				// Error writing to client (e.g., client disconnect)
 				if ctx.Err() != nil {
 					m := mw.metrics()
-					m.BackendModel = ld.capturedModel
+					m.BackendModel = mrw.capturedModel
 					return &m, ctx.Err()
 				}
 				m := mw.metrics()
-				m.BackendModel = ld.capturedModel
+				m.BackendModel = mrw.capturedModel
 				return &m, fmt.Errorf("write to client: %w", writeErr)
 			}
 		}
@@ -869,13 +883,13 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 			// Mid-stream error from upstream
 			if ctx.Err() != nil {
 				m := mw.metrics()
-				m.BackendModel = ld.capturedModel
+				m.BackendModel = mrw.capturedModel
 				return &m, ctx.Err()
 			}
 			// Send error event to the client
 			sendMidStreamError(ld, readErr)
 			m := mw.metrics()
-			m.BackendModel = ld.capturedModel
+			m.BackendModel = mrw.capturedModel
 			return &m, &MidStreamError{Err: readErr, Written: m.ResponseSize}
 		}
 	}
@@ -883,12 +897,12 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// Check if loop was detected (proxy may have returned after context cancellation)
 	if ld.detected {
 		m := mw.metrics()
-		m.BackendModel = ld.capturedModel
+		m.BackendModel = mrw.capturedModel
 		return &m, fmt.Errorf("stream loop detected: backend is repeating content")
 	}
 
 	m := mw.metrics()
-	m.BackendModel = ld.capturedModel
+	m.BackendModel = mrw.capturedModel
 	return &m, nil
 }
 
