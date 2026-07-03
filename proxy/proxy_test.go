@@ -357,7 +357,7 @@ func TestNewMetricsWriter(t *testing.T) {
 func TestRewriteModelInResponse(t *testing.T) {
 	t.Run("replaces model in JSON response", func(t *testing.T) {
 		data := []byte(`{"model":"target-model","choices":[],"usage":{}}`)
-		got := rewriteModelInResponse(data, "target-model", "opus")
+		got , _ := rewriteModelInResponse(data, "target-model", "opus")
 		want := `{"model":"opus","choices":[],"usage":{}}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -366,7 +366,7 @@ func TestRewriteModelInResponse(t *testing.T) {
 
 	t.Run("replaces model with whitespace", func(t *testing.T) {
 		data := []byte(`{"model": "target-model", "choices": []}`)
-		got := rewriteModelInResponse(data, "target-model", "opus")
+		got , _ := rewriteModelInResponse(data, "target-model", "opus")
 		want := `{"model": "opus", "choices": []}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -375,7 +375,7 @@ func TestRewriteModelInResponse(t *testing.T) {
 
 	t.Run("replaces model in SSE event", func(t *testing.T) {
 		data := []byte(`data: {"type":"message_start","message":{"model":"target-model","id":"msg_123"}}`)
-		got := rewriteModelInResponse(data, "target-model", "opus")
+		got , _ := rewriteModelInResponse(data, "target-model", "opus")
 		want := `data: {"type":"message_start","message":{"model":"opus","id":"msg_123"}}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -386,7 +386,7 @@ func TestRewriteModelInResponse(t *testing.T) {
 		data := []byte(`data: {"model":"target"}
 data: {"model":"target","usage":{"prompt_tokens":5}}
 `)
-		got := rewriteModelInResponse(data, "target", "opus")
+		got , _ := rewriteModelInResponse(data, "target", "opus")
 		if !strings.Contains(string(got), `"model":"opus"`) {
 			t.Errorf("missing replacement in: %s", got)
 		}
@@ -398,7 +398,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("does not replace non-matching model", func(t *testing.T) {
 		data := []byte(`{"model":"other-model","choices":[]}`)
-		got := rewriteModelInResponse(data, "target-model", "opus")
+		got , _ := rewriteModelInResponse(data, "target-model", "opus")
 		if string(got) != string(data) {
 			t.Errorf("got %s, want unchanged %s", got, data)
 		}
@@ -406,7 +406,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("empty oldModel skips rewriting", func(t *testing.T) {
 		data := []byte(`{"model":"target","choices":[]}`)
-		got := rewriteModelInResponse(data, "", "opus")
+		got , _ := rewriteModelInResponse(data, "", "opus")
 		if string(got) != string(data) {
 			t.Errorf("got %s, want unchanged %s", got, data)
 		}
@@ -414,7 +414,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("same model skips rewriting", func(t *testing.T) {
 		data := []byte(`{"model":"same","choices":[]}`)
-		got := rewriteModelInResponse(data, "same", "same")
+		got , _ := rewriteModelInResponse(data, "same", "same")
 		if string(got) != string(data) {
 			t.Errorf("got %s, want unchanged %s", got, data)
 		}
@@ -422,7 +422,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("does not replace model-like key", func(t *testing.T) {
 		data := []byte(`{"model_id":"123","model":"target","choices":[]}`)
-		got := rewriteModelInResponse(data, "target", "opus")
+		got , _ := rewriteModelInResponse(data, "target", "opus")
 		// model_id should not be affected
 		if !strings.Contains(string(got), `"model_id":"123"`) {
 			t.Errorf("model_id was incorrectly modified: %s", got)
@@ -434,7 +434,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("preserves non-model fields", func(t *testing.T) {
 		data := []byte(`{"model":"target","choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":10,"completion_tokens":20}}`)
-		got := rewriteModelInResponse(data, "target", "opus")
+		got , _ := rewriteModelInResponse(data, "target", "opus")
 
 		var obj map[string]interface{}
 		if err := json.Unmarshal(got, &obj); err != nil {
@@ -453,7 +453,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("model name with slashes", func(t *testing.T) {
 		data := []byte(`{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","choices":[]}`)
-		got := rewriteModelInResponse(data, "unsloth/Qwen3.6-27B-MTP-GGUF:BF16", "opus")
+		got , _ := rewriteModelInResponse(data, "unsloth/Qwen3.6-27B-MTP-GGUF:BF16", "opus")
 		want := `{"model":"opus","choices":[]}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -872,7 +872,7 @@ func TestRewriteAnyModelValue(t *testing.T) {
 	t.Run("replaces different backend model", func(t *testing.T) {
 		// Backend returns its real model, client expects "opus"
 		data := []byte(`{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","content":[]}`)
-		got := rewriteModelInResponse(data, "opus", "opus")
+		got , _ := rewriteModelInResponse(data, "opus", "opus")
 		want := `{"model":"opus","content":[]}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -881,7 +881,7 @@ func TestRewriteAnyModelValue(t *testing.T) {
 
 	t.Run("replaces in SSE event", func(t *testing.T) {
 		data := []byte(`data: {"type":"message_start","message":{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","id":"msg_123"}}`)
-		got := rewriteModelInResponse(data, "opus", "opus")
+		got , _ := rewriteModelInResponse(data, "opus", "opus")
 		want := `data: {"type":"message_start","message":{"model":"opus","id":"msg_123"}}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -890,7 +890,7 @@ func TestRewriteAnyModelValue(t *testing.T) {
 
 	t.Run("skips if already correct", func(t *testing.T) {
 		data := []byte(`{"model":"opus","content":[]}`)
-		got := rewriteModelInResponse(data, "opus", "opus")
+		got , _ := rewriteModelInResponse(data, "opus", "opus")
 		want := `{"model":"opus","content":[]}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -899,7 +899,7 @@ func TestRewriteAnyModelValue(t *testing.T) {
 
 	t.Run("does not replace model_id", func(t *testing.T) {
 		data := []byte(`{"model_id":"123","model":"backend-model","content":[]}`)
-		got := rewriteModelInResponse(data, "opus", "opus")
+		got , _ := rewriteModelInResponse(data, "opus", "opus")
 		if !strings.Contains(string(got), `"model_id":"123"`) {
 			t.Errorf("model_id was incorrectly modified: %s", got)
 		}
@@ -914,7 +914,7 @@ func TestRewriteAnyModelValueOpenAI(t *testing.T) {
 
 	t.Run("replaces in OpenAI JSON response", func(t *testing.T) {
 		data := []byte(`{"id":"chatcmpl-123","model":"llama-3.1-70b","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20}}`)
-		got := rewriteModelInResponse(data, "gpt-4", "gpt-4")
+		got , _ := rewriteModelInResponse(data, "gpt-4", "gpt-4")
 		if !strings.Contains(string(got), `"model":"gpt-4"`) {
 			t.Errorf("model was not replaced: %s", got)
 		}
@@ -925,7 +925,7 @@ func TestRewriteAnyModelValueOpenAI(t *testing.T) {
 
 	t.Run("replaces in OpenAI SSE chunk", func(t *testing.T) {
 		data := []byte(`data: {"id":"chatcmpl-123","model":"llama-3.1-70b","choices":[{"delta":{"content":"hello"}}]}`)
-		got := rewriteModelInResponse(data, "gpt-4", "gpt-4")
+		got , _ := rewriteModelInResponse(data, "gpt-4", "gpt-4")
 		if !strings.Contains(string(got), `"model":"gpt-4"`) {
 			t.Errorf("model was not replaced: %s", got)
 		}
