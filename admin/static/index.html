@@ -435,7 +435,7 @@ async function fetchServerModels() {
     const loaded = models.filter(m => m.loaded).sort((a,b) => a.id.localeCompare(b.id));
     const others = models.filter(m => !m.loaded).sort((a,b) => a.id.localeCompare(b.id));
     sel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>'
-      + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded">● ${esc(m.id)}</option>`).join('')
+      + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded" style="color:#3fb950">● ${esc(m.id)}</option>`).join('')
       + others.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
   } catch {
     sel.innerHTML = '<option value="">(error)</option>';
@@ -616,7 +616,7 @@ async function addFallbackRow(serverId, targetModel) {
       const loaded = models.filter(m => m.loaded).sort((a,b) => a.id.localeCompare(b.id));
       const others = models.filter(m => !m.loaded).sort((a,b) => a.id.localeCompare(b.id));
       modelSel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>'
-        + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded">● ${esc(m.id)}</option>`).join('')
+        + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded" style="color:#3fb950">● ${esc(m.id)}</option>`).join('')
         + others.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
     } catch { modelSel.innerHTML = '<option value="">(error)</option>'; }
   };
