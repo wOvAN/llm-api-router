@@ -7,6 +7,7 @@ type RequestMetric struct {
 	Timestamp        time.Time `json:"timestamp"`
 	Model            string    `json:"model"`
 	TargetModel      string    `json:"target_model"`
+	BackendModel     string    `json:"backend_model"`
 	ServerID         string    `json:"server_id"`
 	StatusCode       int       `json:"status_code"`
 	LatencyMs        int64     `json:"latency_ms"`
