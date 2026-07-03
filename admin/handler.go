@@ -197,7 +197,10 @@ func (h *Handler) getServerModels(w http.ResponseWriter, req *http.Request, id s
 
 	var result struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID     string `json:"id"`
+			Status struct {
+				Value string `json:"value"`
+			} `json:"status"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -205,20 +208,11 @@ func (h *Handler) getServerModels(w http.ResponseWriter, req *http.Request, id s
 		return
 	}
 
-	// Determine which models are "loaded" by checking recent successful requests.
-	// A model is considered loaded if the backend returned it as the actual model
-	// name in a recent successful (2xx) response.
-	recent := h.metrics.Recent()
-	loadedSet := make(map[string]bool)
-	for _, r := range recent {
-		if r.ServerID == id && r.StatusCode >= 200 && r.StatusCode < 300 && r.BackendModel != "" {
-			loadedSet[r.BackendModel] = true
-		}
-	}
-
 	models := make([]modelInfo, 0, len(result.Data))
 	for _, m := range result.Data {
-		models = append(models, modelInfo{ID: m.ID, Loaded: loadedSet[m.ID]})
+		// Use backend's status field if available (llama-server returns "loaded"/"unloaded")
+		loaded := m.Status.Value == "loaded"
+		models = append(models, modelInfo{ID: m.ID, Loaded: loaded})
 	}
 
 	writeJSON(w, http.StatusOK, models)
