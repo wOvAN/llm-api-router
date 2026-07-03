@@ -205,12 +205,29 @@ func (h *Handler) getServerModels(w http.ResponseWriter, req *http.Request, id s
 		return
 	}
 
-	models := make([]string, 0, len(result.Data))
+	// Determine which models are "loaded" by checking recent successful requests.
+	// A model is considered loaded if it was used as target_model in a recent
+	// successful (2xx) request to this server.
+	recent := h.metrics.Recent()
+	loadedSet := make(map[string]bool)
+	for _, r := range recent {
+		if r.ServerID == id && r.StatusCode >= 200 && r.StatusCode < 300 {
+			loadedSet[r.TargetModel] = true
+		}
+	}
+
+	models := make([]modelInfo, 0, len(result.Data))
 	for _, m := range result.Data {
-		models = append(models, m.ID)
+		models = append(models, modelInfo{ID: m.ID, Loaded: loadedSet[m.ID]})
 	}
 
 	writeJSON(w, http.StatusOK, models)
+}
+
+// modelInfo describes a model available on a backend server.
+type modelInfo struct {
+	ID     string `json:"id"`
+	Loaded bool   `json:"loaded"`
 }
 
 func (h *Handler) testServer(w http.ResponseWriter, req *http.Request) {

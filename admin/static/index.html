@@ -429,8 +429,14 @@ async function fetchServerModels() {
   try {
     const res = await fetch(API + '/servers/' + encodeURIComponent(serverId) + '/models');
     if (!res.ok) { sel.innerHTML = '<option value="">(failed)</option>'; return; }
-    const models = await res.json();
-    sel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>' + models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+    const raw = await res.json();
+    // Handle both new [{id, loaded}] and legacy []string formats
+    const models = raw.map(m => typeof m === 'string' ? {id: m, loaded: false} : m);
+    const loaded = models.filter(m => m.loaded).sort((a,b) => a.id.localeCompare(b.id));
+    const others = models.filter(m => !m.loaded).sort((a,b) => a.id.localeCompare(b.id));
+    sel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>'
+      + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded">● ${esc(m.id)}</option>`).join('')
+      + others.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
   } catch {
     sel.innerHTML = '<option value="">(error)</option>';
   }
@@ -605,8 +611,13 @@ async function addFallbackRow(serverId, targetModel) {
     try {
       const res = await fetch(API + '/servers/' + encodeURIComponent(sid) + '/models');
       if (!res.ok) { modelSel.innerHTML = '<option value="">(failed)</option>'; return; }
-      const models = await res.json();
-      modelSel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>' + models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+      const raw = await res.json();
+      const models = raw.map(m => typeof m === 'string' ? {id: m, loaded: false} : m);
+      const loaded = models.filter(m => m.loaded).sort((a,b) => a.id.localeCompare(b.id));
+      const others = models.filter(m => !m.loaded).sort((a,b) => a.id.localeCompare(b.id));
+      modelSel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>'
+        + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded">● ${esc(m.id)}</option>`).join('')
+        + others.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
     } catch { modelSel.innerHTML = '<option value="">(error)</option>'; }
   };
   row.appendChild(sel);
