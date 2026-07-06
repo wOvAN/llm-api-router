@@ -451,7 +451,8 @@ func TestGetConfigDeepCopy(t *testing.T) {
 
 func newEmptyStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := NewStore("/nonexistent/path.json")
+	dir := t.TempDir()
+	s, err := NewStore(filepath.Join(dir, "config.json"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

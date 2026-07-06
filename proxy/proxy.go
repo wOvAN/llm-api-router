@@ -812,7 +812,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	proxyReq.URL.Host = target.Host
 	proxyReq.URL.Path = targetPath
 	proxyReq.URL.RawQuery = req.URL.RawQuery
-	proxyReq.Header.Clone()
+	proxyReq.Header = proxyReq.Header.Clone()
 	if apiKey != "" {
 		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}

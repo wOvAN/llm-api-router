@@ -31,6 +31,9 @@ func NewStore(filepath string) (*Store, error) {
 
 // Load reads the config from the JSON file. Creates an empty config if the file doesn't exist.
 func (s *Store) Load() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	data, err := os.ReadFile(s.filepath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -66,16 +69,25 @@ func (s *Store) Load() error {
 	return nil
 }
 
-// Save writes the current config to the JSON file.
-func (s *Store) Save() error {
-	s.mu.RLock()
+// save writes the current config to the JSON file atomically.
+// Caller must hold s.mu write lock.
+func (s *Store) save() error {
 	data, err := json.MarshalIndent(s.config, "", "  ")
-	s.mu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+	tmpPath := s.filepath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("write temp: %w", err)
+	}
+	return os.Rename(tmpPath, s.filepath)
+}
 
-	return os.WriteFile(s.filepath, data, 0644)
+// Save writes the current config to the JSON file atomically.
+func (s *Store) Save() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.save()
 }
 
 // GetConfig returns a copy of the full config.
@@ -165,6 +177,8 @@ func (s *Store) AddServer(srv *domain.Server) error {
 	if _, exists := s.config.Servers[srv.ID]; exists {
 		return fmt.Errorf("server %q already exists", srv.ID)
 	}
+	apis := make([]domain.APIType, len(srv.APITypes))
+	copy(apis, srv.APITypes)
 	s.config.Servers[srv.ID] = &domain.Server{
 		ID:           srv.ID,
 		Name:         srv.Name,
@@ -172,9 +186,9 @@ func (s *Store) AddServer(srv *domain.Server) error {
 		OpenAIURL:    srv.OpenAIURL,
 		AnthropicURL: srv.AnthropicURL,
 		APIKey:       srv.APIKey,
-		APITypes:     srv.APITypes,
+		APITypes:     apis,
 	}
-	return nil
+	return s.save()
 }
 
 // UpdateServer updates an existing server.
@@ -185,6 +199,8 @@ func (s *Store) UpdateServer(id string, srv *domain.Server) error {
 	if _, exists := s.config.Servers[id]; !exists {
 		return fmt.Errorf("server %q not found", id)
 	}
+	apis := make([]domain.APIType, len(srv.APITypes))
+	copy(apis, srv.APITypes)
 	s.config.Servers[id] = &domain.Server{
 		ID:           id,
 		Name:         srv.Name,
@@ -192,9 +208,9 @@ func (s *Store) UpdateServer(id string, srv *domain.Server) error {
 		OpenAIURL:    srv.OpenAIURL,
 		AnthropicURL: srv.AnthropicURL,
 		APIKey:       srv.APIKey,
-		APITypes:     srv.APITypes,
+		APITypes:     apis,
 	}
-	return nil
+	return s.save()
 }
 
 // DeleteServer removes a server.
@@ -206,7 +222,7 @@ func (s *Store) DeleteServer(id string) error {
 		return fmt.Errorf("server %q not found", id)
 	}
 	delete(s.config.Servers, id)
-	return nil
+	return s.save()
 }
 
 // AddRule appends a new routing rule.
@@ -214,14 +230,8 @@ func (s *Store) AddRule(rule *domain.RoutingRule) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.config.Rules = append(s.config.Rules, &domain.RoutingRule{
-		IncomingModels: rule.IncomingModels,
-		TargetModel:    rule.TargetModel,
-		ServerID:       rule.ServerID,
-		Fallbacks:      rule.Fallbacks,
-		Enabled:        rule.Enabled,
-	})
-	return nil
+	s.config.Rules = append(s.config.Rules, cloneRule(rule))
+	return s.save()
 }
 
 // UpdateRule updates a rule by index.
@@ -232,14 +242,8 @@ func (s *Store) UpdateRule(idx int, rule *domain.RoutingRule) error {
 	if idx < 0 || idx >= len(s.config.Rules) {
 		return fmt.Errorf("rule index %d out of range", idx)
 	}
-	s.config.Rules[idx] = &domain.RoutingRule{
-		IncomingModels: rule.IncomingModels,
-		TargetModel:    rule.TargetModel,
-		ServerID:       rule.ServerID,
-		Fallbacks:      rule.Fallbacks,
-		Enabled:        rule.Enabled,
-	}
-	return nil
+	s.config.Rules[idx] = cloneRule(rule)
+	return s.save()
 }
 
 // DeleteRule removes a rule by index.
@@ -251,7 +255,29 @@ func (s *Store) DeleteRule(idx int) error {
 		return fmt.Errorf("rule index %d out of range", idx)
 	}
 	s.config.Rules = append(s.config.Rules[:idx], s.config.Rules[idx+1:]...)
-	return nil
+	return s.save()
+}
+
+// cloneRule returns a deep copy of a RoutingRule with fresh slices.
+func cloneRule(rule *domain.RoutingRule) *domain.RoutingRule {
+	cpy := &domain.RoutingRule{
+		TargetModel:    rule.TargetModel,
+		ServerID:       rule.ServerID,
+		Enabled:        rule.Enabled,
+	}
+	if rule.IncomingModels != nil {
+		cpy.IncomingModels = make([]string, len(rule.IncomingModels))
+		copy(cpy.IncomingModels, rule.IncomingModels)
+	}
+	if rule.Fallbacks != nil {
+		cpy.Fallbacks = make([]domain.FallbackEntry, len(rule.Fallbacks))
+		copy(cpy.Fallbacks, rule.Fallbacks)
+	}
+	if rule.FallbackServerIDs != nil {
+		cpy.FallbackServerIDs = make([]string, len(rule.FallbackServerIDs))
+		copy(cpy.FallbackServerIDs, rule.FallbackServerIDs)
+	}
+	return cpy
 }
 
 // migrateOldAPIType converts old "api_type": "openai" → "api_types": ["openai"] in raw JSON.

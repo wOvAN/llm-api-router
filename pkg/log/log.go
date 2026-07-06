@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 )
 
 type Level = slog.Level
@@ -21,7 +22,11 @@ type Logger struct {
 	inner *slog.Logger
 }
 
-var defaultLogger = New(os.Stderr, LevelInfo)
+var defaultLogger atomic.Pointer[Logger]
+
+func init() {
+	defaultLogger.Store(New(os.Stderr, LevelInfo))
+}
 
 func InitFromEnv() {
 	raw := os.Getenv("LOG_LEVEL")
@@ -52,11 +57,11 @@ func New(w io.Writer, level Level) *Logger {
 }
 
 func SetDefault(l *Logger) {
-	defaultLogger = l
+	defaultLogger.Store(l)
 }
 
 func Default() *Logger {
-	return defaultLogger
+	return defaultLogger.Load()
 }
 
 func (l *Logger) With(args ...any) *Logger {
@@ -107,14 +112,14 @@ func (l *Logger) Fatalf(format string, args ...any) {
 
 // Package-level convenience functions.
 
-func Debug(msg string, args ...any) { defaultLogger.Debug(msg, args...) }
-func Info(msg string, args ...any)  { defaultLogger.Info(msg, args...) }
-func Warn(msg string, args ...any)  { defaultLogger.Warn(msg, args...) }
-func Error(msg string, args ...any) { defaultLogger.Error(msg, args...) }
-func Fatal(msg string, args ...any) { defaultLogger.Fatal(msg, args...) }
+func Debug(msg string, args ...any) { Default().Debug(msg, args...) }
+func Info(msg string, args ...any)  { Default().Info(msg, args...) }
+func Warn(msg string, args ...any)  { Default().Warn(msg, args...) }
+func Error(msg string, args ...any) { Default().Error(msg, args...) }
+func Fatal(msg string, args ...any) { Default().Fatal(msg, args...) }
 
-func Debugf(format string, args ...any) { defaultLogger.Debugf(format, args...) }
-func Infof(format string, args ...any)  { defaultLogger.Infof(format, args...) }
-func Warnf(format string, args ...any)  { defaultLogger.Warnf(format, args...) }
-func Errorf(format string, args ...any) { defaultLogger.Errorf(format, args...) }
-func Fatalf(format string, args ...any) { defaultLogger.Fatalf(format, args...) }
+func Debugf(format string, args ...any) { Default().Debugf(format, args...) }
+func Infof(format string, args ...any)  { Default().Infof(format, args...) }
+func Warnf(format string, args ...any)  { Default().Warnf(format, args...) }
+func Errorf(format string, args ...any) { Default().Errorf(format, args...) }
+func Fatalf(format string, args ...any) { Default().Fatalf(format, args...) }

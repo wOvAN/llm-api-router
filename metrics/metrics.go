@@ -11,6 +11,8 @@ import (
 type Store struct {
 	mu             sync.RWMutex
 	recentRequests []domain.RequestMetric
+	ringIndex      int
+	ringCount      int
 	summaries      map[string]*domain.Summary
 	maxRecent      int
 }
@@ -18,7 +20,7 @@ type Store struct {
 // New creates a new metrics store.
 func New(maxRecent int) *Store {
 	return &Store{
-		recentRequests: make([]domain.RequestMetric, 0, maxRecent),
+		recentRequests: make([]domain.RequestMetric, maxRecent),
 		summaries:      make(map[string]*domain.Summary),
 		maxRecent:      maxRecent,
 	}
@@ -58,10 +60,11 @@ func (s *Store) Add(m domain.RequestMetric) {
 		m.DecodeTokPerSec = float64(m.CompletionTokens) / (float64(m.DecodeTimeMs) / 1000.0)
 	}
 
-	if len(s.recentRequests) >= s.maxRecent {
-		s.recentRequests = s.recentRequests[1:]
+	s.recentRequests[s.ringIndex] = m
+	s.ringIndex = (s.ringIndex + 1) % s.maxRecent
+	if s.ringCount < s.maxRecent {
+		s.ringCount++
 	}
-	s.recentRequests = append(s.recentRequests, m)
 
 	s.updateSummary(m.Model, m)
 	s.updateSummary("server:"+m.ServerID, m)
@@ -110,13 +113,22 @@ func (s *Store) updateSummary(key string, m domain.RequestMetric) {
 	}
 }
 
-// Recent returns the last N recorded requests.
+// Recent returns the last N recorded requests in chronological order.
 func (s *Store) Recent() []domain.RequestMetric {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	out := make([]domain.RequestMetric, len(s.recentRequests))
-	copy(out, s.recentRequests)
+	out := make([]domain.RequestMetric, s.ringCount)
+	if s.ringCount == 0 {
+		return out
+	}
+	if s.ringCount < s.maxRecent {
+		copy(out, s.recentRequests[:s.ringCount])
+	} else {
+		// Ring buffer is full: read from ringIndex to end, then 0 to ringIndex-1
+		n := copy(out, s.recentRequests[s.ringIndex:])
+		copy(out[n:], s.recentRequests[:s.ringIndex])
+	}
 	return out
 }
 
@@ -137,6 +149,8 @@ func (s *Store) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.recentRequests = s.recentRequests[:0]
+	s.recentRequests = make([]domain.RequestMetric, s.maxRecent)
+	s.ringIndex = 0
+	s.ringCount = 0
 	s.summaries = make(map[string]*domain.Summary)
 }

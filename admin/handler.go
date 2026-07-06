@@ -114,10 +114,6 @@ func (h *Handler) addServer(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	if err := h.store.Save(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save config")
-		return
-	}
 	writeJSON(w, http.StatusCreated, srv)
 }
 
@@ -131,10 +127,6 @@ func (h *Handler) updateServer(w http.ResponseWriter, req *http.Request, id stri
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if err := h.store.Save(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save config")
-		return
-	}
 	srv.ID = id
 	writeJSON(w, http.StatusOK, srv)
 }
@@ -142,10 +134,6 @@ func (h *Handler) updateServer(w http.ResponseWriter, req *http.Request, id stri
 func (h *Handler) deleteServer(w http.ResponseWriter, req *http.Request, id string) {
 	if err := h.store.DeleteServer(id); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	if err := h.store.Save(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save config")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -301,10 +289,6 @@ func (h *Handler) addRule(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.store.Save(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save config")
-		return
-	}
 	writeJSON(w, http.StatusCreated, rule)
 }
 
@@ -324,10 +308,6 @@ func (h *Handler) updateRule(w http.ResponseWriter, req *http.Request, idxStr st
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if err := h.store.Save(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save config")
-		return
-	}
 	writeJSON(w, http.StatusOK, rule)
 }
 
@@ -339,10 +319,6 @@ func (h *Handler) deleteRule(w http.ResponseWriter, req *http.Request, idxStr st
 	}
 	if err := h.store.DeleteRule(idx); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	if err := h.store.Save(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save config")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

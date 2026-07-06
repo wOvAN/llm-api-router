@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"io/fs"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"llm-api-router/admin"
@@ -80,11 +83,31 @@ func main() {
 	})
 
 	addr := ":" + port
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	// Graceful shutdown on SIGINT/SIGTERM
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-stop
+		log.Infof("Shutting down...")
+		healthTracker.Stop()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Errorf("Server shutdown error: %v", err)
+		}
+	}()
+
 	log.Infof("LLM API Router starting on %s", addr)
 	log.Infof("Admin GUI: http://localhost%s/admin", addr)
 	log.Infof("API routes: http://localhost%s/v1/*", addr)
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
