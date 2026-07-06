@@ -773,7 +773,7 @@ async function loadMetrics() {
   const rbody = document.getElementById('recent-body');
   if (!recent.length) { rbody.innerHTML = '<tr><td colspan="9" class="empty">No requests yet</td></tr>'; return; }
   rbody.innerHTML = recent.slice().reverse().map(r => {
-    const time = new Date(r.timestamp).toLocaleTimeString();
+    const time = new Date(r.timestamp).toLocaleTimeString([], { hour12: false });
     const statusColor = r.status_code >= 200 && r.status_code < 300 ? '#3fb950' : r.status_code >= 400 ? '#f85149' : '#8b949e';
     const size = r.response_size ? formatBytes(r.response_size) : '-';
     const fallback = r.was_fallback ? '<span class="tag" style="background:#3a3a1a;color:#d29922">yes</span>' : '-';
