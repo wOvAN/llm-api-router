@@ -73,6 +73,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   <div class="btn-row">
     <button class="primary" onclick="openServerModal()">+ Add Server</button>
     <button onclick="loadServers()">↻ Refresh</button>
+    <span id="servers-timer" style="font-size:0.8rem;color:#484f58;">auto-refresh 5s</span>
   </div>
   <table>
     <thead><tr><th class="sortable" data-table="servers" data-col="id">ID</th><th class="sortable" data-table="servers" data-col="name">Name</th><th class="sortable" data-table="servers" data-col="url">URL</th><th class="sortable" data-table="servers" data-col="api_types">API Type</th><th>Health</th><th>API Key</th><th>Actions</th></tr></thead>
@@ -236,17 +237,23 @@ function sortData(data, col, dir) {
 
 // --- Tabs ---
 let metricsInterval = null;
+let serversInterval = null;
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   event.target.classList.add('active');
   document.getElementById('panel-' + name).classList.add('active');
 
-  // Auto-refresh metrics tab
+  // Auto-refresh
   if (metricsInterval) { clearInterval(metricsInterval); metricsInterval = null; }
+  if (serversInterval) { clearInterval(serversInterval); serversInterval = null; }
   if (name === 'metrics') {
     loadMetrics();
     metricsInterval = setInterval(loadMetrics, 3000);
+  }
+  if (name === 'servers') {
+    loadServers();
+    serversInterval = setInterval(loadServers, 5000);
   }
 }
 
@@ -693,6 +700,8 @@ function restoreSortState() {
 restoreSortState();
 loadServers();
 loadRules();
+// Auto-refresh servers tab (it's the default active tab)
+serversInterval = setInterval(loadServers, 5000);
 
 // Sortable headers
 document.addEventListener('click', function(e) {
