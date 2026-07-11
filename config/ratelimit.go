@@ -120,11 +120,11 @@ func (rl *RateLimiter) CooldownRemaining(id string) time.Duration {
 	if !ok {
 		return 0
 	}
-	remaining := time.Since(expiry)
-	if remaining > 0 {
+	remaining := time.Until(expiry)
+	if remaining <= 0 {
 		return 0
 	}
-	return -remaining
+	return remaining
 }
 
 // FailureCount returns the number of recent failures for a server.

@@ -128,12 +128,11 @@ func (m *metricsWriter) Write(data []byte) (int, error) {
 	}
 	if m.bodyBuffer.Len()+len(data) > 256*1024 {
 		keep := 256*1024 - len(data)
-		if keep < 0 {
-			keep = 0
+		if keep > 0 {
+			m.bodyBuffer.Next(keep)
+		} else {
+			m.bodyBuffer.Reset()
 		}
-		remaining := m.bodyBuffer.Bytes()[keep:]
-		m.bodyBuffer.Reset()
-		m.bodyBuffer.Write(remaining)
 	}
 	m.bodyBuffer.Write(data)
 	n, err := m.ResponseWriter.Write(data)
@@ -199,9 +198,9 @@ func Proxy(ctx context.Context, targetURL string, apiKey string, req *http.Reque
 		return nil, fmt.Errorf("parse target URL: %w", err)
 	}
 
-	targetPath := target.Path + req.URL.Path
+	targetPath := strings.TrimRight(target.Path, "/") + req.URL.Path
 	if strings.HasSuffix(target.Path, "/v1") && strings.HasPrefix(req.URL.Path, "/v1") {
-		targetPath = target.Path + req.URL.Path[1:]
+		targetPath = strings.TrimRight(target.Path, "/") + req.URL.Path[1:]
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -253,10 +252,16 @@ type responseRecorder struct {
 }
 
 func (r *responseRecorder) Header() http.Header {
+	if r.header == nil {
+		r.header = make(http.Header)
+	}
 	return r.header
 }
 
 func (r *responseRecorder) WriteHeader(code int) {
+	if r.header == nil {
+		r.header = make(http.Header)
+	}
 	r.code = code
 }
 
@@ -657,8 +662,9 @@ func extractSSEContents(data []byte) []string {
 	var contents []string
 	dataStr := string(data)
 
-	// Split by "data:" prefix
-	for _, line := range strings.Split(dataStr, "data: ") {
+	// Split by "data:" prefix (with optional leading whitespace after colon)
+	for _, line := range strings.Split(dataStr, "data:") {
+		line = strings.TrimPrefix(line, " ")
 		if len(line) < 2 {
 			continue
 		}
@@ -741,11 +747,6 @@ func extractModelFromJSON(data []byte) string {
 	if m, ok := obj["model"].(string); ok && m != "" {
 		return m
 	}
-	// OpenAI streaming: model appears in the top-level object
-	// Anthropic: model appears in the top-level object or in a nested "model" field
-	if model, ok := obj["model"].(string); ok {
-		return model
-	}
 	return ""
 }
 
@@ -787,9 +788,9 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		return nil, fmt.Errorf("parse target URL: %w", err)
 	}
 
-	targetPath := target.Path + req.URL.Path
+	targetPath := strings.TrimRight(target.Path, "/") + req.URL.Path
 	if strings.HasSuffix(target.Path, "/v1") && strings.HasPrefix(req.URL.Path, "/v1") {
-		targetPath = target.Path + req.URL.Path[1:]
+		targetPath = strings.TrimRight(target.Path, "/") + req.URL.Path[1:]
 	}
 
 	start := time.Now()

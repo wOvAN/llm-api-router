@@ -65,6 +65,11 @@ func (t *HealthTracker) loop() {
 func (t *HealthTracker) checkAll() {
 	cfg := t.store.GetConfig()
 	for id, srv := range cfg.Servers {
+		t.mu.Lock()
+		if _, exists := t.status[id]; !exists {
+			t.status[id] = true
+		}
+		t.mu.Unlock()
 		if !t.IsHealthy(id) {
 			// Server is marked unhealthy — check if it's back
 			if t.checkServer(srv) {
