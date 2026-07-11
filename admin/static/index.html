@@ -360,7 +360,12 @@ async function saveServer() {
   };
   const method = id ? 'PUT' : 'POST';
   const url = id ? API + '/servers/' + encodeURIComponent(data.id) : API + '/servers';
-  await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({error: res.statusText}));
+    alert('Save failed: ' + (err.error || res.statusText));
+    return;
+  }
   closeServerModal();
   loadServers();
 }
@@ -383,7 +388,12 @@ async function editServer(id) {
 
 async function deleteServer(id) {
   if (!confirm('Delete server ' + id + '?')) return;
-  await fetch(API + '/servers/' + encodeURIComponent(id), { method: 'DELETE' });
+  const res = await fetch(API + '/servers/' + encodeURIComponent(id), { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({error: res.statusText}));
+    alert('Delete failed: ' + (err.error || res.statusText));
+    return;
+  }
   loadServers();
 }
 
@@ -480,7 +490,12 @@ async function saveRule() {
   };
   const method = idx !== '' ? 'PUT' : 'POST';
   const url = idx !== '' ? API + '/rules/' + idx : API + '/rules';
-  await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({error: res.statusText}));
+    alert('Save failed: ' + (err.error || res.statusText));
+    return;
+  }
   closeRuleModal();
   loadRules();
 }
@@ -491,11 +506,15 @@ async function toggleRuleEnabled(idx, newState) {
   const r = rules[idx];
   if (!r) return;
   r.enabled = newState;
-  await fetch(API + '/rules/' + idx, {
+  const putRes = await fetch(API + '/rules/' + idx, {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(r),
   });
+  if (!putRes.ok) {
+    const err = await putRes.json().catch(() => ({error: putRes.statusText}));
+    alert('Failed to update rule: ' + (err.error || putRes.statusText));
+  }
   loadRules();
 }
 
@@ -545,7 +564,12 @@ async function editRule(idx) {
 
 async function deleteRule(idx) {
   if (!confirm('Delete rule #' + idx + '?')) return;
-  await fetch(API + '/rules/' + idx, { method: 'DELETE' });
+  const res = await fetch(API + '/rules/' + idx, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({error: res.statusText}));
+    alert('Delete failed: ' + (err.error || res.statusText));
+    return;
+  }
   loadRules();
 }
 
@@ -820,7 +844,12 @@ async function loadMetrics() {
 
 async function resetMetrics() {
   if (!confirm('Reset all metrics?')) return;
-  await fetch(API + '/metrics/reset', { method: 'POST' });
+  const res = await fetch(API + '/metrics/reset', { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({error: res.statusText}));
+    alert('Reset failed: ' + (err.error || res.statusText));
+    return;
+  }
   loadMetrics();
 }
 

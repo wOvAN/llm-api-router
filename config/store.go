@@ -76,6 +76,12 @@ func (s *Store) save() error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+
+	// Guard against Docker volume mount creating a directory instead of file
+	if info, statErr := os.Stat(s.filepath); statErr == nil && info.IsDir() {
+		return fmt.Errorf("config path %q is a directory (Docker volume mount issue — remove directory and create file)", s.filepath)
+	}
+
 	tmpPath := s.filepath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return fmt.Errorf("write temp: %w", err)
