@@ -191,14 +191,24 @@ func (m *metricsWriter) metrics() ProxyMetrics {
 	return pm
 }
 
-// RewriteModelInBody replaces the "model" field value in a JSON body using
-// byte-level search. Avoids full JSON marshal/unmarshal for a single field change.
+// RewriteModelInBody parses the JSON body, replaces the "model" field, and returns the new body.
+// Uses json.Marshal for correctness — byte-level replacement can miss edge cases
+// with escaped characters in model names (e.g., GGUF names with / that may be
+// escaped as \/ by json.Marshal but not matched by byte-level search).
 func RewriteModelInBody(body []byte, newModel string) ([]byte, error) {
-	if newModel == "" {
-		return body, nil
+	var obj map[string]interface{}
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, fmt.Errorf("unmarshal body: %w", err)
 	}
-	result, _ := replaceAnyModelValue(body, newModel)
-	return result, nil
+
+	obj["model"] = newModel
+
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("marshal body: %w", err)
+	}
+
+	return out, nil
 }
 
 // ProxyResponse holds the result of a proxied request.

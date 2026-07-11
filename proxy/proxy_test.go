@@ -34,25 +34,17 @@ func TestRewriteModelInBody(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid JSON returns body unchanged", func(t *testing.T) {
-		input := []byte(`not json`)
-		output, err := RewriteModelInBody(input, "x")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if string(output) != "not json" {
-			t.Errorf("got %q, want %q", output, input)
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		_, err := RewriteModelInBody([]byte(`not json`), "x")
+		if err == nil {
+			t.Fatal("expected error for invalid JSON")
 		}
 	})
 
-	t.Run("empty body returns unchanged", func(t *testing.T) {
-		input := []byte(``)
-		output, err := RewriteModelInBody(input, "x")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(output) != 0 {
-			t.Errorf("got len %d, want 0", len(output))
+	t.Run("empty body returns error", func(t *testing.T) {
+		_, err := RewriteModelInBody([]byte(``), "x")
+		if err == nil {
+			t.Fatal("expected error for empty body")
 		}
 	})
 }
