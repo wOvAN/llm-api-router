@@ -280,22 +280,66 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 	})
 }
 
-// extractModel reads the "model" field from a JSON body.
+// findJSONStringEnd finds the closing quote of a JSON string starting at pos.
+// Returns the index of the closing quote, or -1 if not found.
+func findJSONStringEnd(data []byte, pos int) int {
+	for pos < len(data) {
+		if data[pos] == '\\' {
+			pos += 2 // skip escaped character
+			continue
+		}
+		if data[pos] == '"' {
+			return pos
+		}
+		pos++
+	}
+	return -1
+}
+
+// extractModel reads the "model" field from a JSON body using byte-level search.
+// Avoids full JSON unmarshal allocation for a single field extraction.
 func extractModel(body []byte) (string, error) {
-	var obj map[string]interface{}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return "", err
+	key := []byte(`"model"`)
+	keyLen := len(key)
+
+	for i := 0; i <= len(body)-keyLen; i++ {
+		if !bytes.Equal(body[i:i+keyLen], key) {
+			continue
+		}
+		endOfKey := i + keyLen
+
+		// Skip if it's a longer key like "model_id"
+		if endOfKey < len(body) {
+			b := body[endOfKey]
+			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-' {
+				continue
+			}
+		}
+
+		// Find colon
+		colonIdx := bytes.IndexByte(body[endOfKey:], ':')
+		if colonIdx < 0 {
+			continue
+		}
+		valueStart := endOfKey + colonIdx + 1
+
+		// Skip whitespace
+		for valueStart < len(body) && (body[valueStart] == ' ' || body[valueStart] == '\t' || body[valueStart] == '\n' || body[valueStart] == '\r') {
+			valueStart++
+		}
+		if valueStart >= len(body) || body[valueStart] != '"' {
+			continue
+		}
+
+		// Extract string value (handle escapes)
+		strStart := valueStart + 1
+		strEnd := findJSONStringEnd(body, strStart)
+		if strEnd < 0 {
+			return "", fmt.Errorf("invalid model value")
+		}
+
+		return strings.TrimSpace(string(body[strStart:strEnd])), nil
 	}
 
-	model, ok := obj["model"]
-	if !ok {
-		return "", fmt.Errorf("missing 'model' field")
-	}
-
-	modelStr, ok := model.(string)
-	if !ok {
-		return "", fmt.Errorf("'model' field is not a string")
-	}
-
-	return strings.TrimSpace(modelStr), nil
+	return "", fmt.Errorf("missing 'model' field")
 }

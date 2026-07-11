@@ -6,15 +6,42 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"llm-api-router/pkg/log"
 )
+
+// upstreamTransport is a shared HTTP transport with connection pooling.
+// Reused across all proxied requests to enable TCP connection reuse,
+// TLS session resumption, and keep-alive. Eliminates ~50-200ms per-request
+// overhead from new TCP+TLS handshakes.
+var upstreamTransport = &http.Transport{
+	MaxIdleConns:        200,
+	MaxIdleConnsPerHost: 50,
+	IdleConnTimeout:     90 * time.Second,
+	DialContext: (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	TLSHandshakeTimeout: 10 * time.Second,
+}
+
+// upstreamClient is the shared HTTP client for all upstream requests.
+var upstreamClient = &http.Client{Transport: upstreamTransport}
+
+// bufPool reuses bytes.Buffer instances across requests to reduce GC pressure.
+var bufPool = sync.Pool{
+	New: func() any {
+		return &bytes.Buffer{}
+	},
+}
 
 // ProxyMetrics holds performance data for a proxied request.
 type ProxyMetrics struct {
@@ -101,11 +128,13 @@ type metricsWriter struct {
 }
 
 func newMetricsWriter(w http.ResponseWriter, start time.Time) *metricsWriter {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
 	return &metricsWriter{
 		ResponseWriter: w,
 		startTime:      start,
 		statusCode:     http.StatusOK,
-		bodyBuffer:     &bytes.Buffer{},
+		bodyBuffer:     buf,
 	}
 }
 
@@ -162,21 +191,14 @@ func (m *metricsWriter) metrics() ProxyMetrics {
 	return pm
 }
 
-// RewriteModelInBody parses the JSON body, replaces the "model" field, and returns the new body.
+// RewriteModelInBody replaces the "model" field value in a JSON body using
+// byte-level search. Avoids full JSON marshal/unmarshal for a single field change.
 func RewriteModelInBody(body []byte, newModel string) ([]byte, error) {
-	var obj map[string]interface{}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return nil, fmt.Errorf("unmarshal body: %w", err)
+	if newModel == "" {
+		return body, nil
 	}
-
-	obj["model"] = newModel
-
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return nil, fmt.Errorf("marshal body: %w", err)
-	}
-
-	return out, nil
+	result, _ := replaceAnyModelValue(body, newModel)
+	return result, nil
 }
 
 // ProxyResponse holds the result of a proxied request.
@@ -266,6 +288,9 @@ func (r *responseRecorder) WriteHeader(code int) {
 }
 
 func (r *responseRecorder) Write(data []byte) (int, error) {
+	if r.body == nil {
+		r.body = &bytes.Buffer{}
+	}
 	return r.body.Write(data)
 }
 
@@ -795,6 +820,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 	start := time.Now()
 	mw := newMetricsWriter(w, start)
+	defer bufPool.Put(mw.bodyBuffer) //nolint:errcheck
 	mrw := newModelRewriteWriter(mw, targetModel, originalModel)
 	var rw http.ResponseWriter = mrw
 
@@ -821,12 +847,8 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	proxyReq.GetBody = nil
 	proxyReq.RequestURI = "" // Must be empty for client requests (Clone preserves the server-side value)
 
-	// Execute the upstream request
-	client := &http.Client{
-		Transport: http.DefaultTransport,
-		Timeout:   0, // no timeout — let the request context handle it
-	}
-	upstreamResp, err := client.Do(proxyReq)
+	// Execute the upstream request (shared client with connection pooling)
+	upstreamResp, err := upstreamClient.Do(proxyReq)
 	if err != nil {
 		// Pre-response error — no headers written to client yet.
 		// Fallback is possible.

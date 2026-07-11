@@ -126,6 +126,8 @@ func (s *Store) GetConfig() *domain.Config {
 }
 
 // GetServer returns a server by ID.
+// Returns a pointer to the internal server — callers must not modify it.
+// The config store is the sole writer; server fields are immutable between writes.
 func (s *Store) GetServer(id string) (*domain.Server, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -134,10 +136,7 @@ func (s *Store) GetServer(id string) (*domain.Server, bool) {
 	if !ok {
 		return nil, false
 	}
-	cpy := *srv
-	cpy.APITypes = make([]domain.APIType, len(srv.APITypes))
-	copy(cpy.APITypes, srv.APITypes)
-	return &cpy, true
+	return srv, true
 }
 
 // GetRuleByModel returns the first routing rule matching the given incoming model name.
