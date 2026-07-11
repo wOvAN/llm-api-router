@@ -114,6 +114,9 @@ func (rl *RateLimiter) ClearCooldown(id string) {
 // CooldownRemaining returns the remaining cooldown time for a server.
 // Returns 0 if the server is not in cooldown.
 func (rl *RateLimiter) CooldownRemaining(id string) time.Duration {
+	if rl == nil {
+		return 0
+	}
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
 	expiry, ok := rl.cooldown[id]
@@ -129,6 +132,9 @@ func (rl *RateLimiter) CooldownRemaining(id string) time.Duration {
 
 // FailureCount returns the number of recent failures for a server.
 func (rl *RateLimiter) FailureCount(id string) int {
+	if rl == nil {
+		return 0
+	}
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
 	cutoff := time.Now().Add(-rl.window)

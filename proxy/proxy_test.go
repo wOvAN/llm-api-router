@@ -931,3 +931,29 @@ func TestRewriteAnyModelValueOpenAI(t *testing.T) {
 		}
 	})
 }
+
+func TestEscapeJSONString(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"double quote", `"hello"`, `\"hello\"`},
+		{"backslash", `path\to\file`, `path\\to\\file`},
+		{"newline", "line1\nline2", `line1\nline2`},
+		{"carriage return", "a\r\nb", `a\r\nb`},
+		{"tab", "a\tb", `a\tb`},
+		{"backspace", "a\bb", `a\bb`},
+		{"form feed", "a\fb", `a\fb`},
+		{"control char", "a\x01b", `a\u0001b`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(escapeJSONString(tt.in))
+			if got != tt.want {
+				t.Errorf("escapeJSONString(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

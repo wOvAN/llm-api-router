@@ -555,11 +555,28 @@ func escapeJSONString(s string) []byte {
 			b = append(b, '\\', 'r')
 		case '\t':
 			b = append(b, '\\', 't')
+		case '\b':
+			b = append(b, '\\', 'b')
+		case '\f':
+			b = append(b, '\\', 'f')
 		default:
-			b = append(b, c)
+			if c < 0x20 {
+				b = append(b, '\\', 'u', '0', '0',
+					hex(c>>4), hex(c&0xF))
+			} else {
+				b = append(b, c)
+			}
 		}
 	}
 	return b
+}
+
+// hex returns the hex digit for a nibble (0-15).
+func hex(n byte) byte {
+	if n < 10 {
+		return '0' + n
+	}
+	return 'a' + n - 10
 }
 
 func bytesIndex(data, sub []byte) int {

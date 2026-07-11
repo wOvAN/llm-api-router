@@ -170,7 +170,7 @@ func (h *Handler) getServerModels(w http.ResponseWriter, req *http.Request, id s
 		proxyReq.Header.Set("Authorization", "Bearer "+srv.APIKey)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "failed to reach server: "+err.Error())
