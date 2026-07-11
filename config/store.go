@@ -69,8 +69,10 @@ func (s *Store) Load() error {
 	return nil
 }
 
-// save writes the current config to the JSON file atomically.
+// save writes the current config to the JSON file.
 // Caller must hold s.mu write lock.
+// Direct write instead of rename-tmp: rename fails on Docker bind mounts
+// with "device or resource busy". The mutex provides write safety.
 func (s *Store) save() error {
 	data, err := json.MarshalIndent(s.config, "", "  ")
 	if err != nil {
@@ -82,11 +84,7 @@ func (s *Store) save() error {
 		return fmt.Errorf("config path %q is a directory (Docker volume mount issue — remove directory and create file)", s.filepath)
 	}
 
-	tmpPath := s.filepath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return fmt.Errorf("write temp: %w", err)
-	}
-	return os.Rename(tmpPath, s.filepath)
+	return os.WriteFile(s.filepath, data, 0644)
 }
 
 // Save writes the current config to the JSON file atomically.
