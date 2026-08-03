@@ -357,7 +357,7 @@ func TestNewMetricsWriter(t *testing.T) {
 func TestRewriteModelInResponse(t *testing.T) {
 	t.Run("replaces model in JSON response", func(t *testing.T) {
 		data := []byte(`{"model":"target-model","choices":[],"usage":{}}`)
-		got , _ := rewriteModelInResponse(data, "target-model", "opus")
+		got, _ := rewriteModelInResponse(data, "target-model", "opus")
 		want := `{"model":"opus","choices":[],"usage":{}}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -366,7 +366,7 @@ func TestRewriteModelInResponse(t *testing.T) {
 
 	t.Run("replaces model with whitespace", func(t *testing.T) {
 		data := []byte(`{"model": "target-model", "choices": []}`)
-		got , _ := rewriteModelInResponse(data, "target-model", "opus")
+		got, _ := rewriteModelInResponse(data, "target-model", "opus")
 		want := `{"model": "opus", "choices": []}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -375,7 +375,7 @@ func TestRewriteModelInResponse(t *testing.T) {
 
 	t.Run("replaces model in SSE event", func(t *testing.T) {
 		data := []byte(`data: {"type":"message_start","message":{"model":"target-model","id":"msg_123"}}`)
-		got , _ := rewriteModelInResponse(data, "target-model", "opus")
+		got, _ := rewriteModelInResponse(data, "target-model", "opus")
 		want := `data: {"type":"message_start","message":{"model":"opus","id":"msg_123"}}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -386,7 +386,7 @@ func TestRewriteModelInResponse(t *testing.T) {
 		data := []byte(`data: {"model":"target"}
 data: {"model":"target","usage":{"prompt_tokens":5}}
 `)
-		got , _ := rewriteModelInResponse(data, "target", "opus")
+		got, _ := rewriteModelInResponse(data, "target", "opus")
 		if !strings.Contains(string(got), `"model":"opus"`) {
 			t.Errorf("missing replacement in: %s", got)
 		}
@@ -398,7 +398,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("does not replace non-matching model", func(t *testing.T) {
 		data := []byte(`{"model":"other-model","choices":[]}`)
-		got , _ := rewriteModelInResponse(data, "target-model", "opus")
+		got, _ := rewriteModelInResponse(data, "target-model", "opus")
 		if string(got) != string(data) {
 			t.Errorf("got %s, want unchanged %s", got, data)
 		}
@@ -406,7 +406,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("empty oldModel skips rewriting", func(t *testing.T) {
 		data := []byte(`{"model":"target","choices":[]}`)
-		got , _ := rewriteModelInResponse(data, "", "opus")
+		got, _ := rewriteModelInResponse(data, "", "opus")
 		if string(got) != string(data) {
 			t.Errorf("got %s, want unchanged %s", got, data)
 		}
@@ -414,7 +414,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("same model skips rewriting", func(t *testing.T) {
 		data := []byte(`{"model":"same","choices":[]}`)
-		got , _ := rewriteModelInResponse(data, "same", "same")
+		got, _ := rewriteModelInResponse(data, "same", "same")
 		if string(got) != string(data) {
 			t.Errorf("got %s, want unchanged %s", got, data)
 		}
@@ -422,7 +422,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("does not replace model-like key", func(t *testing.T) {
 		data := []byte(`{"model_id":"123","model":"target","choices":[]}`)
-		got , _ := rewriteModelInResponse(data, "target", "opus")
+		got, _ := rewriteModelInResponse(data, "target", "opus")
 		// model_id should not be affected
 		if !strings.Contains(string(got), `"model_id":"123"`) {
 			t.Errorf("model_id was incorrectly modified: %s", got)
@@ -434,7 +434,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("preserves non-model fields", func(t *testing.T) {
 		data := []byte(`{"model":"target","choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":10,"completion_tokens":20}}`)
-		got , _ := rewriteModelInResponse(data, "target", "opus")
+		got, _ := rewriteModelInResponse(data, "target", "opus")
 
 		var obj map[string]interface{}
 		if err := json.Unmarshal(got, &obj); err != nil {
@@ -453,7 +453,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 
 	t.Run("model name with slashes", func(t *testing.T) {
 		data := []byte(`{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","choices":[]}`)
-		got , _ := rewriteModelInResponse(data, "unsloth/Qwen3.6-27B-MTP-GGUF:BF16", "opus")
+		got, _ := rewriteModelInResponse(data, "unsloth/Qwen3.6-27B-MTP-GGUF:BF16", "opus")
 		want := `{"model":"opus","choices":[]}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -606,6 +606,58 @@ func TestLoopDetectorDetectsLoop(t *testing.T) {
 	}
 }
 
+func TestLoopDetectorSendsErrorToClient(t *testing.T) {
+	// The loop error frame must actually reach the client. Regression: the
+	// detected-guard in Write used to swallow the frame sent by sendLoopError.
+	recorder := &testResponseWriter{header: make(http.Header)}
+	ld := newLoopDetector(recorder, context.Background())
+
+	repeated := "data: {\"choices\":[{\"delta\":{\"content\":\"echo \"}}]}\n"
+	for i := 0; i < loopDetectionWindow+1; i++ {
+		if _, err := ld.Write([]byte(repeated)); err != nil {
+			break
+		}
+	}
+
+	if !ld.detected {
+		t.Fatal("loop should be detected")
+	}
+	if !strings.Contains(string(recorder.buf), "stuck in a loop") {
+		t.Errorf("client should receive loop error frame, got: %q", recorder.buf)
+	}
+}
+
+func TestStreamProxyLoopReturnsMidStreamError(t *testing.T) {
+	// A stuck backend (identical SSE chunks) must yield a *MidStreamError so the
+	// router knows headers were already sent and does not attempt fallback.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		chunk := "data: {\"choices\":[{\"delta\":{\"content\":\"same \"}}]}\n\n"
+		for i := 0; i < loopDetectionWindow+10; i++ {
+			if _, err := w.Write([]byte(chunk)); err != nil {
+				return
+			}
+		}
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	w := httptest.NewRecorder()
+
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil)
+	var midErr *MidStreamError
+	if !errors.As(err, &midErr) {
+		t.Fatalf("expected *MidStreamError for detected loop, got: %v", err)
+	}
+	if pm == nil {
+		t.Fatal("pm should not be nil")
+	}
+	if !strings.Contains(w.Body.String(), "stuck in a loop") {
+		t.Errorf("client should have received loop error frame, got: %q", w.Body.String())
+	}
+}
+
 func TestLoopDetectorMixedContent(t *testing.T) {
 	// Mix of different content should not trigger detection
 	recorder := &testResponseWriter{header: make(http.Header)}
@@ -613,7 +665,7 @@ func TestLoopDetectorMixedContent(t *testing.T) {
 	ld := newLoopDetector(recorder, ctx)
 
 	// Send varied content
-	for i := 0; i < loopDetectionWindow + 10; i++ {
+	for i := 0; i < loopDetectionWindow+10; i++ {
 		sse := fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":\"word %d \"}}]}\n", i)
 		_, err := ld.Write([]byte(sse))
 		if err != nil {
@@ -628,8 +680,8 @@ func TestLoopDetectorMixedContent(t *testing.T) {
 
 func TestLoopDetectorAllRecentIdentical(t *testing.T) {
 	ld := &loopDetector{
-		recent:  make([]string, loopDetectionWindow),
-		ctx:     context.Background(),
+		recent: make([]string, loopDetectionWindow),
+		ctx:    context.Background(),
 	}
 	ld.count = loopDetectionWindow
 	ld.index = loopDetectionWindow
@@ -779,6 +831,24 @@ func TestSendMidStreamError(t *testing.T) {
 	}
 }
 
+func TestSendMidStreamErrorTerminatesEvent(t *testing.T) {
+	// Regression: the event used a raw string, so "\n\n" was sent literally and
+	// clients never saw the SSE event terminator.
+	recorder := &testResponseWriter{header: make(http.Header)}
+	sendMidStreamError(recorder, fmt.Errorf("boom"))
+
+	got := string(recorder.buf)
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Errorf("event must end with real newlines, got: %q", got)
+	}
+	if strings.Contains(got, `\n\n`) {
+		t.Errorf("event contains literal backslash-n (raw-string bug), got: %q", got)
+	}
+	if strings.Contains(got, `[error: boom]`) == false {
+		t.Errorf("expected escaped message in event, got: %q", got)
+	}
+}
+
 func TestStreamProxyAnthropicRewrite(t *testing.T) {
 	// Full integration test: Anthropic API response should have model rewritten
 	backendModel := "unsloth/Qwen3.6-27B-MTP-GGUF:BF16"
@@ -833,8 +903,8 @@ func TestStreamProxyAnthropicStreamingRewrite(t *testing.T) {
 	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, `data: {"type":"message_start","message":{"model":"%s","id":"msg_123"}}\n\n`, backendModel) //nolint:errcheck
-		w.Write([]byte(`data: {"type":"content_block_delta","delta":{"text":"hello"}}\n\n`)) //nolint:errcheck
-		w.Write([]byte(`data: {"type":"message_stop"}\n\n`)) //nolint:errcheck
+		w.Write([]byte(`data: {"type":"content_block_delta","delta":{"text":"hello"}}\n\n`))                       //nolint:errcheck
+		w.Write([]byte(`data: {"type":"message_stop"}\n\n`))                                                       //nolint:errcheck
 	}))
 	defer primaryServer.Close()
 
@@ -872,7 +942,7 @@ func TestRewriteAnyModelValue(t *testing.T) {
 	t.Run("replaces different backend model", func(t *testing.T) {
 		// Backend returns its real model, client expects "opus"
 		data := []byte(`{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","content":[]}`)
-		got , _ := rewriteModelInResponse(data, "opus", "opus")
+		got, _ := rewriteModelInResponse(data, "opus", "opus")
 		want := `{"model":"opus","content":[]}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -881,7 +951,7 @@ func TestRewriteAnyModelValue(t *testing.T) {
 
 	t.Run("replaces in SSE event", func(t *testing.T) {
 		data := []byte(`data: {"type":"message_start","message":{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","id":"msg_123"}}`)
-		got , _ := rewriteModelInResponse(data, "opus", "opus")
+		got, _ := rewriteModelInResponse(data, "opus", "opus")
 		want := `data: {"type":"message_start","message":{"model":"opus","id":"msg_123"}}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -890,7 +960,7 @@ func TestRewriteAnyModelValue(t *testing.T) {
 
 	t.Run("skips if already correct", func(t *testing.T) {
 		data := []byte(`{"model":"opus","content":[]}`)
-		got , _ := rewriteModelInResponse(data, "opus", "opus")
+		got, _ := rewriteModelInResponse(data, "opus", "opus")
 		want := `{"model":"opus","content":[]}`
 		if string(got) != want {
 			t.Errorf("got %s, want %s", got, want)
@@ -899,7 +969,7 @@ func TestRewriteAnyModelValue(t *testing.T) {
 
 	t.Run("does not replace model_id", func(t *testing.T) {
 		data := []byte(`{"model_id":"123","model":"backend-model","content":[]}`)
-		got , _ := rewriteModelInResponse(data, "opus", "opus")
+		got, _ := rewriteModelInResponse(data, "opus", "opus")
 		if !strings.Contains(string(got), `"model_id":"123"`) {
 			t.Errorf("model_id was incorrectly modified: %s", got)
 		}
@@ -914,7 +984,7 @@ func TestRewriteAnyModelValueOpenAI(t *testing.T) {
 
 	t.Run("replaces in OpenAI JSON response", func(t *testing.T) {
 		data := []byte(`{"id":"chatcmpl-123","model":"llama-3.1-70b","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20}}`)
-		got , _ := rewriteModelInResponse(data, "gpt-4", "gpt-4")
+		got, _ := rewriteModelInResponse(data, "gpt-4", "gpt-4")
 		if !strings.Contains(string(got), `"model":"gpt-4"`) {
 			t.Errorf("model was not replaced: %s", got)
 		}
@@ -925,7 +995,7 @@ func TestRewriteAnyModelValueOpenAI(t *testing.T) {
 
 	t.Run("replaces in OpenAI SSE chunk", func(t *testing.T) {
 		data := []byte(`data: {"id":"chatcmpl-123","model":"llama-3.1-70b","choices":[{"delta":{"content":"hello"}}]}`)
-		got , _ := rewriteModelInResponse(data, "gpt-4", "gpt-4")
+		got, _ := rewriteModelInResponse(data, "gpt-4", "gpt-4")
 		if !strings.Contains(string(got), `"model":"gpt-4"`) {
 			t.Errorf("model was not replaced: %s", got)
 		}

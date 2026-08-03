@@ -87,7 +87,8 @@ func (t *HealthTracker) checkServer(srv *domain.Server) bool {
 		rawURL = "https://" + rawURL
 	}
 
-	modelsURL := rawURL + "/v1/models"
+	// TrimRight avoids a double slash when the URL ends with "/".
+	modelsURL := strings.TrimRight(rawURL, "/") + "/v1/models"
 	modelsURL = strings.ReplaceAll(modelsURL, "/v1/v1", "/v1")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

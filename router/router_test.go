@@ -81,6 +81,21 @@ func TestExtractModel(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "model inside message content is ignored",
+			body: []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"compare \"model\":\"gemini\" vs claude"}]}`),
+			want: "gpt-4",
+		},
+		{
+			name:    "nested model not used when top-level missing",
+			body:    []byte(`{"metadata":{"model":"internal-1"},"messages":[]}`),
+			wantErr: true,
+		},
+		{
+			name: "escaped quote in model value",
+			body: []byte(`{"model":"unsloth/Qwen3.6-27B-MTP-GGUF:BF16","messages":[]}`),
+			want: "unsloth/Qwen3.6-27B-MTP-GGUF:BF16",
+		},
+		{
 			name:    "empty object",
 			body:    []byte(`{}`),
 			wantErr: true,
@@ -315,7 +330,7 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 		IncomingModels: []string{"gpt-4"},
 		TargetModel:    "gpt-4",
 		ServerID:       "primary",
-		Fallbacks: []domain.FallbackEntry{{ServerID: "fallback"}},
+		Fallbacks:      []domain.FallbackEntry{{ServerID: "fallback"}},
 		Enabled:        true,
 	})
 
@@ -596,7 +611,7 @@ func TestMidStreamErrorNoFallback(t *testing.T) {
 	// When a mid-stream error occurs, the router should NOT try fallback
 	// because headers are already sent to the client. Instead, it should
 	// record whatever metrics it has and return.
-	
+
 	faultyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
@@ -655,12 +670,12 @@ func TestMidStreamErrorNoFallback(t *testing.T) {
 	// The response should contain the partial data from the faulty server
 	// (or at least not be a 502, since mid-stream error sends data to client)
 	respBody, _ := io.ReadAll(w.Result().Body)
-	
+
 	// Fallback server should NOT have been called
 	if fallbackCalled {
 		t.Error("fallback server should NOT have been called on mid-stream error")
 	}
-	
+
 	// Response should either contain partial data or an error event
 	// (not a 502 "all backends failed" error)
 	if len(respBody) > 0 && strings.Contains(string(respBody), "all backends failed") {

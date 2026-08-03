@@ -157,7 +157,8 @@ func (h *Handler) getServerModels(w http.ResponseWriter, req *http.Request, id s
 		return
 	}
 
-	modelsURL := target.Scheme + "://" + target.Host + target.Path + "/v1/models"
+	// TrimRight avoids a double slash when the URL ends with "/".
+	modelsURL := target.Scheme + "://" + target.Host + strings.TrimRight(target.Path, "/") + "/v1/models"
 	modelsURL = strings.ReplaceAll(modelsURL, "/v1/v1", "/v1")
 
 	proxyReq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, modelsURL, nil)
@@ -230,7 +231,8 @@ func (h *Handler) testServer(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	modelsURL := target.Scheme + "://" + target.Host + target.Path + "/v1/models"
+	// TrimRight avoids a double slash when the URL ends with "/".
+	modelsURL := target.Scheme + "://" + target.Host + strings.TrimRight(target.Path, "/") + "/v1/models"
 	modelsURL = strings.ReplaceAll(modelsURL, "/v1/v1", "/v1")
 
 	testReq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, modelsURL, nil)

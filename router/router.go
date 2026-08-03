@@ -49,6 +49,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Cap the request body to protect against memory exhaustion. LLM prompts can
+	// be large (long-context requests), so 64MB is generous.
+	req.Body = http.MaxBytesReader(w, req.Body, 64<<20)
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		log.Errorf("[%s] failed to read request body: %v", req.URL.Path, err)
@@ -296,50 +299,92 @@ func findJSONStringEnd(data []byte, pos int) int {
 	return -1
 }
 
-// extractModel reads the "model" field from a JSON body using byte-level search.
-// Avoids full JSON unmarshal allocation for a single field extraction.
+// extractModel reads the top-level "model" field from a JSON body using byte-level
+// scanning. Tracks object depth and string boundaries so "model" keys nested
+// inside other objects or quoted string content (e.g. a prompt discussing model
+// names) are not mistaken for the request model. Avoids full JSON unmarshal
+// allocation for a single field extraction.
 func extractModel(body []byte) (string, error) {
 	key := []byte(`"model"`)
 	keyLen := len(key)
+	depth := 0
 
-	for i := 0; i <= len(body)-keyLen; i++ {
-		if !bytes.Equal(body[i:i+keyLen], key) {
+	for i := 0; i < len(body); {
+		switch body[i] {
+		case '{':
+			depth++
+			i++
 			continue
-		}
-		endOfKey := i + keyLen
-
-		// Skip if it's a longer key like "model_id"
-		if endOfKey < len(body) {
-			b := body[endOfKey]
-			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-' {
-				continue
+		case '}':
+			depth--
+			i++
+			continue
+		case '"':
+			if depth == 1 && i+keyLen <= len(body) && bytes.Equal(body[i:i+keyLen], key) {
+				endOfKey := i + keyLen
+				// Skip longer keys like "model_id" / "model_name".
+				if endOfKey == len(body) || !isNameChar(body[endOfKey]) {
+					model, found, err := parseModelValue(body, endOfKey)
+					if err != nil {
+						return "", err
+					}
+					if found {
+						return model, nil
+					}
+				}
 			}
-		}
-
-		// Find colon
-		colonIdx := bytes.IndexByte(body[endOfKey:], ':')
-		if colonIdx < 0 {
+			i = skipString(body, i)
 			continue
+		default:
+			i++
 		}
-		valueStart := endOfKey + colonIdx + 1
-
-		// Skip whitespace
-		for valueStart < len(body) && (body[valueStart] == ' ' || body[valueStart] == '\t' || body[valueStart] == '\n' || body[valueStart] == '\r') {
-			valueStart++
-		}
-		if valueStart >= len(body) || body[valueStart] != '"' {
-			continue
-		}
-
-		// Extract string value (handle escapes)
-		strStart := valueStart + 1
-		strEnd := findJSONStringEnd(body, strStart)
-		if strEnd < 0 {
-			return "", fmt.Errorf("invalid model value")
-		}
-
-		return strings.TrimSpace(string(body[strStart:strEnd])), nil
 	}
 
 	return "", fmt.Errorf("missing 'model' field")
+}
+
+// parseModelValue extracts the string value of a "model" key, starting just past
+// the key's closing quote. found is false when the value is not a string (the
+// caller keeps scanning); an error is returned only for an unterminated value.
+func parseModelValue(body []byte, afterKey int) (string, bool, error) {
+	colonIdx := bytes.IndexByte(body[afterKey:], ':')
+	if colonIdx < 0 {
+		return "", false, nil
+	}
+	valueStart := afterKey + colonIdx + 1
+	for valueStart < len(body) && (body[valueStart] == ' ' || body[valueStart] == '\t' || body[valueStart] == '\n' || body[valueStart] == '\r') {
+		valueStart++
+	}
+	if valueStart >= len(body) || body[valueStart] != '"' {
+		return "", false, nil
+	}
+	strStart := valueStart + 1
+	strEnd := findJSONStringEnd(body, strStart)
+	if strEnd < 0 {
+		return "", false, fmt.Errorf("invalid model value")
+	}
+	return strings.TrimSpace(string(body[strStart:strEnd])), true, nil
+}
+
+// skipString returns the index just past the closing quote of the JSON string
+// starting at i (body[i] == '"'). Handles backslash escapes; returns len(body)
+// for an unterminated string.
+func skipString(body []byte, i int) int {
+	i++ // skip opening quote
+	for i < len(body) {
+		switch body[i] {
+		case '\\':
+			i += 2
+		case '"':
+			return i + 1
+		default:
+			i++
+		}
+	}
+	return len(body)
+}
+
+// isNameChar reports whether b can extend a JSON object key past "model".
+func isNameChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }

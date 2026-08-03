@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
@@ -89,7 +88,7 @@ func SetRouterHeaders(w http.ResponseWriter, h *RouterHeaders) {
 type headerInjector struct {
 	http.ResponseWriter
 	statusCode int
-	written  bool
+	written    bool
 }
 
 func newHeaderInjector(w http.ResponseWriter) *headerInjector {
@@ -211,108 +210,15 @@ func RewriteModelInBody(body []byte, newModel string) ([]byte, error) {
 	return out, nil
 }
 
-// ProxyResponse holds the result of a proxied request.
-type ProxyResponse struct {
-	StatusCode int
-	Header     http.Header
-	Body       io.ReadCloser
-}
-
-// Proxy forwards the request to the target server (non-streaming, captured).
-func Proxy(ctx context.Context, targetURL string, apiKey string, req *http.Request) (*ProxyResponse, error) {
-	rawURL := targetURL
-	if !strings.Contains(rawURL, "://") {
-		rawURL = "https://" + rawURL
-	}
-
-	target, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse target URL: %w", err)
-	}
-
-	targetPath := strings.TrimRight(target.Path, "/") + req.URL.Path
-	if strings.HasSuffix(target.Path, "/v1") && strings.HasPrefix(req.URL.Path, "/v1") {
-		targetPath = strings.TrimRight(target.Path, "/") + req.URL.Path[1:]
-	}
-
-	proxy := &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
-			r.URL.Scheme = target.Scheme
-			r.URL.Host = target.Host
-			r.URL.Path = targetPath
-			r.URL.RawQuery = req.URL.RawQuery
-
-			if apiKey != "" {
-				r.Header.Set("Authorization", "Bearer "+apiKey)
-			}
-
-			r.Header.Del("Host")
-		},
-		ModifyResponse: func(r *http.Response) error {
-			if r.Header != nil {
-				r.Header.Del("Transfer-Encoding")
-			}
-			return nil
-		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-		},
-	}
-
-	recorder := &responseRecorder{}
-	proxyReq := req.Clone(ctx)
-	proxyReq.GetBody = nil
-
-	proxy.ServeHTTP(recorder, proxyReq)
-
-	body, err := io.ReadAll(recorder.body)
-	if err != nil {
-		return nil, fmt.Errorf("read proxy response: %w", err)
-	}
-
-	return &ProxyResponse{
-		StatusCode: recorder.code,
-		Header:     recorder.header,
-		Body:       io.NopCloser(bytes.NewReader(body)),
-	}, nil
-}
-
-// responseRecorder captures the HTTP response from the reverse proxy.
-type responseRecorder struct {
-	code   int
-	header http.Header
-	body   *bytes.Buffer
-}
-
-func (r *responseRecorder) Header() http.Header {
-	if r.header == nil {
-		r.header = make(http.Header)
-	}
-	return r.header
-}
-
-func (r *responseRecorder) WriteHeader(code int) {
-	if r.header == nil {
-		r.header = make(http.Header)
-	}
-	r.code = code
-}
-
-func (r *responseRecorder) Write(data []byte) (int, error) {
-	if r.body == nil {
-		r.body = &bytes.Buffer{}
-	}
-	return r.body.Write(data)
-}
-
 // modelRewriteWriter wraps a metricsWriter to replace the target model name
 // with the original model name in JSON responses (both streaming and non-streaming).
 // It wraps the metricsWriter so that metrics (TTFB, size, buffer) are captured
 // for the actual data sent to the client.
 type modelRewriteWriter struct {
 	http.ResponseWriter
-	oldModel       string
-	newModel       string
-	capturedModel  string // backend model name captured before rewriting
+	oldModel      string
+	newModel      string
+	capturedModel string // backend model name captured before rewriting
 }
 
 func newModelRewriteWriter(mw *metricsWriter, oldModel, newModel string) *modelRewriteWriter {
@@ -624,10 +530,10 @@ type loopDetector struct {
 	// Ring buffer of recent SSE text contents
 	recent        []string
 	index         int
-	count         int     // number of contents seen
-	detected      bool    // loop already detected
-	written       bool    // WriteHeader already called
-	capturedModel string  // backend model name extracted from raw response
+	count         int    // number of contents seen
+	detected      bool   // loop already detected
+	written       bool   // WriteHeader already called
+	capturedModel string // backend model name extracted from raw response
 }
 
 func newLoopDetector(w http.ResponseWriter, ctx context.Context) *loopDetector {
@@ -693,18 +599,23 @@ func (d *loopDetector) allRecentIdentical() bool {
 }
 
 func (d *loopDetector) sendLoopError() error {
+	// Write through the underlying writer, not d.Write: the detected guard must
+	// not swallow the error frame we are sending to the client.
 	errJSON := `{"choices":[{"finish_reason":"error","delta":{"content":"Generation stopped: model appears to be stuck in a loop."}}]}`
-	if d.written {
-		// Headers already sent — append error event to existing stream
-		_, err := d.Write([]byte("data: " + errJSON + "\n\n"))
-		return err
+	event := []byte("data: " + errJSON + "\n\n")
+
+	if !d.written {
+		d.written = true
+		h := d.Header()
+		h.Set("Content-Type", "text/event-stream")
+		h.Set("Cache-Control", "no-cache")
+		d.WriteHeader(http.StatusInternalServerError)
 	}
-	d.written = true
-	h := d.Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	d.WriteHeader(http.StatusInternalServerError)
-	_, err := d.Write([]byte("data: " + errJSON + "\n\n"))
+
+	_, err := d.ResponseWriter.Write(event)
+	if flusher, ok := d.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 	return err
 }
 
@@ -806,8 +717,8 @@ func extractModelFromJSON(data []byte) string {
 // been sent to the client. Unlike pre-response errors, mid-stream errors cannot
 // trigger fallback because the client already received a partial response.
 type MidStreamError struct {
-	Err      error
-	Written  int64 // bytes written to client before the error
+	Err     error
+	Written int64 // bytes written to client before the error
 }
 
 func (e *MidStreamError) Error() string {
@@ -891,8 +802,10 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	for k, vv := range upstreamResp.Header {
 		headers[k] = vv
 	}
-	// Remove Transfer-Encoding — we handle chunking ourselves
+	// The response body may be rewritten (model names change the byte length),
+	// so drop length/framing headers and let Go compute correct chunked framing.
 	headers.Del("Transfer-Encoding")
+	headers.Del("Content-Length")
 
 	// Write status code (this triggers TTFB / headerInjector)
 	ld.WriteHeader(upstreamResp.StatusCode)
@@ -914,6 +827,14 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 			}
 			_, writeErr := ld.Write(buf[:n])
 			if writeErr != nil {
+				// Loop detected: the error event was already appended to the stream
+				// and headers are sent. Classify as mid-stream so the router does
+				// not attempt fallback (a second response would corrupt the stream).
+				if ld.detected {
+					m := mw.metrics()
+					m.BackendModel = mrw.capturedModel
+					return &m, &MidStreamError{Err: fmt.Errorf("stream loop detected: backend is repeating content"), Written: m.ResponseSize}
+				}
 				// Error writing to client (e.g., client disconnect)
 				if ctx.Err() != nil {
 					m := mw.metrics()
@@ -959,13 +880,11 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 // sendMidStreamError appends an error event to the ongoing stream to inform
 // the client that the backend disconnected mid-stream.
 func sendMidStreamError(w http.ResponseWriter, err error) {
-	// Sanitize error message
-	msg := strings.ReplaceAll(err.Error(), "\n", " ")
-	msg = strings.ReplaceAll(msg, "\"", "\\\"")
-
+	// Real newlines terminate the SSE event; escapeJSONString keeps the message
+	// valid JSON (quotes, backslashes, control chars).
 	errEvent := fmt.Sprintf(
-		`data: {"choices":[{"finish_reason":"error","delta":{"content":"[error: %s]"}}]}\n\n`,
-		msg,
+		"data: {\"choices\":[{\"finish_reason\":\"error\",\"delta\":{\"content\":\"[error: %s]\"}}]}\n\n",
+		escapeJSONString(err.Error()),
 	)
 	_, writeErr := w.Write([]byte(errEvent))
 	if writeErr != nil {
