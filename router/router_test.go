@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"llm-api-router/config"
 	"llm-api-router/domain"
@@ -22,7 +24,7 @@ func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ms := metrics.New(100)
-	return New(store, ms, nil, nil), store, ms
+	return New(store, ms, nil, nil, nil), store, ms
 }
 
 func TestAPITypeFromPath(t *testing.T) {
@@ -178,6 +180,44 @@ func TestListModels(t *testing.T) {
 			t.Errorf("got %d models, want 0", len(result.Data))
 		}
 	})
+
+	t.Run("exposes context_window", func(t *testing.T) {
+		r, store, _ := newTestRouter(t)
+		_ = store.AddRule(&domain.RoutingRule{
+			IncomingModels: []string{"opus"},
+			ServerID:       "s1",
+			Enabled:        true,
+			ContextWindow:  200000,
+		})
+		_ = store.AddRule(&domain.RoutingRule{
+			IncomingModels: []string{"unknown-window"},
+			ServerID:       "s2",
+			Enabled:        true,
+			ContextWindow:  0, // unknown → omitted
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+
+		var result struct {
+			Data []map[string]interface{} `json:"data"`
+		}
+		_ = json.NewDecoder(w.Result().Body).Decode(&result)
+
+		byID := map[string]map[string]interface{}{}
+		for _, m := range result.Data {
+			byID[m["id"].(string)] = m
+		}
+
+		if got, ok := byID["opus"]["context_window"]; !ok || got != float64(200000) {
+			t.Errorf("opus context_window = %v (present: %v), want 200000", got, ok)
+		}
+		// LiteLLM behavior: absent (not null) when malformed/unknown.
+		if _, present := byID["unknown-window"]["context_window"]; present {
+			t.Error("unknown-window should not have context_window")
+		}
+	})
 }
 
 func TestHandleMethodNotAllowed(t *testing.T) {
@@ -277,6 +317,78 @@ func TestHandleAllBackendsFail(t *testing.T) {
 	}
 }
 
+// TestHandleInjectsStreamUsage verifies the router injects
+// stream_options.include_usage for streaming OpenAI chat completions and
+// strips the resulting usage chunk from the client stream while recording it
+// in metrics.
+func TestHandleInjectsStreamUsage(t *testing.T) {
+	var receivedBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 4096)
+		n, _ := r.Body.Read(buf)
+		receivedBody = string(buf[:n])
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer backend.Close()
+
+	r, store, ms := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "s1",
+		Name:     "test-server",
+		URL:      backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","stream":true,"messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	var sent map[string]interface{}
+	if err := json.Unmarshal([]byte(receivedBody), &sent); err != nil {
+		t.Fatalf("backend received invalid body %q: %v", receivedBody, err)
+	}
+	so, ok := sent["stream_options"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("stream_options not injected into upstream request: %v", sent)
+	}
+	if inc, _ := so["include_usage"].(bool); !inc {
+		t.Error("include_usage should be true upstream")
+	}
+
+	if strings.Contains(w.Body.String(), "usage") {
+		t.Errorf("client stream should not contain usage chunk:\n%s", w.Body.String())
+	}
+
+	sum := ms.Summaries()
+	if len(sum) == 0 {
+		t.Fatal("no metrics recorded")
+	}
+	found := false
+	for _, s := range sum {
+		if s.TotalRequests > 0 {
+			found = true
+			if s.TotalPromptTok != 3 || s.TotalCompleteTok != 1 {
+				t.Errorf("usage should be captured despite stripping, got prompt=%d completion=%d", s.TotalPromptTok, s.TotalCompleteTok)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no metric summary for gpt-4: %+v", sum)
+	}
+}
+
 func TestHandleAnthropicPath(t *testing.T) {
 	r, store, _ := newTestRouter(t)
 
@@ -335,7 +447,7 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 	})
 
 	// Create router with health tracker
-	r := New(store, ms, health, nil)
+	r := New(store, ms, health, nil, nil)
 
 	// Simulate client disconnect by cancelling context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -680,5 +792,500 @@ func TestMidStreamErrorNoFallback(t *testing.T) {
 	// (not a 502 "all backends failed" error)
 	if len(respBody) > 0 && strings.Contains(string(respBody), "all backends failed") {
 		t.Errorf("should not return 'all backends failed' for mid-stream error, got: %s", respBody)
+	}
+}
+
+func TestRetriesSameServerBeforeFallback(t *testing.T) {
+	// A server that fails twice (connection closed pre-response) then succeeds
+	// should be retried per NumRetries and never hit the fallback.
+	var calls atomic.Int32
+	flakyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 {
+			hj, ok := w.(http.Hijacker)
+			if ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					conn.Close() //nolint:errcheck
+					return
+				}
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer flakyServer.Close()
+
+	fallbackCalled := false
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer fallbackServer.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "flaky",
+		Name:     "Flaky",
+		URL:      flakyServer.URL,
+		APIKey:   "key1",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "backup",
+		Name:     "Backup",
+		URL:      fallbackServer.URL,
+		APIKey:   "key2",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "flaky",
+		NumRetries:     2,
+		Fallbacks: []domain.FallbackEntry{
+			{ServerID: "backup", TargetModel: "backup-model"},
+		},
+		Enabled: true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if got := w.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("got status %d, want 200", got)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("primary server hit %d times, want 3 (1 + 2 retries)", calls.Load())
+	}
+	if fallbackCalled {
+		t.Error("fallback server should NOT have been called when retries recovered")
+	}
+}
+
+func TestRetriesExhaustedThenFallsBack(t *testing.T) {
+	// A server that always fails should be retried NumRetries times and then
+	// fall back to the next server.
+	var calls atomic.Int32
+
+	deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				conn.Close() //nolint:errcheck
+				return
+			}
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer deadServer.Close()
+
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer fallbackServer.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "dead",
+		Name:     "Dead",
+		URL:      deadServer.URL,
+		APIKey:   "key1",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "backup",
+		Name:     "Backup",
+		URL:      fallbackServer.URL,
+		APIKey:   "key2",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "dead",
+		NumRetries:     2,
+		Fallbacks: []domain.FallbackEntry{
+			{ServerID: "backup", TargetModel: "backup-model"},
+		},
+		Enabled: true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if got := w.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("got status %d, want 200 (via fallback)", got)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("dead server hit %d times, want 3 (1 + 2 retries)", calls.Load())
+	}
+}
+
+func TestRetriesHeaderOverridesRule(t *testing.T) {
+	// X-Router-Retries header overrides rule's num_retries: rule says 0 but
+	// header says 1, so the flaky server gets retried and recovers.
+	var calls atomic.Int32
+
+	flakyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			hj, ok := w.(http.Hijacker)
+			if ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					conn.Close() //nolint:errcheck
+					return
+				}
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer flakyServer.Close()
+
+	fallbackCalled := false
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer fallbackServer.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "flaky",
+		Name:     "Flaky",
+		URL:      flakyServer.URL,
+		APIKey:   "key1",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "backup",
+		Name:     "Backup",
+		URL:      fallbackServer.URL,
+		APIKey:   "key2",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "flaky",
+		NumRetries:     0,
+		Fallbacks: []domain.FallbackEntry{
+			{ServerID: "backup", TargetModel: "backup-model"},
+		},
+		Enabled: true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	req.Header.Set("X-Router-Retries", "1")
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if got := w.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("got status %d, want 200", got)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("flaky server hit %d times, want 2 (1 + 1 retry from header)", calls.Load())
+	}
+	if fallbackCalled {
+		t.Error("fallback server should NOT have been called when header retry recovered")
+	}
+}
+
+func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
+	// A 429 response from the primary puts it into immediate cooldown; the
+	// next request should skip it and go to the fallback.
+	var primaryCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error"}}`)) //nolint:errcheck
+	}))
+	defer primary.Close()
+
+	var fallbackCalls atomic.Int32
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer fallback.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	// Build a router with a real rate limiter (newTestRouter passes nil).
+	rl := config.NewRateLimiter(5, 60*time.Second, 5*time.Minute)
+	r = New(store, r.metrics, nil, rl, nil)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "primary",
+		Name:     "Primary",
+		URL:      primary.URL,
+		APIKey:   "key1",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "fallback",
+		Name:     "Fallback",
+		URL:      fallback.URL,
+		APIKey:   "key2",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "primary",
+		Fallbacks: []domain.FallbackEntry{
+			{ServerID: "fallback", TargetModel: "backup-model"},
+		},
+		Enabled: true,
+	})
+
+	doRequest := func() *httptest.ResponseRecorder {
+		body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+		return w
+	}
+
+	// First request: 429 forwarded to client, primary enters immediate cooldown
+	w1 := doRequest()
+	if got := w1.Result().StatusCode; got != http.StatusTooManyRequests {
+		t.Fatalf("first request status = %d, want 429", got)
+	}
+
+	// Second request: primary in cooldown → fallback serves it
+	w2 := doRequest()
+	if got := w2.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("second request status = %d, want 200 (via fallback)", got)
+	}
+	if primaryCalls.Load() != 1 {
+		t.Errorf("primary hit %d times, want 1 (skipped after cooldown)", primaryCalls.Load())
+	}
+	if fallbackCalls.Load() != 1 {
+		t.Errorf("fallback hit %d times, want 1", fallbackCalls.Load())
+	}
+}
+
+func TestQuotaTPMBlocksRoutesToFallback(t *testing.T) {
+	// Primary exhausts its TPM quota on the first request; the second request
+	// must be routed to the fallback.
+	var primaryCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"gpt-4","usage":{"prompt_tokens":1000,"completion_tokens":0,"total_tokens":1000},"choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer primary.Close()
+
+	var fallbackCalls atomic.Int32
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer fallback.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	// Build a router with a quota tracker (newTestRouter passes nil).
+	q := config.NewQuotaTracker()
+	q.SetLimitOverride(func(id string) (tpm, rpm int64) {
+		if id == "primary" {
+			return 1000, 0
+		}
+		return 0, 0
+	})
+	r = New(store, r.metrics, nil, nil, q)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "primary",
+		Name:     "Primary",
+		URL:      primary.URL,
+		APIKey:   "key1",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "fallback",
+		Name:     "Fallback",
+		URL:      fallback.URL,
+		APIKey:   "key2",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "primary",
+		Fallbacks: []domain.FallbackEntry{
+			{ServerID: "fallback", TargetModel: "backup-model"},
+		},
+		Enabled: true,
+	})
+
+	doRequest := func() *httptest.ResponseRecorder {
+		body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+		return w
+	}
+
+	// First request: primary serves it, uses 1000 tokens (at TPM boundary)
+	w1 := doRequest()
+	if got := w1.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", got)
+	}
+
+	// Second request: primary blocked by quota → fallback serves it
+	w2 := doRequest()
+	if got := w2.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("second request status = %d, want 200 (via fallback)", got)
+	}
+	if primaryCalls.Load() != 1 {
+		t.Errorf("primary hit %d times, want 1 (blocked by TPM quota)", primaryCalls.Load())
+	}
+	if fallbackCalls.Load() != 1 {
+		t.Errorf("fallback hit %d times, want 1", fallbackCalls.Load())
+	}
+}
+
+func TestRouterObservabilityHeaders(t *testing.T) {
+	// Primary fails (transport) → fallback succeeds: response must carry
+	// X-Router-Attempts=2/2, X-Router-Retries=0, X-Router-Fallback-Errors=[...].
+	var fallbackCalled bool
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer fallback.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "primary",
+		Name:     "Primary",
+		URL:      "http://localhost:1", // unreachable
+		APIKey:   "key1",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "fallback",
+		Name:     "Fallback",
+		URL:      fallback.URL,
+		APIKey:   "key2",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"opus"},
+		TargetModel:    "gpt-4",
+		ServerID:       "primary",
+		NumRetries:     1,
+		Fallbacks: []domain.FallbackEntry{
+			{ServerID: "fallback", TargetModel: "backup-model"},
+		},
+		Enabled: true,
+	})
+
+	body := strings.NewReader(`{"model":"opus","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200", resp.StatusCode)
+	}
+	if !fallbackCalled {
+		t.Fatal("fallback should have been called")
+	}
+
+	if got := resp.Header.Get("X-Router-Attempts"); got != "2/2" {
+		t.Errorf("X-Router-Attempts = %q, want 2/2", got)
+	}
+	if got := resp.Header.Get("X-Router-Retries"); got != "0" {
+		t.Errorf("X-Router-Retries = %q, want 0", got)
+	}
+	if got := resp.Header.Get("X-Router-Fallback-Errors"); got == "" {
+		t.Error("X-Router-Fallback-Errors should list the primary's error")
+	}
+	if got := resp.Header.Get("X-Router-Server"); got != "fallback" {
+		t.Errorf("X-Router-Server = %q, want fallback", got)
+	}
+}
+
+func TestRouterObservabilityHeadersRetriesRecovered(t *testing.T) {
+	// Server fails once then succeeds: response must carry X-Router-Retries=1
+	// and X-Router-Attempts=1/1 (no fallback).
+	var calls atomic.Int32
+	flaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			hj, ok := w.(http.Hijacker)
+			if ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					conn.Close() //nolint:errcheck
+					return
+				}
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer flaky.Close()
+
+	r, store, _ := newTestRouter(t)
+
+	_ = store.AddServer(&domain.Server{
+		ID:       "flaky",
+		Name:     "Flaky",
+		URL:      flaky.URL,
+		APIKey:   "key1",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "flaky",
+		NumRetries:     2,
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Router-Attempts"); got != "1/1" {
+		t.Errorf("X-Router-Attempts = %q, want 1/1", got)
+	}
+	if got := resp.Header.Get("X-Router-Retries"); got != "1" {
+		t.Errorf("X-Router-Retries = %q, want 1", got)
+	}
+	if got := resp.Header.Get("X-Router-Fallback-Errors"); got != "" {
+		t.Errorf("X-Router-Fallback-Errors should be empty, got %q", got)
 	}
 }

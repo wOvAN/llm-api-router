@@ -127,6 +127,9 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
       <label style="display:inline-flex;align-items:center;gap:4px;"><input type="checkbox" id="server-api-type-anthropic" checked style="width:auto;"> Anthropic</label>
     </label>
     <label><span>API Key</span><input id="server-api-key" type="password" class="api-key-input" placeholder="sk-..."></label>
+    <label><span>Cooldown Time (сек, 0 = глобальный 5 мин)</span><input id="server-cooldown" type="number" min="0" step="1" value="0"></label>
+    <label><span>TPM Limit (токенов/мин, 0 = без лимита)</span><input id="server-tpm" type="number" min="0" step="1" value="0"></label>
+    <label><span>RPM Limit (запросов/мин, 0 = без лимита)</span><input id="server-rpm" type="number" min="0" step="1" value="0"></label>
     <div id="server-test-result" style="margin-bottom:12px;font-size:0.8rem;display:none;"></div>
     <div class="btn-row">
       <button onclick="closeServerModal()">Cancel</button>
@@ -143,6 +146,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <input type="hidden" id="rule-edit-idx">
     <label><span>Incoming Models (через запятую)</span><input id="rule-incoming" type="text" placeholder="e.g. opus,sonnet,claude-opus"></label>
     <label><span>Primary Server</span><select id="rule-server" onchange="fetchServerModels()"></select></label>
+    <label><span>Context Window (токенов, 0 = неизвестно)</span><input id="rule-context-window" type="number" min="0" step="1" value="0"></label>
     <label><span>Target Model</span>
       <div id="rule-target-wrap" style="margin-top:4px;">
         <select id="rule-target-sel" style="width:100%;"><option value="">(выберите модель)</option></select>
@@ -357,6 +361,9 @@ async function saveServer() {
     anthropic_url: document.getElementById('server-anthropic-url').value,
     api_types: getServerAPITypes(),
     api_key: document.getElementById('server-api-key').value,
+    cooldown_time: parseInt(document.getElementById('server-cooldown').value, 10) || 0,
+    tpm_limit: parseInt(document.getElementById('server-tpm').value, 10) || 0,
+    rpm_limit: parseInt(document.getElementById('server-rpm').value, 10) || 0,
   };
   const method = id ? 'PUT' : 'POST';
   const url = id ? API + '/servers/' + encodeURIComponent(data.id) : API + '/servers';
@@ -384,6 +391,9 @@ async function editServer(id) {
   document.getElementById('server-openai-url').value = s.openai_url || '';
   document.getElementById('server-anthropic-url').value = s.anthropic_url || '';
   document.getElementById('server-api-key').value = s.api_key;
+  document.getElementById('server-cooldown').value = s.cooldown_time || 0;
+  document.getElementById('server-tpm').value = s.tpm_limit || 0;
+  document.getElementById('server-rpm').value = s.rpm_limit || 0;
 }
 
 async function deleteServer(id) {
@@ -470,6 +480,7 @@ async function openRuleModal() {
   document.getElementById('rule-target-inp').value = '';
   document.getElementById('rule-target-inp').style.display = 'none';
   document.getElementById('rule-enabled').checked = true;
+  document.getElementById('rule-context-window').value = 0;
   document.getElementById('fallbacks-container').innerHTML = '';
   document.getElementById('rule-modal').classList.add('open');
 }
@@ -487,6 +498,7 @@ async function saveRule() {
     server_id: document.getElementById('rule-server').value,
     fallbacks: getFallbacks(),
     enabled: document.getElementById('rule-enabled').checked,
+    context_window: parseInt(document.getElementById('rule-context-window').value, 10) || 0,
   };
   const method = idx !== '' ? 'PUT' : 'POST';
   const url = idx !== '' ? API + '/rules/' + idx : API + '/rules';
@@ -529,6 +541,7 @@ async function editRule(idx) {
   document.getElementById('rule-incoming').value = (r.incoming_models || []).join(', ');
   document.getElementById('rule-server').value = r.server_id;
   document.getElementById('rule-enabled').checked = r.enabled !== false;
+  document.getElementById('rule-context-window').value = r.context_window || 0;
   // Populate fallbacks
   const fbs = r.fallbacks || (r.fallback_server_ids || []).map(id => ({server_id: id, target_model: ''}));
   document.getElementById('fallbacks-container').innerHTML = '';

@@ -17,6 +17,14 @@ type Server struct {
 	AnthropicURL string    `json:"anthropic_url,omitempty"`
 	APIKey       string    `json:"api_key"`
 	APITypes     []APIType `json:"api_types"`
+	// CooldownTime overrides the rate-limiter cooldown duration for this server
+	// (seconds). 0 = use the global default.
+	CooldownTime int64 `json:"cooldown_time,omitempty"`
+	// TPMLimit caps tokens-per-minute sent to this server (0 = unlimited).
+	// Enforced by QuotaTracker over a sliding 60s window.
+	TPMLimit int64 `json:"tpm_limit,omitempty"`
+	// RPMLimit caps requests-per-minute sent to this server (0 = unlimited).
+	RPMLimit int64 `json:"rpm_limit,omitempty"`
 }
 
 // GetURLForAPIType returns the URL to use for the given API type.

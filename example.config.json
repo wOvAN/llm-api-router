@@ -21,7 +21,10 @@
       "openai_url": "localhost:8080/v1",
       "anthropic_url": "localhost:8080/anthropic/v1",
       "api_key": "",
-      "api_types": ["openai", "anthropic"]
+      "api_types": ["openai", "anthropic"],
+      "cooldown_time": 120,
+      "tpm_limit": 100000,
+      "rpm_limit": 60
     },
     "fallback": {
       "id": "fallback",
@@ -36,6 +39,8 @@
       "incoming_models": ["opus", "sonnet"],
       "target_model": "o3-mini",
       "server_id": "primary-openai",
+      "num_retries": 2,
+      "context_window": 200000,
       "fallbacks": [
         {
           "server_id": "fallback",
@@ -62,5 +67,8 @@
       "fallbacks": [],
       "enabled": false
     }
-  ]
+  ],
+  "settings": {
+    "always_include_stream_usage": false
+  }
 }

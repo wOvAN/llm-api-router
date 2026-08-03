@@ -494,8 +494,11 @@ func TestHeaderInjector(t *testing.T) {
 func TestSetRouterHeaders(t *testing.T) {
 	recorder := &testResponseWriter{header: make(http.Header)}
 	rh := &RouterHeaders{
-		ServerID:   "srv-1",
-		ServerName: "Primary Backend",
+		ServerID:       "srv-1",
+		ServerName:     "Primary Backend",
+		Attempts:       "2/3",
+		Retries:        1,
+		FallbackErrors: []string{"connection refused", "timeout"},
 	}
 	SetRouterHeaders(recorder, rh)
 
@@ -504,6 +507,37 @@ func TestSetRouterHeaders(t *testing.T) {
 	}
 	if recorder.header.Get("X-Router-Server-Name") != "Primary Backend" {
 		t.Errorf("X-Router-Server-Name = %q, want %q", recorder.header.Get("X-Router-Server-Name"), "Primary Backend")
+	}
+	if got := recorder.header.Get("X-Router-Attempts"); got != "2/3" {
+		t.Errorf("X-Router-Attempts = %q, want %q", got, "2/3")
+	}
+	if got := recorder.header.Get("X-Router-Retries"); got != "1" {
+		t.Errorf("X-Router-Retries = %q, want %q", got, "1")
+	}
+	if got := recorder.header.Get("X-Router-Fallback-Errors"); got != `["connection refused","timeout"]` {
+		t.Errorf("X-Router-Fallback-Errors = %q", got)
+	}
+}
+
+func TestSetRouterHeadersZeroValuesOmitted(t *testing.T) {
+	recorder := &testResponseWriter{header: make(http.Header)}
+	rh := &RouterHeaders{
+		ServerID:   "srv-1",
+		ServerName: "Primary",
+		// Attempts empty, Retries 0, FallbackErrors nil → omitted except Retries
+	}
+	SetRouterHeaders(recorder, rh)
+
+	if recorder.header.Get("X-Router-Attempts") != "" {
+		t.Error("X-Router-Attempts should be omitted when empty")
+	}
+	// X-Router-Retries is always written (even "0") to overwrite stale values
+	// from previous retry/fallback attempts on the same response writer.
+	if got := recorder.header.Get("X-Router-Retries"); got != "0" {
+		t.Errorf("X-Router-Retries = %q, want 0", got)
+	}
+	if recorder.header.Get("X-Router-Fallback-Errors") != "" {
+		t.Error("X-Router-Fallback-Errors should be omitted when empty")
 	}
 }
 
@@ -645,7 +679,7 @@ func TestStreamProxyLoopReturnsMidStreamError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
 	w := httptest.NewRecorder()
 
-	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil)
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false)
 	var midErr *MidStreamError
 	if !errors.As(err, &midErr) {
 		t.Fatalf("expected *MidStreamError for detected loop, got: %v", err)
@@ -771,7 +805,7 @@ func TestMidStreamError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
 	w := httptest.NewRecorder()
 
-	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, "gpt-4", "gpt-4", nil)
+	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, "gpt-4", "gpt-4", nil, false)
 
 	// Should get a MidStreamError
 	var midErr *MidStreamError
@@ -877,7 +911,7 @@ func TestStreamProxyAnthropicRewrite(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(rewrittenBody)))
 	w := httptest.NewRecorder()
 
-	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil)
+	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil, false)
 	if err != nil {
 		t.Fatalf("StreamProxy: %v", err)
 	}
@@ -916,7 +950,7 @@ func TestStreamProxyAnthropicStreamingRewrite(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(rewrittenBody)))
 	w := httptest.NewRecorder()
 
-	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil)
+	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil, false)
 	if err != nil {
 		t.Fatalf("StreamProxy: %v", err)
 	}

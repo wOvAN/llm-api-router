@@ -100,8 +100,9 @@ func (s *Store) GetConfig() *domain.Config {
 	defer s.mu.RUnlock()
 
 	cfg := &domain.Config{
-		Servers: make(map[string]*domain.Server, len(s.config.Servers)),
-		Rules:   make([]*domain.RoutingRule, len(s.config.Rules)),
+		Servers:  make(map[string]*domain.Server, len(s.config.Servers)),
+		Rules:    make([]*domain.RoutingRule, len(s.config.Rules)),
+		Settings: s.config.Settings,
 	}
 
 	for id, srv := range s.config.Servers {
@@ -127,6 +128,13 @@ func (s *Store) GetConfig() *domain.Config {
 	}
 
 	return cfg
+}
+
+// GetSettings returns a copy of the global router settings.
+func (s *Store) GetSettings() domain.Settings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.config.Settings
 }
 
 // GetServer returns a server by ID.
@@ -264,9 +272,11 @@ func (s *Store) DeleteRule(idx int) error {
 // cloneRule returns a deep copy of a RoutingRule with fresh slices.
 func cloneRule(rule *domain.RoutingRule) *domain.RoutingRule {
 	cpy := &domain.RoutingRule{
-		TargetModel:    rule.TargetModel,
-		ServerID:       rule.ServerID,
-		Enabled:        rule.Enabled,
+		TargetModel:   rule.TargetModel,
+		ServerID:      rule.ServerID,
+		NumRetries:    rule.NumRetries,
+		Enabled:       rule.Enabled,
+		ContextWindow: rule.ContextWindow,
 	}
 	if rule.IncomingModels != nil {
 		cpy.IncomingModels = make([]string, len(rule.IncomingModels))

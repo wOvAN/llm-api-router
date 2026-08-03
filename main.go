@@ -52,9 +52,26 @@ func main() {
 	healthTracker.Start()
 
 	// Rate limiter: skip server after 5 failures within 60s, cooldown for 5min.
+	// 429/401/403 cooldown immediately; per-server cooldown_time (seconds)
+	// overrides the global duration.
 	rateLimiter := config.NewRateLimiter(5, 60*time.Second, 5*time.Minute)
+	rateLimiter.SetCooldownOverride(func(id string) time.Duration {
+		if srv, ok := store.GetServer(id); ok && srv.CooldownTime > 0 {
+			return time.Duration(srv.CooldownTime) * time.Second
+		}
+		return 0
+	})
 
-	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter)
+	// Quota tracker: per-server TPM/RPM limits from config (lazy lookup).
+	quotaTracker := config.NewQuotaTracker()
+	quotaTracker.SetLimitOverride(func(id string) (tpm, rpm int64) {
+		if srv, ok := store.GetServer(id); ok {
+			return srv.TPMLimit, srv.RPMLimit
+		}
+		return 0, 0
+	})
+
+	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter, quotaTracker)
 	adminHandler := admin.NewHandler(store, metricsStore, healthTracker)
 
 	adminStatic, _ := fs.Sub(staticFS, "admin/static")
@@ -63,6 +80,16 @@ func main() {
 
 	mux.HandleFunc("/v1/", apiRouter.Handle)
 	mux.HandleFunc("/admin/api/", adminHandler.ServeHTTP)
+
+	// Prometheus text-format metrics endpoint (zero deps).
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = w.Write([]byte(metricsStore.PrometheusMetrics()))
+	})
 
 	mux.HandleFunc("/admin/", func(w http.ResponseWriter, req *http.Request) {
 		path := strings.TrimPrefix(req.URL.Path, "/admin/")

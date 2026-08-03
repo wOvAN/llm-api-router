@@ -65,6 +65,14 @@ type ProxyMetrics struct {
 type RouterHeaders struct {
 	ServerID   string // Sets X-Router-Server
 	ServerName string // Sets X-Router-Server-Name
+	// Attempts sets X-Router-Attempts (e.g. "2/3" — current attempt / total).
+	Attempts string
+	// Retries sets X-Router-Retries: how many retries on this server happened
+	// before the request succeeded (0 = first try).
+	Retries int
+	// FallbackErrors sets X-Router-Fallback-Errors: JSON list of errors from
+	// earlier failed attempts.
+	FallbackErrors []string
 }
 
 // SetRouterHeaders sets eager headers (server info) on the given ResponseWriter.
@@ -75,6 +83,18 @@ func SetRouterHeaders(w http.ResponseWriter, h *RouterHeaders) {
 	}
 	w.Header().Set("X-Router-Server", h.ServerID)
 	w.Header().Set("X-Router-Server-Name", h.ServerName)
+	if h.Attempts != "" {
+		w.Header().Set("X-Router-Attempts", h.Attempts)
+	}
+	// Always write retries (even 0): the response writer's header map persists
+	// across retry/fallback attempts, so a previous attempt's value must be
+	// overwritten for the attempt that actually served the request.
+	w.Header().Set("X-Router-Retries", strconv.Itoa(h.Retries))
+	if len(h.FallbackErrors) > 0 {
+		if b, err := json.Marshal(h.FallbackErrors); err == nil {
+			w.Header().Set("X-Router-Fallback-Errors", string(b))
+		}
+	}
 }
 
 // headerInjector wraps an http.ResponseWriter to inject X-Router-* headers
@@ -736,11 +756,14 @@ func (e *MidStreamError) Unwrap() error {
 // in the response is rewritten from targetModel back to originalModel so the
 // client sees its own model name.
 // If rh is non-nil, X-Router-* headers are injected into the response.
+// If strip is true, injected stream-usage artifacts (empty-choice SSE
+// frames appended by upstreams that received stream_options.include_usage) are
+// filtered from the client stream while still being captured in metrics.
 //
 // Mid-stream errors (backend disconnects after headers are sent) are detected
 // and returned as *MidStreamError. The client receives an error event appended
 // to the stream, but fallback is not possible because headers are already sent.
-func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, targetModel, originalModel string, rh *RouterHeaders) (*ProxyMetrics, error) {
+func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, targetModel, originalModel string, rh *RouterHeaders, strip bool) (*ProxyMetrics, error) {
 	rawURL := targetURL
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "https://" + rawURL
@@ -757,7 +780,11 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	}
 
 	start := time.Now()
-	mw := newMetricsWriter(w, start)
+	var clientW http.ResponseWriter = w
+	if strip {
+		clientW = newUsageStripper(w)
+	}
+	mw := newMetricsWriter(clientW, start)
 	defer bufPool.Put(mw.bodyBuffer) //nolint:errcheck
 	mrw := newModelRewriteWriter(mw, targetModel, originalModel)
 	var rw http.ResponseWriter = mrw
@@ -870,6 +897,12 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		m := mw.metrics()
 		m.BackendModel = mrw.capturedModel
 		return &m, fmt.Errorf("stream loop detected: backend is repeating content")
+	}
+
+	// Flush any bytes the usage stripper is still holding (e.g. a trailing
+	// frame that the backend closed without a blank-line terminator).
+	if flusher, ok := clientW.(http.Flusher); ok {
+		flusher.Flush()
 	}
 
 	m := mw.metrics()

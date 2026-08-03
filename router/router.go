@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,11 +23,12 @@ type Router struct {
 	metrics   *metrics.Store
 	health    *config.HealthTracker
 	rateLimit *config.RateLimiter
+	quota     *config.QuotaTracker
 }
 
 // New creates a new Router.
-func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter) *Router {
-	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit}
+func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter, quota *config.QuotaTracker) *Router {
+	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit, quota: quota}
 }
 
 // apiTypeFromPath determines the API type from the request path.
@@ -97,7 +99,21 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	}
 
 	requestStart := time.Now()
+	// Inject stream_options.include_usage for OpenAI streaming chat completions so
+	// backends report token usage even when the client didn't opt in. stripStream
+	// hides the injected usage chunk from the client (unless configured otherwise).
+	apiType := apiTypeFromPath(req.URL.Path)
+	stripStream := false
+	if apiType == domain.APITypeOpenAI && strings.Contains(req.URL.Path, "/chat/completions") {
+		alwaysInclude := r.store.GetSettings().AlwaysIncludeStreamUsage
+		var injected bool
+		body, injected = proxy.EnsureStreamUsage(body, alwaysInclude)
+		stripStream = injected
+	}
 	var lastErr error
+	// Errors from failed attempts, surfaced to the client via
+	// X-Router-Fallback-Errors (preceding attempts only).
+	var attemptErrors []string
 	for i, attempt := range attempts {
 		srv := attempt.server
 		targetModel := attempt.targetModel
@@ -117,15 +133,20 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 
+		// Skip quota-exceeded servers (TPM/RPM at limit; except the last attempt)
+		if r.quota != nil && !r.quota.Allow(srv.ID) && i < len(attempts)-1 {
+			tokens, reqs := r.quota.Usage(srv.ID)
+			log.Warnf("[%s] model=%q — skipping quota-exceeded server %s (tpm=%d rpm=%d, attempt %d/%d)",
+				req.URL.Path, model, srv.Name, tokens, reqs, i+1, len(attempts))
+			continue
+		}
+
 		rewrittenBody, err := proxy.RewriteModelInBody(body, targetModel)
 		if err != nil {
 			log.Errorf("[%s] failed to rewrite model %q -> %q: %v", req.URL.Path, model, targetModel, err)
 			http.Error(w, fmt.Sprintf("failed to rewrite model: %v", err), http.StatusInternalServerError)
 			return
 		}
-
-		req.Body = io.NopCloser(bytes.NewReader(rewrittenBody))
-		req.ContentLength = int64(len(rewrittenBody))
 
 		wasFallback := i > 0
 
@@ -147,24 +168,92 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			log.Debugf("[%s] response rewrite: any model → %q (backend may return its actual model)", req.URL.Path, responseModel)
 		}
 		rh := &proxy.RouterHeaders{
-			ServerID:   srv.ID,
-			ServerName: srv.Name,
+			ServerID:       srv.ID,
+			ServerName:     srv.Name,
+			Attempts:       fmt.Sprintf("%d/%d", i+1, len(attempts)),
+			FallbackErrors: attemptErrors,
 		}
-		pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, responseModel, rh)
-		if err != nil {
+
+		// Retry-before-fallback: on transport (pre-response) errors retry the
+		// same server up to NumRetries times before moving to the next server.
+		// Precedence: X-Router-Retries header > rule's num_retries.
+		numRetries := rule.NumRetries
+		if h := req.Header.Get("X-Router-Retries"); h != "" {
+			if n, parseErr := strconv.Atoi(h); parseErr == nil && n >= 0 {
+				numRetries = n
+			}
+		}
+
+		for retry := 0; ; retry++ {
+			// The upstream client consumes req.Body on each attempt; rebuild it
+			// so a retry sends a fresh body.
+			req.Body = io.NopCloser(bytes.NewReader(rewrittenBody))
+			req.ContentLength = int64(len(rewrittenBody))
+			rh.Retries = retry
+
+			pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, responseModel, rh, stripStream)
+			if err == nil {
+				// Success — mark healthy. Rate limiter is status-aware: only
+				// successful (2xx) responses clear failures/cooldown; 4xx/5xx
+				// responses count toward cooldown (429/401/403 immediately).
+				if r.health != nil {
+					r.health.MarkHealthy(srv.ID)
+				}
+				if r.rateLimit != nil {
+					if pm.StatusCode >= 400 {
+						r.rateLimit.RecordFailure(srv.ID, pm.StatusCode)
+					} else {
+						r.rateLimit.RecordSuccess(srv.ID)
+					}
+				}
+				// Account quota usage (TPM/RPM) for successful responses.
+				if r.quota != nil {
+					r.quota.RecordRequest(srv.ID)
+					r.quota.RecordTokens(srv.ID, int64(pm.TotalTokens))
+				}
+
+				if pm.StatusCode >= 400 {
+					log.Errorf("[%s] model=%q -> %q on %s returned HTTP %d %s: %s",
+						req.URL.Path, model, targetModel, srv.Name, pm.StatusCode, http.StatusText(pm.StatusCode), pm.ErrorBody)
+				}
+
+				latency := time.Since(requestStart).Milliseconds()
+				r.metrics.Add(domain.RequestMetric{
+					Timestamp:             requestStart,
+					Model:                 model,
+					TargetModel:           targetModel,
+					BackendModel:          pm.BackendModel,
+					ServerID:              srv.ID,
+					StatusCode:            pm.StatusCode,
+					LatencyMs:             latency,
+					TTFBMs:                pm.TTFBMs,
+					ResponseSize:          pm.ResponseSize,
+					WasFallback:           wasFallback,
+					PromptTokens:          pm.PromptTokens,
+					CompletionTokens:      pm.CompletionTokens,
+					TotalTokens:           pm.TotalTokens,
+					CachedTokens:          pm.CachedTokens,
+					NativePromptMs:        pm.PromptMs,
+					NativePredictedMs:     pm.PredictedMs,
+					NativePromptTokPerSec: pm.PromptPerSec,
+					NativeDecodeTokPerSec: pm.TokensPerSec,
+				})
+				return
+			}
+
 			// Client disconnect: stop immediately, no fallback needed
 			if req.Context().Err() != nil {
 				log.Warnf("[%s] model=%q — client disconnected during proxy (attempt %d/%d)",
 					req.URL.Path, model, i+1, len(attempts))
 				return
 			}
-			// Mid-stream error: headers already sent to client, fallback impossible
+			// Mid-stream error: headers already sent to client, retry/fallback impossible
 			if _, isMidStream := err.(*proxy.MidStreamError); isMidStream {
 				if r.health != nil {
 					r.health.MarkUnhealthy(srv.ID)
 				}
 				if r.rateLimit != nil {
-					r.rateLimit.RecordFailure(srv.ID)
+					r.rateLimit.RecordFailure(srv.ID, pm.StatusCode)
 				}
 				log.Errorf("[%s] model=%q — mid-stream error on %s (attempt %d/%d): %v",
 					req.URL.Path, model, srv.Name, i+1, len(attempts), err)
@@ -188,53 +277,30 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				})
 				return
 			}
-			// Network error (pre-response): mark unhealthy and try fallback
+
+			// Transport error (pre-response): retry same server if retries left,
+			// otherwise mark unhealthy and fall through to the next server.
 			lastErr = err
+			if retry < numRetries {
+				log.Warnf("[%s] model=%q — retrying %s (%d/%d): %v",
+					req.URL.Path, model, srv.Name, retry+1, numRetries, err)
+				select {
+				case <-time.After(retryBackoff(retry)):
+				case <-req.Context().Done():
+					return
+				}
+				continue
+			}
 			if r.health != nil {
 				r.health.MarkUnhealthy(srv.ID)
 			}
 			if r.rateLimit != nil {
-				r.rateLimit.RecordFailure(srv.ID)
+				r.rateLimit.RecordFailure(srv.ID, 0)
 			}
+			attemptErrors = append(attemptErrors, err.Error())
 			log.Errorf("[%s] fallback from %s: %v", req.URL.Path, srv.Name, err)
-			continue
+			break
 		}
-
-		// Success — mark healthy and clear rate limit
-		if r.health != nil {
-			r.health.MarkHealthy(srv.ID)
-		}
-		if r.rateLimit != nil {
-			r.rateLimit.RecordSuccess(srv.ID)
-		}
-
-		if pm.StatusCode >= 400 {
-			log.Errorf("[%s] model=%q -> %q on %s returned HTTP %d %s: %s",
-				req.URL.Path, model, targetModel, srv.Name, pm.StatusCode, http.StatusText(pm.StatusCode), pm.ErrorBody)
-		}
-
-		latency := time.Since(requestStart).Milliseconds()
-		r.metrics.Add(domain.RequestMetric{
-			Timestamp:             requestStart,
-			Model:                 model,
-			TargetModel:           targetModel,
-			BackendModel:          pm.BackendModel,
-			ServerID:              srv.ID,
-			StatusCode:            pm.StatusCode,
-			LatencyMs:             latency,
-			TTFBMs:                pm.TTFBMs,
-			ResponseSize:          pm.ResponseSize,
-			WasFallback:           wasFallback,
-			PromptTokens:          pm.PromptTokens,
-			CompletionTokens:      pm.CompletionTokens,
-			TotalTokens:           pm.TotalTokens,
-			CachedTokens:          pm.CachedTokens,
-			NativePromptMs:        pm.PromptMs,
-			NativePredictedMs:     pm.PredictedMs,
-			NativePromptTokPerSec: pm.PromptPerSec,
-			NativeDecodeTokPerSec: pm.TokensPerSec,
-		})
-		return
 	}
 
 	latency := time.Since(requestStart).Milliseconds()
@@ -254,6 +320,22 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	http.Error(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
 }
 
+// retryBackoff returns the delay before retry attempt n (0-based): 100ms, 250ms,
+// 500ms, then capped at 1s. Keeps retries fast but avoids hammering a failing
+// backend.
+func retryBackoff(n int) time.Duration {
+	switch {
+	case n <= 0:
+		return 100 * time.Millisecond
+	case n == 1:
+		return 250 * time.Millisecond
+	case n == 2:
+		return 500 * time.Millisecond
+	default:
+		return time.Second
+	}
+}
+
 // listModels returns the list of incoming model names (what clients can request).
 func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 	cfg := r.store.GetConfig()
@@ -271,6 +353,11 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 				"owned_by": "router",
 				"target":   rule.TargetModel,
 				"server":   rule.ServerID,
+			}
+			// Clients (Claude Code etc.) read context_window to size prompts.
+			// Omitted entirely when unknown (malformed/0 → absent, per LiteLLM).
+			if rule.ContextWindow > 0 {
+				m["context_window"] = rule.ContextWindow
 			}
 			models = append(models, m)
 		}
