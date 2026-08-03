@@ -780,7 +780,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	}
 
 	start := time.Now()
-	var clientW http.ResponseWriter = w
+	clientW := w
 	if strip {
 		clientW = newUsageStripper(w)
 	}
