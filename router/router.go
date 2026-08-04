@@ -60,7 +60,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
-	defer req.Body.Close() //nolint:errcheck
+	defer func() {
+		if err := req.Body.Close(); err != nil {
+			log.Errorf("[%s] failed to close request body: %v", req.URL.Path, err)
+		}
+	}()
 
 	model, err := extractModel(body)
 	if err != nil {
@@ -364,10 +368,12 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"object": "list",
 		"data":   models,
-	})
+	}); err != nil {
+		log.Errorf("[%s] failed to encode /v1/models response: %v", req.URL.Path, err)
+	}
 }
 
 // findJSONStringEnd finds the closing quote of a JSON string starting at pos.

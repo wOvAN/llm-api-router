@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"llm-api-router/config"
 	"llm-api-router/domain"
 	"llm-api-router/metrics"
+	"llm-api-router/pkg/log"
 )
 
 // Handler serves the admin API for managing servers and routing rules.
@@ -69,7 +71,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Errorf("failed to encode JSON response: %v", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
@@ -177,7 +181,11 @@ func (h *Handler) getServerModels(w http.ResponseWriter, req *http.Request, id s
 		writeError(w, http.StatusBadGateway, "failed to reach server: "+err.Error())
 		return
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Errorf("getServerModels: failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		writeError(w, resp.StatusCode, fmt.Sprintf("server returned %d", resp.StatusCode))
@@ -257,12 +265,19 @@ func (h *Handler) testServer(w http.ResponseWriter, req *http.Request) {
 		})
 		return
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Errorf("testServer: failed to close response body: %v", err)
+		}
+	}()
 
 	var bodySnippet string
 	if resp.Body != nil {
 		buf := make([]byte, 200)
-		n, _ := resp.Body.Read(buf)
+		n, err := resp.Body.Read(buf)
+		if err != nil && err != io.EOF {
+			log.Errorf("testServer: failed to read response body: %v", err)
+		}
 		bodySnippet = string(buf[:n])
 	}
 

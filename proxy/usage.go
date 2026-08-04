@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+
+	"llm-api-router/pkg/log"
 )
 
 // usagePaths lists JSON paths where usage can appear in SSE events.
@@ -17,6 +19,7 @@ func extractUsageFromResponse(body []byte, contentEncoding string, isStream bool
 	if contentEncoding != "" {
 		decompressed, err := decompressBody(body, contentEncoding)
 		if err != nil {
+			log.Warnf("extractUsage: failed to decompress %q response body: %v", contentEncoding, err)
 			return ProxyMetrics{CachedTokens: -1}
 		}
 		body = decompressed
@@ -61,6 +64,7 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 
 		var obj map[string]interface{}
 		if err := json.Unmarshal(data, &obj); err != nil {
+			log.Debugf("extractUsage from stream: failed to parse SSE data line: %v", err)
 			continue
 		}
 
@@ -99,6 +103,7 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 func extractUsageFromJSON(body []byte) ProxyMetrics {
 	var obj map[string]interface{}
 	if err := json.Unmarshal(body, &obj); err != nil {
+		log.Debugf("extractUsage from JSON: failed to parse response body: %v", err)
 		return ProxyMetrics{CachedTokens: -1}
 	}
 
@@ -201,11 +206,19 @@ func decompressBody(body []byte, encoding string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer reader.Close() //nolint:errcheck
+		defer func() {
+			if err := reader.Close(); err != nil {
+				log.Errorf("usage: failed to close gzip reader: %v", err)
+			}
+		}()
 		return io.ReadAll(reader)
 	case "deflate":
 		reader := flate.NewReader(bytes.NewReader(body))
-		defer reader.Close() //nolint:errcheck
+		defer func() {
+			if err := reader.Close(); err != nil {
+				log.Errorf("usage: failed to close flate reader: %v", err)
+			}
+		}()
 		return io.ReadAll(reader)
 	default:
 		return body, nil

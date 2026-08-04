@@ -93,6 +93,8 @@ func SetRouterHeaders(w http.ResponseWriter, h *RouterHeaders) {
 	if len(h.FallbackErrors) > 0 {
 		if b, err := json.Marshal(h.FallbackErrors); err == nil {
 			w.Header().Set("X-Router-Fallback-Errors", string(b))
+		} else {
+			log.Errorf("failed to marshal fallback errors: %v", err)
 		}
 	}
 }
@@ -665,6 +667,7 @@ func extractSSEContents(data []byte) []string {
 		// Extract content from JSON
 		var obj map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			log.Debugf("loopDetector: failed to parse SSE data line: %v", err)
 			continue
 		}
 
@@ -822,7 +825,11 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		}
 		return nil, fmt.Errorf("upstream request failed: %w", err)
 	}
-	defer upstreamResp.Body.Close() //nolint:errcheck
+	defer func() {
+		if err := upstreamResp.Body.Close(); err != nil {
+			log.Errorf("failed to close upstream response body: %v", err)
+		}
+	}()
 
 	// Copy response headers
 	headers := ld.Header()

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+
+	"llm-api-router/pkg/log"
 )
 
 // EnsureStreamUsage injects stream_options.include_usage=true into OpenAI
@@ -22,6 +24,7 @@ import (
 func EnsureStreamUsage(body []byte, alwaysInclude bool) ([]byte, bool) {
 	var obj map[string]interface{}
 	if err := json.Unmarshal(body, &obj); err != nil {
+		log.Debugf("EnsureStreamUsage: failed to parse request body: %v", err)
 		return body, false
 	}
 
@@ -44,6 +47,7 @@ func EnsureStreamUsage(body []byte, alwaysInclude bool) ([]byte, bool) {
 
 	out, err := json.Marshal(obj)
 	if err != nil {
+		log.Errorf("EnsureStreamUsage: failed to re-marshal request body: %v", err)
 		return body, false
 	}
 	return out, !alwaysInclude
@@ -96,7 +100,9 @@ func (s *usageStripper) Write(data []byte) (int, error) {
 // Flush flushes any remaining buffered bytes, then the underlying flusher.
 func (s *usageStripper) Flush() {
 	if len(s.pending) > 0 {
-		_, _ = s.ResponseWriter.Write(s.pending)
+		if _, err := s.ResponseWriter.Write(s.pending); err != nil {
+			log.Errorf("usageStripper: failed to flush buffered SSE frames to client: %v", err)
+		}
 		s.pending = nil
 	}
 	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
@@ -133,6 +139,7 @@ func isUsageArtifact(frame []byte) bool {
 	}
 	var obj map[string]interface{}
 	if err := json.Unmarshal(line, &obj); err != nil {
+		log.Debugf("usageStripper: failed to parse SSE frame: %v", err)
 		return false
 	}
 	choices, ok := obj["choices"]

@@ -74,7 +74,10 @@ func main() {
 	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter, quotaTracker)
 	adminHandler := admin.NewHandler(store, metricsStore, healthTracker)
 
-	adminStatic, _ := fs.Sub(staticFS, "admin/static")
+	adminStatic, err := fs.Sub(staticFS, "admin/static")
+	if err != nil {
+		log.Fatalf("Failed to load admin static files: %v", err)
+	}
 
 	mux := http.NewServeMux()
 
@@ -88,7 +91,9 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		_, _ = w.Write([]byte(metricsStore.PrometheusMetrics()))
+		if _, err := w.Write([]byte(metricsStore.PrometheusMetrics())); err != nil {
+			log.Errorf("[%s] failed to write metrics response: %v", req.URL.Path, err)
+		}
 	})
 
 	mux.HandleFunc("/admin/", func(w http.ResponseWriter, req *http.Request) {
@@ -104,7 +109,9 @@ func main() {
 			http.ServeFileFS(w, req, adminStatic, "index.html")
 			return
 		}
-		_ = f.Close()
+		if err := f.Close(); err != nil {
+			log.Errorf("[%s] failed to close admin static file: %v", req.URL.Path, err)
+		}
 
 		http.ServeFileFS(w, req, adminStatic, path)
 	})

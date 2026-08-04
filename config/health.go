@@ -96,6 +96,7 @@ func (t *HealthTracker) checkServer(srv *domain.Server) bool {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
 	if err != nil {
+		log.Debugf("[health] %s: failed to create probe request: %v", srv.Name, err)
 		return false
 	}
 	if srv.APIKey != "" {
@@ -104,9 +105,12 @@ func (t *HealthTracker) checkServer(srv *domain.Server) bool {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Debugf("[health] %s: probe failed: %v", srv.Name, err)
 		return false
 	}
-	resp.Body.Close() //nolint:errcheck
+	if err := resp.Body.Close(); err != nil {
+		log.Warnf("[health] %s: failed to close probe response body: %v", srv.Name, err)
+	}
 	return resp.StatusCode == http.StatusOK
 }
 
