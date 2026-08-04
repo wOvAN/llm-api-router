@@ -229,6 +229,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					BackendModel:          pm.BackendModel,
 					ServerID:              srv.ID,
 					StatusCode:            pm.StatusCode,
+					ErrorBody:             pm.ErrorBody,
 					LatencyMs:             latency,
 					TTFBMs:                pm.TTFBMs,
 					ResponseSize:          pm.ResponseSize,
@@ -270,6 +271,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					BackendModel:     pm.BackendModel,
 					ServerID:         srv.ID,
 					StatusCode:       pm.StatusCode,
+					ErrorBody:        pm.ErrorBody,
 					LatencyMs:        latency,
 					TTFBMs:           pm.TTFBMs,
 					ResponseSize:     pm.ResponseSize,
@@ -308,12 +310,17 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	}
 
 	latency := time.Since(requestStart).Milliseconds()
+	errorBody := ""
+	if lastErr != nil {
+		errorBody = lastErr.Error()
+	}
 	r.metrics.Add(domain.RequestMetric{
 		Timestamp:    requestStart,
 		Model:        model,
 		TargetModel:  rule.TargetModel,
 		ServerID:     primaryServer.ID,
 		StatusCode:   http.StatusBadGateway,
+		ErrorBody:    errorBody,
 		LatencyMs:    latency,
 		TTFBMs:       0,
 		ResponseSize: 0,

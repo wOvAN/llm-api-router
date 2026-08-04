@@ -30,6 +30,7 @@ button.danger { color: #f85149; border-color: #f85149; }
 button.danger:hover { background: #f8514922; }
 button.primary { background: #238636; border-color: #238636; color: #fff; }
 button.primary:hover { background: #2ea043; }
+button.copy-icon { padding: 1px 6px; font-size: 0.7rem; margin-left: 4px; border-radius: 3px; vertical-align: middle; }
 
 .btn-row { display: flex; gap: 8px; margin-bottom: 16px; }
 
@@ -821,6 +822,10 @@ async function loadMetrics() {
   rbody.innerHTML = recent.slice().reverse().map(r => {
     const time = new Date(r.timestamp).toLocaleTimeString([], { hour12: false });
     const statusColor = r.status_code >= 200 && r.status_code < 300 ? '#3fb950' : r.status_code >= 400 ? '#f85149' : '#8b949e';
+    const errText = r.status_code !== 200 && r.error_body ? r.error_body : '';
+    const statusCell = errText
+      ? `<td style="color:${statusColor}" title="${esc(errText)}">${r.status_code}<button class="copy-icon" data-err="${esc(errText)}" onclick="copyErrorText(this)" title="Copy error text">⧉</button></td>`
+      : `<td style="color:${statusColor}">${r.status_code}</td>`;
     const size = r.response_size ? formatBytes(r.response_size) : '-';
     const fallback = r.was_fallback ? '<span class="tag" style="background:#3a3a1a;color:#d29922">yes</span>' : '-';
     const prefill = r.prefill_time_ms != null ? r.prefill_time_ms + 'ms' : '-';
@@ -840,7 +845,7 @@ async function loadMetrics() {
       <td>${esc(r.model)}</td>
       <td>${esc(r.target_model)}</td>
       <td>${esc(r.server_id)}</td>
-      <td style="color:${statusColor}">${r.status_code}</td>
+      ${statusCell}
       <td>${r.latency_ms}ms</td>
       <td>${prefill}</td>
       <td>${decode}</td>
@@ -864,6 +869,20 @@ async function resetMetrics() {
     return;
   }
   loadMetrics();
+}
+
+async function copyErrorText(btn) {
+  const text = btn.dataset.err;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+  }
 }
 
 function formatBytes(b) {

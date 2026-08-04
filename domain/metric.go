@@ -10,6 +10,7 @@ type RequestMetric struct {
 	BackendModel     string    `json:"backend_model"`
 	ServerID         string    `json:"server_id"`
 	StatusCode       int       `json:"status_code"`
+	ErrorBody        string    `json:"error_body"`
 	LatencyMs        int64     `json:"latency_ms"`
 	TTFBMs           int64     `json:"ttfb_ms"`
 	ResponseSize     int64     `json:"response_size"`
