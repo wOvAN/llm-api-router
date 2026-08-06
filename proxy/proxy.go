@@ -35,6 +35,103 @@ var upstreamTransport = &http.Transport{
 // upstreamClient is the shared HTTP client for all upstream requests.
 var upstreamClient = &http.Client{Transport: upstreamTransport}
 
+// KeepAliveIdle is the upstream-silence threshold after which StreamProxy
+// injects a heartbeat frame into an SSE client stream. Long inference pauses
+// (backend thinking between tokens, batched serving) otherwise trip client-side
+// read timeouts ("waiting for api responses", "api timeout"). Exported so
+// tests (and operators) can tune it.
+var KeepAliveIdle = 15 * time.Second
+
+// keepAliveWriter injects heartbeat frames into the SSE stream when the
+// upstream stays silent for KeepAliveIdle. The heartbeat is written directly
+// to the underlying ResponseWriter — bypassing the frame-buffering layers
+// above — so it can never be glued onto a partial frame, and it is only armed
+// for text/event-stream responses (JSON bodies must not be polluted).
+//
+// Start/Stop/Write/Flush are mutex-guarded because the heartbeat timer fires
+// from its own goroutine while the relay loop writes from another.
+type keepAliveWriter struct {
+	http.ResponseWriter
+	mu      sync.Mutex
+	ping    []byte
+	idle    time.Duration
+	timer   *time.Timer
+	started bool
+}
+
+func newKeepAliveWriter(w http.ResponseWriter, ping []byte, idle time.Duration) *keepAliveWriter {
+	return &keepAliveWriter{ResponseWriter: w, ping: ping, idle: idle}
+}
+
+// Start arms the heartbeat timer. Must be called once the response is known
+// to be an SSE stream; before Start no heartbeats are sent.
+func (k *keepAliveWriter) Start() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.started {
+		return
+	}
+	k.started = true
+	k.armLocked()
+}
+
+// Stop disarms the heartbeat timer; safe to call multiple times.
+func (k *keepAliveWriter) Stop() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.started = false
+	if k.timer != nil {
+		k.timer.Stop()
+	}
+}
+
+func (k *keepAliveWriter) Write(data []byte) (int, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	n, err := k.ResponseWriter.Write(data)
+	if k.started {
+		k.armLocked()
+	}
+	return n, err
+}
+
+func (k *keepAliveWriter) Flush() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if f, ok := k.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// armLocked (re)arms the timer to fire after idle of silence. Called with mu
+// held. A fresh AfterFunc timer is created instead of Reset so re-arming from
+// inside the callback (pingTick) can never deadlock on Reset's wait.
+func (k *keepAliveWriter) armLocked() {
+	if k.timer != nil {
+		k.timer.Stop()
+	}
+	k.timer = time.AfterFunc(k.idle, k.pingTick)
+}
+
+// pingTick runs on the timer goroutine: inject a heartbeat, flush, and arm
+// the next idle window.
+func (k *keepAliveWriter) pingTick() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.started {
+		return
+	}
+	if _, err := k.ResponseWriter.Write(k.ping); err != nil {
+		log.Warnf("keepAlive: heartbeat write failed: %v", err)
+		k.started = false
+		return
+	}
+	if f, ok := k.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+	k.armLocked()
+}
+
 // bufPool reuses bytes.Buffer instances across requests to reduce GC pressure.
 var bufPool = sync.Pool{
 	New: func() any {
@@ -773,11 +870,15 @@ func (e *MidStreamError) Unwrap() error {
 // If strip is true, injected stream-usage artifacts (empty-choice SSE
 // frames appended by upstreams that received stream_options.include_usage) are
 // filtered from the client stream while still being captured in metrics.
+// If ping is non-nil, SSE heartbeats are injected into text/event-stream
+// responses when the upstream stays silent for KeepAliveIdle (client read
+// timeouts during long backend pauses). ping carries the protocol-appropriate
+// heartbeat frame (Anthropic "event: ping" or an OpenAI SSE comment).
 //
 // Mid-stream errors (backend disconnects after headers are sent) are detected
 // and returned as *MidStreamError. The client receives an error event appended
 // to the stream, but fallback is not possible because headers are already sent.
-func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, targetModel, originalModel string, rh *RouterHeaders, strip bool) (*ProxyMetrics, error) {
+func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http.Request, w http.ResponseWriter, targetModel, originalModel string, rh *RouterHeaders, strip bool, ping []byte) (*ProxyMetrics, error) {
 	rawURL := targetURL
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "https://" + rawURL
@@ -795,10 +896,17 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 	start := time.Now()
 	var clientW http.ResponseWriter
+	baseW := w
+	var ka *keepAliveWriter
+	if ping != nil {
+		ka = newKeepAliveWriter(w, ping, KeepAliveIdle)
+		defer ka.Stop()
+		baseW = ka
+	}
 	if strip {
-		clientW = newUsageStripper(w)
+		clientW = newUsageStripper(baseW)
 	} else {
-		clientW = newSSEFrameWriter(w)
+		clientW = newSSEFrameWriter(baseW)
 	}
 	mw := newMetricsWriter(clientW, start)
 	defer bufPool.Put(mw.bodyBuffer) //nolint:errcheck
@@ -853,6 +961,13 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// so drop length/framing headers and let Go compute correct chunked framing.
 	headers.Del("Transfer-Encoding")
 	headers.Del("Content-Length")
+
+	// Arm heartbeats for SSE streams: while the backend thinks (or pauses
+	// between tokens) the client would otherwise see silence long enough to
+	// trip its read timeout.
+	if ka != nil && strings.Contains(upstreamResp.Header.Get("Content-Type"), "text/event-stream") {
+		ka.Start()
+	}
 
 	// Write status code (this triggers TTFB / headerInjector)
 	ld.WriteHeader(upstreamResp.StatusCode)

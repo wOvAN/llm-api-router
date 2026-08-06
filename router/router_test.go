@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"llm-api-router/config"
 	"llm-api-router/domain"
 	"llm-api-router/metrics"
+	"llm-api-router/proxy"
 )
 
 func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
@@ -33,6 +35,7 @@ func TestAPITypeFromPath(t *testing.T) {
 		want domain.APIType
 	}{
 		{"/v1/chat/completions", domain.APITypeOpenAI},
+		{"/v1/responses", domain.APITypeOpenAI},
 		{"/v1/completions", domain.APITypeOpenAI},
 		{"/v1/messages", domain.APITypeAnthropic},
 		{"/v1/messages/stream", domain.APITypeAnthropic},
@@ -43,6 +46,28 @@ func TestAPITypeFromPath(t *testing.T) {
 			got := apiTypeFromPath(tt.path)
 			if got != tt.want {
 				t.Errorf("apiTypeFromPath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAPIEndpointFromPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/v1/chat/completions", "chat"},
+		{"/v1/responses", "responses"},
+		{"/v1/messages", "messages"},
+		{"/v1/messages/stream", "messages"},
+		{"/v1/embeddings", "embeddings"},
+		{"/v1/completions", "completions"},
+		{"/v1/unknown", "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := apiEndpointFromPath(tt.path); got != tt.want {
+				t.Errorf("apiEndpointFromPath(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
 	}
@@ -386,6 +411,242 @@ func TestHandleInjectsStreamUsage(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no metric summary for gpt-4: %+v", sum)
+	}
+}
+
+// TestHandleResponsesAPI verifies /v1/responses (OpenAI Responses API) requests
+// are routed as OpenAI API type: model rewritten to the target upstream, then
+// rewritten back to the client's original model, with usage extracted from the
+// Responses API usage format (top-level "usage", input_tokens/output_tokens).
+func TestHandleResponsesAPI(t *testing.T) {
+	var gotPath, receivedBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		buf, _ := io.ReadAll(r.Body)
+		receivedBody = string(buf)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","model":"gpt-4o-real","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14,"input_tokens_details":{"cached_tokens":5}}}`))
+	}))
+	defer backend.Close()
+
+	r, store, ms := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "s1",
+		Name:     "test-server",
+		URL:      backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4o-real",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","input":"hi"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+	if gotPath != "/v1/responses" {
+		t.Errorf("backend path = %q, want /v1/responses", gotPath)
+	}
+	var sent map[string]interface{}
+	if err := json.Unmarshal([]byte(receivedBody), &sent); err != nil {
+		t.Fatalf("backend received invalid body %q: %v", receivedBody, err)
+	}
+	if m, _ := sent["model"].(string); m != "gpt-4o-real" {
+		t.Errorf("upstream model = %q, want gpt-4o-real", m)
+	}
+
+	// Client response: model rewritten back to the original name.
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("client response invalid: %v", err)
+	}
+	if m, _ := resp["model"].(string); m != "gpt-4" {
+		t.Errorf("response model = %q, want gpt-4", m)
+	}
+
+	recent := ms.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("expected 1 metric, got %d", len(recent))
+	}
+	m := recent[0]
+	if m.APIEndpoint != "responses" {
+		t.Errorf("APIEndpoint = %q, want responses", m.APIEndpoint)
+	}
+	if m.APIType != domain.APITypeOpenAI {
+		t.Errorf("APIType = %q, want openai", m.APIType)
+	}
+	if m.PromptTokens != 11 || m.CompletionTokens != 3 || m.TotalTokens != 14 {
+		t.Errorf("tokens = prompt %d completion %d total %d, want 11/3/14", m.PromptTokens, m.CompletionTokens, m.TotalTokens)
+	}
+	if m.CachedTokens != 5 {
+		t.Errorf("CachedTokens = %d, want 5", m.CachedTokens)
+	}
+}
+
+// TestHandleResponsesAPIStreaming verifies streaming /v1/responses: SSE events
+// are relayed to the client, the model is rewritten inside streamed response
+// objects, and usage is extracted from the response.completed event
+// (the "response.usage" path).
+func TestHandleResponsesAPIStreaming(t *testing.T) {
+	var receivedBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf, _ := io.ReadAll(r.Body)
+		receivedBody = string(buf)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":\"gpt-4o-real\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4o-real\",\"usage\":{\"input_tokens\":11,\"output_tokens\":3,\"total_tokens\":14,\"input_tokens_details\":{\"cached_tokens\":5}}}}\n\n"))
+	}))
+	defer backend.Close()
+
+	r, store, ms := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "s1",
+		Name:     "test-server",
+		URL:      backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4o-real",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","input":"hi"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	var sent map[string]interface{}
+	if err := json.Unmarshal([]byte(receivedBody), &sent); err != nil {
+		t.Fatalf("backend received invalid body %q: %v", receivedBody, err)
+	}
+	if m, _ := sent["model"].(string); m != "gpt-4o-real" {
+		t.Errorf("upstream model = %q, want gpt-4o-real", m)
+	}
+
+	client := w.Body.String()
+	if !strings.Contains(client, `"type":"response.output_text.delta"`) {
+		t.Errorf("client stream missing delta event:\n%s", client)
+	}
+	if strings.Contains(client, "gpt-4o-real") {
+		t.Errorf("client stream still contains target model:\n%s", client)
+	}
+	if !strings.Contains(client, `"model":"gpt-4"`) {
+		t.Errorf("client stream missing rewritten model:\n%s", client)
+	}
+
+	recent := ms.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("expected 1 metric, got %d", len(recent))
+	}
+	m := recent[0]
+	if m.APIEndpoint != "responses" {
+		t.Errorf("APIEndpoint = %q, want responses", m.APIEndpoint)
+	}
+	if m.PromptTokens != 11 || m.CompletionTokens != 3 {
+		t.Errorf("tokens = prompt %d completion %d, want 11/3", m.PromptTokens, m.CompletionTokens)
+	}
+	if m.CachedTokens != 5 {
+		t.Errorf("CachedTokens = %d, want 5", m.CachedTokens)
+	}
+}
+
+// syncRecorder is a goroutine-safe ResponseRecorder: the heartbeat timer
+// writes from its own goroutine while the relay loop writes from another.
+type syncRecorder struct {
+	mu     sync.Mutex
+	header http.Header
+	status int
+	body   strings.Builder
+}
+
+func newSyncRecorder() *syncRecorder {
+	return &syncRecorder{header: make(http.Header)}
+}
+
+func (s *syncRecorder) Header() http.Header { return s.header }
+func (s *syncRecorder) WriteHeader(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status = code
+}
+func (s *syncRecorder) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.body.Write(p)
+}
+func (s *syncRecorder) Flush() {}
+func (s *syncRecorder) content() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.body.String()
+}
+
+// TestHandleAnthropicKeepAlive verifies the router injects Anthropic ping
+// heartbeats ("event: ping", the official protocol frame) into /v1/messages
+// streams while the backend stays silent, so clients do not time out while the
+// backend is thinking.
+func TestHandleAnthropicKeepAlive(t *testing.T) {
+	old := proxy.KeepAliveIdle
+	proxy.KeepAliveIdle = 30 * time.Millisecond
+	defer func() { proxy.KeepAliveIdle = old }()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-3-opus\"}}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(100 * time.Millisecond) // backend pause longer than the heartbeat idle
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"))
+	}))
+	defer backend.Close()
+
+	r, store, _ := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "s1",
+		Name:     "test-server",
+		URL:      backend.URL,
+		APITypes: []domain.APIType{domain.APITypeAnthropic},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"claude-3"},
+		TargetModel:    "claude-3-opus",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"claude-3","max_tokens":100}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+	w := newSyncRecorder()
+	r.Handle(w, req)
+
+	got := w.content()
+	start := strings.Index(got, "message_start")
+	ping := strings.Index(got, "event: ping")
+	delta := strings.Index(got, "content_block_delta")
+	if start < 0 || delta < 0 {
+		t.Fatalf("stream incomplete:\n%s", got)
+	}
+	if ping < 0 {
+		t.Fatalf("client stream missing Anthropic ping heartbeat:\n%s", got)
+	}
+	if !(start < ping && ping < delta) {
+		t.Errorf("expected ping between the two events:\n%s", got)
 	}
 }
 
