@@ -19,6 +19,8 @@ type RequestMetric struct {
 	CompletionTokens int       `json:"completion_tokens"`
 	TotalTokens      int       `json:"total_tokens"`
 	CachedTokens     int       `json:"cached_tokens"`
+	APIType          APIType   `json:"api_type"`
+	APIEndpoint      string    `json:"api_endpoint"`
 
 	PrefillTimeMs         int64   `json:"prefill_time_ms"`
 	DecodeTimeMs          int64   `json:"decode_time_ms"`
