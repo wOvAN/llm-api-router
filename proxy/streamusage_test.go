@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestEnsureStreamUsageInjectsIncludeUsage(t *testing.T) {
@@ -227,3 +230,131 @@ func TestEnsureStreamUsageRouterIntegration(t *testing.T) {
 }
 
 var _ = context.Background
+
+// TestUsageStripperMidStreamFlushKeepsFramesIntact guards the regression fixed
+// alongside per-chunk flushing: a mid-stream Flush must NOT push a partial data
+// line to the client. Fragmenting a frame across writes is exactly what makes
+// clients glue the tail of one JSON onto the start of the next.
+func TestUsageStripperMidStreamFlushKeepsFramesIntact(t *testing.T) {
+	rec := httptest.NewRecorder()
+	st := newUsageStripper(rec)
+
+	// One data line split across two writes, flushed in between (as the proxy
+	// copy loop now does per chunk).
+	part1 := `data: {"choices":[{"delta":{"content":"hello`
+	part2 := ` world"}}]}` + "\n\n"
+
+	if _, err := st.Write([]byte(part1)); err != nil {
+		t.Fatal(err)
+	}
+	st.Flush()
+	if got := rec.Body.String(); got != "" {
+		t.Fatalf("mid-stream flush leaked a partial frame: %q", got)
+	}
+	if _, err := st.Write([]byte(part2)); err != nil {
+		t.Fatal(err)
+	}
+	st.Flush()
+	want := `data: {"choices":[{"delta":{"content":"hello world"}}]}` + "\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("client got fragmented frame:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+// bufWriter mimics net/http's ~4KB response buffering: writes accumulate until
+// Flush pushes them out. With it we can observe mid-stream delivery, which a
+// plain httptest.ResponseRecorder cannot (its writes are immediate).
+type bufWriter struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	flushed bytes.Buffer
+}
+
+func (l *bufWriter) Header() http.Header { return make(http.Header) }
+func (l *bufWriter) WriteHeader(int)     {}
+func (l *bufWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.buf.Write(p)
+	return len(p), nil
+}
+func (l *bufWriter) Flush() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.flushed.Write(l.buf.Bytes())
+	l.buf.Reset()
+}
+func (l *bufWriter) content() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.flushed.String() + l.buf.String()
+}
+
+// TestStreamProxyFlushesPerChunk verifies the router delivers each SSE frame as
+// it is produced. The backend writes frame 1, flushes, and blocks until the
+// client has actually received it before sending frame 2. If the router did not
+// flush per chunk, the client never sees frame 1 until the stream ends, the
+// backend times out, and sawSignal never fires.
+func TestStreamProxyFlushesPerChunk(t *testing.T) {
+	received := make(chan struct{})
+	sawSignal := make(chan struct{}) // backend observed the client receiving frame 1
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"first"}}]}` + "\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-received:
+			close(sawSignal)
+		case <-time.After(2 * time.Second):
+			return // client never got frame 1 mid-stream — router is not flushing
+		}
+		_, _ = w.Write([]byte(`data: [DONE]` + "\n\n"))
+	}))
+	defer backend.Close()
+
+	client := &bufWriter{}
+	clientW := &flushNotifyingWriter{ResponseWriter: client, onFlush: func() {
+		if strings.Contains(client.content(), "first") {
+			select {
+			case <-received:
+			default:
+				close(received)
+			}
+		}
+	}}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, clientW, "gpt-4", "gpt-4", nil, true)
+	if err != nil {
+		t.Fatalf("StreamProxy: %v", err)
+	}
+	if pm == nil {
+		t.Fatal("pm is nil")
+	}
+
+	select {
+	case <-sawSignal:
+	default:
+		t.Error("first frame was not flushed to the client before the backend proceeded")
+	}
+	if !strings.Contains(client.content(), "first") || !strings.Contains(client.content(), "[DONE]") {
+		t.Errorf("client stream incomplete:\n%s", client.content())
+	}
+}
+
+// flushNotifyingWriter wraps a writer and calls onFlush every time Flush is
+// invoked, so tests can react to delivery without peeking at socket internals.
+type flushNotifyingWriter struct {
+	http.ResponseWriter
+	onFlush func()
+}
+
+func (f *flushNotifyingWriter) Flush() {
+	f.onFlush()
+	if flusher, ok := f.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
