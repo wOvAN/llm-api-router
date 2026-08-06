@@ -186,7 +186,7 @@ func TestStreamProxyStripUsageIntegration(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
 	w := httptest.NewRecorder()
 
-	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, true)
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, true, nil)
 	if err != nil {
 		t.Fatalf("StreamProxy error: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestStreamProxyFlushesPerChunk(t *testing.T) {
 	}}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
-	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, clientW, "gpt-4", "gpt-4", nil, true)
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, clientW, "gpt-4", "gpt-4", nil, true, nil)
 	if err != nil {
 		t.Fatalf("StreamProxy: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestStreamProxyFlushesPerCoalescedRead(t *testing.T) {
 
 			client := &flushCaptureWriter{}
 			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
-			pm, err := StreamProxy(req.Context(), backend.URL, "key", req, client, "gpt-4", "gpt-4", nil, tc.strip)
+			pm, err := StreamProxy(req.Context(), backend.URL, "key", req, client, "gpt-4", "gpt-4", nil, tc.strip, nil)
 			if err != nil {
 				t.Fatalf("StreamProxy: %v", err)
 			}

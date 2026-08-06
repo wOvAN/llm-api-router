@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"llm-api-router/config"
 	"llm-api-router/domain"
 	"llm-api-router/metrics"
+	"llm-api-router/proxy"
 )
 
 func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
@@ -559,6 +561,92 @@ func TestHandleResponsesAPIStreaming(t *testing.T) {
 	}
 	if m.CachedTokens != 5 {
 		t.Errorf("CachedTokens = %d, want 5", m.CachedTokens)
+	}
+}
+
+// syncRecorder is a goroutine-safe ResponseRecorder: the heartbeat timer
+// writes from its own goroutine while the relay loop writes from another.
+type syncRecorder struct {
+	mu     sync.Mutex
+	header http.Header
+	status int
+	body   strings.Builder
+}
+
+func newSyncRecorder() *syncRecorder {
+	return &syncRecorder{header: make(http.Header)}
+}
+
+func (s *syncRecorder) Header() http.Header { return s.header }
+func (s *syncRecorder) WriteHeader(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status = code
+}
+func (s *syncRecorder) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.body.Write(p)
+}
+func (s *syncRecorder) Flush() {}
+func (s *syncRecorder) content() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.body.String()
+}
+
+// TestHandleAnthropicKeepAlive verifies the router injects Anthropic ping
+// heartbeats ("event: ping", the official protocol frame) into /v1/messages
+// streams while the backend stays silent, so clients do not time out while the
+// backend is thinking.
+func TestHandleAnthropicKeepAlive(t *testing.T) {
+	old := proxy.KeepAliveIdle
+	proxy.KeepAliveIdle = 30 * time.Millisecond
+	defer func() { proxy.KeepAliveIdle = old }()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-3-opus\"}}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(100 * time.Millisecond) // backend pause longer than the heartbeat idle
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"))
+	}))
+	defer backend.Close()
+
+	r, store, _ := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "s1",
+		Name:     "test-server",
+		URL:      backend.URL,
+		APITypes: []domain.APIType{domain.APITypeAnthropic},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"claude-3"},
+		TargetModel:    "claude-3-opus",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"claude-3","max_tokens":100}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+	w := newSyncRecorder()
+	r.Handle(w, req)
+
+	got := w.content()
+	start := strings.Index(got, "message_start")
+	ping := strings.Index(got, "event: ping")
+	delta := strings.Index(got, "content_block_delta")
+	if start < 0 || delta < 0 {
+		t.Fatalf("stream incomplete:\n%s", got)
+	}
+	if ping < 0 {
+		t.Fatalf("client stream missing Anthropic ping heartbeat:\n%s", got)
+	}
+	if !(start < ping && ping < delta) {
+		t.Errorf("expected ping between the two events:\n%s", got)
 	}
 }
 

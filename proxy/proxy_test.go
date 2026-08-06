@@ -714,7 +714,7 @@ func TestStreamProxyLoopReturnsMidStreamError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
 	w := httptest.NewRecorder()
 
-	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false)
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
 	var midErr *MidStreamError
 	if !errors.As(err, &midErr) {
 		t.Fatalf("expected *MidStreamError for detected loop, got: %v", err)
@@ -840,7 +840,7 @@ func TestMidStreamError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
 	w := httptest.NewRecorder()
 
-	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, "gpt-4", "gpt-4", nil, false)
+	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
 
 	// Should get a MidStreamError
 	var midErr *MidStreamError
@@ -946,7 +946,7 @@ func TestStreamProxyAnthropicRewrite(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(rewrittenBody)))
 	w := httptest.NewRecorder()
 
-	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil, false)
+	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil, false, nil)
 	if err != nil {
 		t.Fatalf("StreamProxy: %v", err)
 	}
@@ -985,7 +985,7 @@ func TestStreamProxyAnthropicStreamingRewrite(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(rewrittenBody)))
 	w := httptest.NewRecorder()
 
-	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil, false)
+	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, backendModel, clientModel, nil, false, nil)
 	if err != nil {
 		t.Fatalf("StreamProxy: %v", err)
 	}

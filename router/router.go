@@ -142,6 +142,18 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		body, injected = proxy.EnsureStreamUsage(body, alwaysInclude)
 		stripStream = injected
 	}
+	// SSE heartbeats keep streams alive when the backend pauses between tokens
+	// (slow/thinking inference) — clients otherwise trip read timeouts
+	// ("waiting for api responses", "api timeout"). Anthropic clients expect the
+	// official ping event; OpenAI clients get a bare SSE comment line, which
+	// every SSE parser ignores. StreamProxy only emits heartbeats for
+	// text/event-stream responses.
+	var ping []byte
+	if apiType == domain.APITypeAnthropic {
+		ping = []byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")
+	} else {
+		ping = []byte(": keep-alive\n\n")
+	}
 	var lastErr error
 	// Errors from failed attempts, surfaced to the client via
 	// X-Router-Fallback-Errors (preceding attempts only).
@@ -223,7 +235,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			req.ContentLength = int64(len(rewrittenBody))
 			rh.Retries = retry
 
-			pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, responseModel, rh, stripStream)
+			pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, responseModel, rh, stripStream, ping)
 			if err == nil {
 				// Success — mark healthy. Rate limiter is status-aware: only
 				// successful (2xx) responses clear failures/cooldown; 4xx/5xx
