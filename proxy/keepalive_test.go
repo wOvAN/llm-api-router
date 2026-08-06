@@ -140,7 +140,7 @@ func TestStreamProxyKeepAliveDuringBackendPause(t *testing.T) {
 	if ping < 0 {
 		t.Fatalf("no heartbeat injected during backend pause:\n%s", got)
 	}
-	if !(first < ping && ping < second) {
+	if first >= ping || ping >= second {
 		t.Errorf("expected heartbeat between the two frames:\n%s", got)
 	}
 }
