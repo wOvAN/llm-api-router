@@ -67,6 +67,23 @@ func TestExtractUsageFromJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("OpenAI Responses API format", func(t *testing.T) {
+		body := []byte(`{"id":"resp_1","object":"response","model":"gpt-4o","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7}}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptTokens != 10 {
+			t.Errorf("PromptTokens = %d, want 10", pm.PromptTokens)
+		}
+		if pm.CompletionTokens != 20 {
+			t.Errorf("CompletionTokens = %d, want 20", pm.CompletionTokens)
+		}
+		if pm.TotalTokens != 30 {
+			t.Errorf("TotalTokens = %d, want 30", pm.TotalTokens)
+		}
+		if pm.CachedTokens != 7 {
+			t.Errorf("CachedTokens = %d, want 7", pm.CachedTokens)
+		}
+	})
+
 	t.Run("Anthropic format", func(t *testing.T) {
 		body := []byte(`{"content":[{"text":"hello"}],"usage":{"input_tokens":15,"output_tokens":25}}`)
 		pm := extractUsageFromJSON(body)
@@ -161,6 +178,24 @@ func TestExtractUsageFromStream(t *testing.T) {
 		}
 		if pm.TotalTokens != 0 {
 			t.Errorf("TotalTokens = %d, want 0 (streaming doesn't compute total)", pm.TotalTokens)
+		}
+	})
+
+	t.Run("OpenAI Responses API streaming format", func(t *testing.T) {
+		body := []byte(
+			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4o\"}}\n" +
+				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n" +
+				"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4o\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"total_tokens\":30,\"input_tokens_details\":{\"cached_tokens\":7}}}}\n",
+		)
+		pm := extractUsageFromStream(body)
+		if pm.PromptTokens != 10 {
+			t.Errorf("PromptTokens = %d, want 10", pm.PromptTokens)
+		}
+		if pm.CompletionTokens != 20 {
+			t.Errorf("CompletionTokens = %d, want 20", pm.CompletionTokens)
+		}
+		if pm.CachedTokens != 7 {
+			t.Errorf("CachedTokens = %d, want 7", pm.CachedTokens)
 		}
 	})
 
