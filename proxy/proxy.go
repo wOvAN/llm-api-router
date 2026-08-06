@@ -607,6 +607,17 @@ func (d *loopDetector) Write(data []byte) (int, error) {
 	return d.ResponseWriter.Write(data)
 }
 
+// Flush forwards the flush down the writer chain so SSE events reach the
+// client as they are produced. Without this, net/http buffers response writes
+// in ~4KB lumps and the client receives short responses as one blob at the end
+// — a delivery pattern that triggers client-side chunk-concatenation bugs
+// (e.g. opencode #7692).
+func (d *loopDetector) Flush() {
+	if flusher, ok := d.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func (d *loopDetector) allRecentIdentical() bool {
 	first := d.recent[0]
 	if first == "" {
@@ -879,6 +890,10 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 				m.BackendModel = mrw.capturedModel
 				return &m, fmt.Errorf("write to client: %w", writeErr)
 			}
+			// Flush after every chunk so the client receives each SSE event as it
+			// is produced (proper relay behavior), instead of net/http's 4KB-buffered
+			// lumps that make clients mis-split concatenated frames.
+			ld.Flush()
 		}
 
 		if readErr == io.EOF {
@@ -906,9 +921,13 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		return &m, fmt.Errorf("stream loop detected: backend is repeating content")
 	}
 
-	// Flush any bytes the usage stripper is still holding (e.g. a trailing
-	// frame that the backend closed without a blank-line terminator).
-	if flusher, ok := clientW.(http.Flusher); ok {
+	// Deliver any bytes the usage stripper is still holding (e.g. a trailing
+	// frame the backend closed without a blank-line terminator). Regular flush
+	// no longer pushes pending bytes mid-stream (it must not fragment data
+	// lines), so the stripper gets an explicit finish at stream end.
+	if s, ok := clientW.(*usageStripper); ok {
+		s.finish()
+	} else if flusher, ok := clientW.(http.Flusher); ok {
 		flusher.Flush()
 	}
 

@@ -97,8 +97,21 @@ func (s *usageStripper) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// Flush flushes any remaining buffered bytes, then the underlying flusher.
+// Flush forwards the flush downstream without releasing incomplete frames.
+// Mid-stream flushes (one per streamed chunk) must not push a partial data
+// line to the client — that is exactly the fragmentation that makes clients
+// glue the tail of one frame onto the next. Trailing bytes are delivered by
+// finish() once the stream ends.
 func (s *usageStripper) Flush() {
+	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// finish writes any remaining buffered bytes (a trailing frame the backend
+// closed without a blank-line terminator) and flushes. Called once, at the end
+// of the stream.
+func (s *usageStripper) finish() {
 	if len(s.pending) > 0 {
 		if _, err := s.ResponseWriter.Write(s.pending); err != nil {
 			log.Errorf("usageStripper: failed to flush buffered SSE frames to client: %v", err)
