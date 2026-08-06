@@ -645,7 +645,7 @@ func TestHandleAnthropicKeepAlive(t *testing.T) {
 	if ping < 0 {
 		t.Fatalf("client stream missing Anthropic ping heartbeat:\n%s", got)
 	}
-	if !(start < ping && ping < delta) {
+	if start >= ping || ping >= delta {
 		t.Errorf("expected ping between the two events:\n%s", got)
 	}
 }
