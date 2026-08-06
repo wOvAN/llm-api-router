@@ -90,11 +90,22 @@ func (s *usageStripper) Write(data []byte) (int, error) {
 		// perspective (the metrics layer already accounted for them separately).
 		n, err := s.ResponseWriter.Write(frame)
 		total += n
+		// Flush per frame: the upstream may coalesce several frames into one
+		// read (llama.cpp batches finish+usage, TCP merges token chunks), and
+		// clients that treat one delivery as one SSE event mis-split frames
+		// that arrive in a single write.
+		s.flush()
 		if err != nil {
 			return total, err
 		}
 	}
 	return len(data), nil
+}
+
+func (s *usageStripper) flush() {
+	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // Flush forwards the flush downstream without releasing incomplete frames.
@@ -121,6 +132,66 @@ func (s *usageStripper) finish() {
 	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+// sseFrameWriter delivers SSE frames to the client one at a time. Incoming
+// bytes are buffered until a complete frame (blank-line-terminated event) is
+// available, then each frame is written and flushed separately; partial frames
+// are never forwarded mid-stream. Used when the usage stripper is disabled
+// (client opted into stream usage itself) so the client gets the same
+// per-frame delivery guarantees as the stripping path.
+type sseFrameWriter struct {
+	http.ResponseWriter
+	pending []byte
+}
+
+func newSSEFrameWriter(w http.ResponseWriter) *sseFrameWriter {
+	return &sseFrameWriter{ResponseWriter: w}
+}
+
+func (s *sseFrameWriter) Write(data []byte) (int, error) {
+	s.pending = append(s.pending, data...)
+
+	total := 0
+	for {
+		end := findSSEFrameEnd(s.pending)
+		if end < 0 {
+			break
+		}
+		frame := s.pending[:end]
+		s.pending = s.pending[end:]
+		n, err := s.ResponseWriter.Write(frame)
+		total += n
+		s.flush()
+		if err != nil {
+			return total, err
+		}
+	}
+	return len(data), nil
+}
+
+func (s *sseFrameWriter) Flush() {
+	s.flush()
+}
+
+func (s *sseFrameWriter) flush() {
+	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// finish writes any remaining buffered bytes (a trailing frame the backend
+// closed without a blank-line terminator) and flushes. Called once, at stream
+// end. The usageStripper has an equivalent finish that also delivers pending
+// bytes after dropping artifact frames.
+func (s *sseFrameWriter) finish() {
+	if len(s.pending) > 0 {
+		if _, err := s.ResponseWriter.Write(s.pending); err != nil {
+			log.Errorf("sseFrameWriter: failed to flush buffered SSE frames to client: %v", err)
+		}
+		s.pending = nil
+	}
+	s.flush()
 }
 
 // findSSEFrameEnd returns the index just past the end of the next complete SSE
