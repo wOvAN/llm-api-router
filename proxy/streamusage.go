@@ -86,6 +86,7 @@ func (s *usageStripper) Write(data []byte) (int, error) {
 			s.dropped = true
 			continue
 		}
+		validateSSEFrame(frame, "usageStripper")
 		// A dropped frame's bytes still count as "written" from the caller's
 		// perspective (the metrics layer already accounted for them separately).
 		n, err := s.ResponseWriter.Write(frame)
@@ -160,6 +161,7 @@ func (s *sseFrameWriter) Write(data []byte) (int, error) {
 		}
 		frame := s.pending[:end]
 		s.pending = s.pending[end:]
+		validateSSEFrame(frame, "sseFrameWriter")
 		n, err := s.ResponseWriter.Write(frame)
 		total += n
 		s.flush()
@@ -269,4 +271,29 @@ func choiceIsEmpty(c map[string]interface{}) bool {
 		}
 	}
 	return true
+}
+
+// validateSSEFrame logs a warning when a complete SSE frame carries a data
+// line that is not valid JSON. The frame is still forwarded unchanged — the
+// router is a byte-pass-through and must never drop or re-frame upstream
+// bytes — but the warning surfaces the corruption at the exact hop that
+// produced it: a malformed frame in the logs proves the bytes were already
+// broken upstream (the router never reorders, splits or duplicates bytes),
+// which pinpoints a buggy backend build or an intermediate proxy.
+func validateSSEFrame(frame []byte, writer string) {
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		var obj map[string]interface{}
+		if err := json.Unmarshal(payload, &obj); err != nil {
+			log.Warnf("%s: malformed SSE data line is not valid JSON: %v; frame: %s",
+				writer, err, truncateBytes(payload, 512))
+		}
+	}
 }
