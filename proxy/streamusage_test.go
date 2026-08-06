@@ -518,3 +518,76 @@ func TestSSEFrameWriterFinishDeliversTrailingBytes(t *testing.T) {
 		t.Errorf("trailing frame content wrong: %q", rec.deliveries[0])
 	}
 }
+
+// llamaChunk is a realistic llama.cpp-style OpenAI streaming chunk: reasoning
+// delta plus the created/id/model/fingerprint envelope that appears in the
+// duplicated-middle corruption report.
+const llamaChunk = `data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":" ` + "`" + `"}}],"created":1786036396,"id":"chatcmpl-WZT03zUlKRqqiMJd94XLYAkEKBX6flLC","model":"opus","system_fingerprint":"b0-unknown","object":"chat.completion.chunk"}` + "\n\n"
+
+// TestSSEFrameWriterTransparentAtEverySplitPoint proves the router's client
+// writer is byte-transparent: a valid upstream frame split at ANY byte
+// boundary across writes is delivered to the client exactly once, intact and
+// with its terminator. If the router ever glues or duplicates chunk bytes,
+// this test fails — the corruption reported by clients (a chunk with its
+// "created"/"id"/"model" middle duplicated) therefore cannot originate in the
+// router's writer chain.
+func TestSSEFrameWriterTransparentAtEverySplitPoint(t *testing.T) {
+	stream := strings.Repeat(llamaChunk, 3)
+
+	for split := 0; split <= len(stream); split++ {
+		rec := &flushCaptureWriter{}
+		fw := newSSEFrameWriter(rec)
+		if _, err := fw.Write([]byte(stream[:split])); err != nil {
+			t.Fatalf("split %d first write: %v", split, err)
+		}
+		if _, err := fw.Write([]byte(stream[split:])); err != nil {
+			t.Fatalf("split %d second write: %v", split, err)
+		}
+		fw.finish()
+
+		var got []byte
+		for _, d := range rec.deliveries {
+			got = append(got, d...)
+		}
+		if !bytes.Equal(got, []byte(stream)) {
+			t.Fatalf("split %d: output differs from input\nin:  %q\nout: %q", split, stream, got)
+		}
+	}
+}
+
+// TestSSEFrameWriterDetectsMalformedUpstreamFrame verifies the writer flags a
+// frame whose data line is not valid JSON — the exact corruption reported by
+// the client ("JSON parsing failed ... Expected '}'") — while still forwarding
+// it byte-for-byte. The warning proves the corruption was already present
+// upstream: the router never produces or fixes such bytes.
+func TestSSEFrameWriterDetectsMalformedUpstreamFrame(t *testing.T) {
+	rec := &flushCaptureWriter{}
+	fw := newSSEFrameWriter(rec)
+
+	// The glued frame from the client error: one chunk with its middle
+	// "created"/"id"/"model" section duplicated, spliced without a separator.
+	glued := `data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":" ` + "`" + `"}}],"created":1786036396,"id":"chatcmpl-WZT03zUlKRqqiMJd94XLYAkEKBX6flLC","model":"opus"1786036396,"id":"chatcmpl-WZT03zUlKRqqiMJd94XLYAkEKBX6flLC","model":"opus","system_fingerprint":"b0-unknown","object":"chat.completion.chunk"}` + "\n\n"
+
+	if _, err := fw.Write([]byte(glued)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(rec.deliveries), 1; got != want {
+		t.Fatalf("expected %d delivery, got %d", want, got)
+	}
+	if !bytes.Equal(rec.deliveries[0], []byte(glued)) {
+		t.Fatalf("frame must be forwarded byte-for-byte, got %q", rec.deliveries[0])
+	}
+
+	// Same glued frame through the stripping writer: also flagged and forwarded.
+	rec2 := &flushCaptureWriter{}
+	us := newUsageStripper(rec2)
+	if _, err := us.Write([]byte(glued)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(rec2.deliveries), 1; got != want {
+		t.Fatalf("stripper: expected %d delivery, got %d", want, got)
+	}
+	if !bytes.Equal(rec2.deliveries[0], []byte(glued)) {
+		t.Fatalf("stripper: frame must be forwarded byte-for-byte, got %q", rec2.deliveries[0])
+	}
+}
