@@ -358,3 +358,163 @@ func (f *flushNotifyingWriter) Flush() {
 		flusher.Flush()
 	}
 }
+
+// flushCaptureWriter records the bytes delivered between flush calls, so tests
+// can assert delivery granularity (one SSE frame per delivery).
+type flushCaptureWriter struct {
+	deliveries [][]byte
+	cur        []byte
+}
+
+func (l *flushCaptureWriter) Header() http.Header { return make(http.Header) }
+func (l *flushCaptureWriter) WriteHeader(int)     {}
+func (l *flushCaptureWriter) Write(p []byte) (int, error) {
+	l.cur = append(l.cur, p...)
+	return len(p), nil
+}
+func (l *flushCaptureWriter) Flush() {
+	if len(l.cur) > 0 {
+		l.deliveries = append(l.deliveries, l.cur)
+		l.cur = nil
+	}
+}
+
+// TestStreamProxyFlushesPerCoalescedRead guards the opencode #7692-style case
+// the per-read flush cannot fix on its own: the backend writes several SSE
+// frames in a single write (llama.cpp batches finish+usage; TCP merges token
+// chunks), so they arrive as one read and previously went to the client as one
+// write. Clients that treat one delivery as one SSE event then glue the tail of
+// one JSON onto the start of the next. The router must re-frame: every
+// complete frame delivered as its own write+flush, in both the stripping and
+// non-stripping paths.
+func TestStreamProxyFlushesPerCoalescedRead(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` + "`" + `"}}],"created":1786000887,"id":"chatcmpl-1","model":"haiku"}`,
+		`data: {"choices":[],"created":1786000887,"id":"chatcmpl-1","model":"haiku","usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`,
+		`data: [DONE]`,
+	}, "\n\n") + "\n\n"
+
+	for _, tc := range []struct {
+		name          string
+		strip         bool
+		wantDeliver   int
+		wantUsageSeen bool
+	}{
+		{name: "strip", strip: true, wantDeliver: 2, wantUsageSeen: false},
+		{name: "no-strip", strip: false, wantDeliver: 3, wantUsageSeen: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(stream)) // all frames in one write
+			}))
+			defer backend.Close()
+
+			client := &flushCaptureWriter{}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+			pm, err := StreamProxy(req.Context(), backend.URL, "key", req, client, "gpt-4", "gpt-4", nil, tc.strip)
+			if err != nil {
+				t.Fatalf("StreamProxy: %v", err)
+			}
+			if pm == nil {
+				t.Fatal("pm is nil")
+			}
+
+			if got, want := len(client.deliveries), tc.wantDeliver; got != want {
+				t.Fatalf("expected %d separate deliveries, got %d: %q", want, got, client.deliveries)
+			}
+			for i, d := range client.deliveries {
+				if got := strings.Count(string(d), "data:"); got != 1 {
+					t.Errorf("delivery %d contains %d frames, want exactly 1: %q", i, got, d)
+				}
+			}
+			joined := strings.Join(func() []string {
+				out := make([]string, len(client.deliveries))
+				for i, d := range client.deliveries {
+					out[i] = string(d)
+				}
+				return out
+			}(), "")
+			if got := strings.Contains(joined, "usage"); got != tc.wantUsageSeen {
+				t.Errorf("usage seen by client = %v, want %v", got, tc.wantUsageSeen)
+			}
+		})
+	}
+}
+
+// TestSSEFrameWriterDeliversEachFrameSeparately guards the multi-frame
+// coalescing case: when the upstream sends several SSE frames in one read
+// (llama.cpp batches finish+usage, TCP merges token chunks), each frame must
+// still reach the client as its own write+flush. Clients that treat one
+// delivery as one SSE event mis-split frames that arrive in a single lump.
+func TestSSEFrameWriterDeliversEachFrameSeparately(t *testing.T) {
+	rec := &flushCaptureWriter{}
+	fw := newSSEFrameWriter(rec)
+
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"one"}}]}`,
+		`data: {"choices":[{"delta":{"content":"two"}}]}`,
+		`data: [DONE]`,
+	}, "\n\n") + "\n\n"
+
+	if _, err := fw.Write([]byte(stream)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := len(rec.deliveries), 3; got != want {
+		t.Fatalf("expected %d separate deliveries, got %d: %q", want, got, rec.deliveries)
+	}
+	for i, d := range rec.deliveries {
+		if got := strings.Count(string(d), "data:"); got != 1 {
+			t.Errorf("delivery %d contains %d frames, want exactly 1: %q", i, got, d)
+		}
+	}
+}
+
+// TestSSEFrameWriterHoldsPartialFrames verifies a data line split across
+// writes is not forwarded until the frame is complete, and mid-stream flushes
+// do not leak fragments to the client.
+func TestSSEFrameWriterHoldsPartialFrames(t *testing.T) {
+	rec := &flushCaptureWriter{}
+	fw := newSSEFrameWriter(rec)
+
+	if _, err := fw.Write([]byte(`data: {"choices":[{"delta":{"content":"hel`)); err != nil {
+		t.Fatal(err)
+	}
+	fw.Flush()
+	if got := len(rec.deliveries); got != 0 {
+		t.Fatalf("partial frame leaked to client: %q", rec.deliveries)
+	}
+
+	if _, err := fw.Write([]byte(`lo"}}]}` + "\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(rec.deliveries), 1; got != want {
+		t.Fatalf("expected %d delivery after frame completed, got %d: %q", want, got, rec.deliveries)
+	}
+	if !bytes.Contains(rec.deliveries[0], []byte("hello")) {
+		t.Errorf("frame content wrong: %q", rec.deliveries[0])
+	}
+}
+
+// TestSSEFrameWriterFinishDeliversTrailingBytes verifies a trailing frame the
+// backend closed without a blank-line terminator is delivered at stream end.
+func TestSSEFrameWriterFinishDeliversTrailingBytes(t *testing.T) {
+	rec := &flushCaptureWriter{}
+	fw := newSSEFrameWriter(rec)
+
+	if _, err := fw.Write([]byte(`data: {"choices":[{"delta":{"content":"tail"}}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(rec.deliveries); got != 0 {
+		t.Fatalf("unterminated frame delivered mid-stream: %q", rec.deliveries)
+	}
+	fw.finish()
+	if got := len(rec.deliveries); got != 1 {
+		t.Fatalf("finish should deliver the trailing frame, got %d deliveries: %q", got, rec.deliveries)
+	}
+	if !bytes.Contains(rec.deliveries[0], []byte("tail")) {
+		t.Errorf("trailing frame content wrong: %q", rec.deliveries[0])
+	}
+}

@@ -797,6 +797,8 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	clientW := w
 	if strip {
 		clientW = newUsageStripper(w)
+	} else {
+		clientW = newSSEFrameWriter(w)
 	}
 	mw := newMetricsWriter(clientW, start)
 	defer bufPool.Put(mw.bodyBuffer) //nolint:errcheck
@@ -927,6 +929,8 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// lines), so the stripper gets an explicit finish at stream end.
 	if s, ok := clientW.(*usageStripper); ok {
 		s.finish()
+	} else if f, ok := clientW.(*sseFrameWriter); ok {
+		f.finish()
 	} else if flusher, ok := clientW.(http.Flusher); ok {
 		flusher.Flush()
 	}
