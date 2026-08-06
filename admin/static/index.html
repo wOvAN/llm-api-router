@@ -108,7 +108,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   </table>
   <h2 style="margin-top:20px;">Recent Requests</h2>
   <table>
-    <thead><tr><th>Time</th><th>Model</th><th>Target</th><th>Server</th><th>Status</th><th>Latency</th><th>Prefill</th><th>Decode</th><th>P tok/s</th><th>D tok/s</th><th>P tok</th><th>D tok</th><th>Cached</th><th>Size</th><th>Fallback</th></tr></thead>
+    <thead><tr><th>Time</th><th>Model</th><th>Target</th><th>Server</th><th>API</th><th>Status</th><th>Latency</th><th>Prefill</th><th>Decode</th><th>P tok/s</th><th>D tok/s</th><th>P tok</th><th>D tok</th><th>Cached</th><th>Size</th><th>Fallback</th></tr></thead>
     <tbody id="recent-body"></tbody>
   </table>
 </div>
@@ -818,7 +818,7 @@ async function loadMetrics() {
   const res2 = await fetch(API + '/metrics/recent');
   const recent = await res2.json();
   const rbody = document.getElementById('recent-body');
-  if (!recent.length) { rbody.innerHTML = '<tr><td colspan="9" class="empty">No requests yet</td></tr>'; return; }
+  if (!recent.length) { rbody.innerHTML = '<tr><td colspan="16" class="empty">No requests yet</td></tr>'; return; }
   rbody.innerHTML = recent.slice().reverse().map(r => {
     const time = new Date(r.timestamp).toLocaleTimeString([], { hour12: false });
     const statusColor = r.status_code >= 200 && r.status_code < 300 ? '#3fb950' : r.status_code >= 400 ? '#f85149' : '#8b949e';
@@ -835,6 +835,13 @@ async function loadMetrics() {
     const pTok = r.prompt_tokens || '-';
     const cTok = r.completion_tokens || '-';
     const cached = r.cached_tokens >= 0 ? r.cached_tokens : '-';
+    const apiType = r.api_type === 'anthropic'
+      ? '<span class="tag" style="background:#2d1b4e;color:#d2a8ff">anthropic</span>'
+      : '<span class="tag" style="background:#1a3a2a;color:#3fb950">openai</span>';
+    const apiEndpoint = r.api_endpoint || '';
+    const apiCell = apiEndpoint
+      ? `${apiType}<br><span style="font-size:0.75rem;color:#8b949e">${esc(apiEndpoint)}</span>`
+      : apiType;
     // Show native timings if available (from llama-server)
     let nativeNote = '';
     if (r.native_prefill_tok_per_sec && r.native_prefill_tok_per_sec > 0) {
@@ -845,6 +852,7 @@ async function loadMetrics() {
       <td>${esc(r.model)}</td>
       <td>${esc(r.target_model)}</td>
       <td>${esc(r.server_id)}</td>
+      <td>${apiCell}</td>
       ${statusCell}
       <td>${r.latency_ms}ms</td>
       <td>${prefill}</td>

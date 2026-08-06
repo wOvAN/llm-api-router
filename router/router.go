@@ -39,6 +39,34 @@ func apiTypeFromPath(path string) domain.APIType {
 	return domain.APITypeOpenAI
 }
 
+// apiEndpointFromPath extracts the specific API endpoint from the request path.
+// Returns a human-readable identifier like "chat", "responses", "messages", etc.
+func apiEndpointFromPath(path string) string {
+	if strings.Contains(path, "/messages") {
+		return "messages"
+	}
+	if strings.Contains(path, "/chat/completions") {
+		return "chat"
+	}
+	if strings.Contains(path, "/responses") {
+		return "responses"
+	}
+	if strings.Contains(path, "/embeddings") {
+		return "embeddings"
+	}
+	if strings.Contains(path, "/completions") {
+		return "completions"
+	}
+	// Fallback: extract the last path segment after /v1/
+	if idx := strings.Index(path, "/v1/"); idx >= 0 {
+		rest := path[idx+4:]
+		if seg := strings.Split(rest, "/")[0]; seg != "" {
+			return seg
+		}
+	}
+	return "unknown"
+}
+
 // Handle processes the incoming request.
 func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodGet && req.URL.Path == "/v1/models" {
@@ -242,6 +270,8 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					NativePredictedMs:     pm.PredictedMs,
 					NativePromptTokPerSec: pm.PromptPerSec,
 					NativeDecodeTokPerSec: pm.TokensPerSec,
+					APIType:               apiType,
+					APIEndpoint:           apiEndpointFromPath(req.URL.Path),
 				})
 				return
 			}
@@ -280,6 +310,8 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					CompletionTokens: pm.CompletionTokens,
 					TotalTokens:      pm.TotalTokens,
 					CachedTokens:     pm.CachedTokens,
+					APIType:          apiType,
+					APIEndpoint:      apiEndpointFromPath(req.URL.Path),
 				})
 				return
 			}
@@ -325,6 +357,8 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		TTFBMs:       0,
 		ResponseSize: 0,
 		WasFallback:  len(attempts) > 1,
+		APIType:      apiType,
+		APIEndpoint:  apiEndpointFromPath(req.URL.Path),
 	})
 
 	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)
