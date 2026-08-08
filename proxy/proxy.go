@@ -42,6 +42,14 @@ var upstreamClient = &http.Client{Transport: upstreamTransport}
 // tests (and operators) can tune it.
 var KeepAliveIdle = 15 * time.Second
 
+// UpstreamDrainTimeout caps how long a handler keeps draining the upstream
+// response body after its client has disconnected. Without the drain, the
+// connection closes abruptly and a reverse-proxy backend (llama.cpp router
+// mode) interprets it as client cancellation, aborting the generation that the
+// client retries seconds later (wasted work, cold-start restart). 0 disables
+// draining (legacy behavior: close upstream immediately).
+var UpstreamDrainTimeout = 10 * time.Minute
+
 // keepAliveWriter injects heartbeat frames into the SSE stream when the
 // upstream stays silent for KeepAliveIdle. The heartbeat is written directly
 // to the underlying ResponseWriter — bypassing the frame-buffering layers
@@ -953,7 +961,21 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	ld := newLoopDetector(rw, ctx)
 
 	// Direct the request
-	proxyReq := req.Clone(ctx)
+	//
+	// The upstream request does NOT inherit the client context's cancellation:
+	// as soon as the client context is canceled mid-stream, net/http closes the
+	// upstream connection — which a reverse-proxy backend (llama.cpp router
+	// mode) reads as "client canceled" and aborts the generation the client is
+	// about to retry from scratch. Instead the response is drained to
+	// completion (see drainUpstreamBody), so the backend finishes naturally.
+	// Deadline-based timeouts from the original context are preserved.
+	detachedCtx := context.WithoutCancel(req.Context())
+	if dl, ok := req.Context().Deadline(); ok {
+		var cancel context.CancelFunc
+		detachedCtx, cancel = context.WithDeadline(detachedCtx, dl)
+		defer cancel()
+	}
+	proxyReq := req.Clone(detachedCtx)
 	proxyReq.URL.Scheme = target.Scheme
 	proxyReq.URL.Host = target.Host
 	proxyReq.URL.Path = targetPath
@@ -1057,6 +1079,15 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 				}
 				// Error writing to client (e.g., client disconnect)
 				if ctx.Err() != nil {
+					// The frontend is gone, but the upstream must not be told
+					// "client canceled": a reverse-proxy backend (llama.cpp
+					// router mode) aborts the generation on connection close,
+					// wasting the run and forcing the client to regenerate from
+					// scratch on its next attempt. Drain the remaining response
+					// instead so the backend finishes the generation naturally.
+					if UpstreamDrainTimeout > 0 {
+						drainUpstreamBody(upstreamResp.Body, UpstreamDrainTimeout)
+					}
 					m := mw.metrics()
 					m.BackendModel = mrw.capturedModel
 					return &m, ctx.Err()
@@ -1129,5 +1160,25 @@ func sendMidStreamError(w http.ResponseWriter, err error) {
 	// Flush immediately
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
+	}
+}
+
+// drainUpstreamBody reads the upstream response body to completion, discarding
+// the bytes. Used when the client connection is already gone: the upstream TCP
+// connection stays open so a reverse-proxy backend finishes the generation
+// instead of seeing a closed socket (i.e. cancel) mid-stream. Bounded by
+// timeout so a wedged backend cannot pin the handler goroutine forever.
+func drainUpstreamBody(body io.ReadCloser, timeout time.Duration) {
+	deadline := time.After(timeout)
+	buf := make([]byte, 32*1024)
+	for {
+		select {
+		case <-deadline:
+			return
+		default:
+		}
+		if _, err := body.Read(buf); err != nil {
+			return
+		}
 	}
 }

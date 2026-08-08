@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1157,6 +1158,121 @@ func TestStreamProxy5xxSSEBodyWithJsonPrefixForwarded(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "slot full") {
 		t.Errorf("body must pass through, got %q", w.Body.String())
+	}
+}
+
+// failWriter pretends the client socket died: it cancels the request context
+// and fails the write, like a real disconnect while the handler relays.
+type failWriter struct {
+	w        http.ResponseWriter
+	onWrite  func()
+	writeCnt int
+}
+
+func (f *failWriter) Header() http.Header { return f.w.Header() }
+func (f *failWriter) Write(p []byte) (int, error) {
+	f.writeCnt++
+	if f.onWrite != nil {
+		f.onWrite()
+	}
+	return 0, errors.New("client disconnected")
+}
+func (f *failWriter) WriteHeader(code int) { f.w.WriteHeader(code) }
+
+func TestStreamProxyDrainsUpstreamOnClientGone(t *testing.T) {
+	old := UpstreamDrainTimeout
+	UpstreamDrainTimeout = 5 * time.Second
+	defer func() { UpstreamDrainTimeout = old }()
+
+	upstreamCompleted := make(chan struct{})
+	var earlyAbort atomic.Bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(upstreamCompleted)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"1\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+		for i := 0; i < 3; i++ {
+			select {
+			case <-r.Context().Done():
+				// Proxy closed the socket mid-generation: exactly what a
+				// reverse-proxy backend (llama.cpp router mode) treats as a
+				// client-cancel and aborts the task.
+				earlyAbort.Store(true)
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req,
+		&failWriter{w: httptest.NewRecorder(), onWrite: cancel}, "gpt-4", "gpt-4", nil, false, nil)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled (pm=%+v)", err, pm)
+	}
+	select {
+	case <-upstreamCompleted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not finish its generation despite the drain")
+	}
+	if earlyAbort.Load() {
+		t.Error("upstream saw the client socket close mid-generation; drain failed")
+	}
+}
+
+func TestStreamProxyDrainDisabledClosesUpstream(t *testing.T) {
+	old := UpstreamDrainTimeout
+	UpstreamDrainTimeout = 0
+	defer func() { UpstreamDrainTimeout = old }()
+
+	var earlyAbort atomic.Bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: x\n\n"))
+		w.(http.Flusher).Flush()
+		for {
+			select {
+			case <-r.Context().Done():
+				earlyAbort.Store(true)
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	// The legacy (UpstreamDrainTimeout=0) behavior closes the upstream socket
+	// right after the client write fails, so the backend must observe the abort.
+	_, err := StreamProxy(req.Context(), backend.URL, "key", req,
+		&failWriter{w: httptest.NewRecorder(), onWrite: cancel}, "gpt-4", "gpt-4", nil, false, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		if earlyAbort.Load() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("upstream never noticed the closed socket with draining disabled")
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 
