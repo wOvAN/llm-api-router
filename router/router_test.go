@@ -334,6 +334,9 @@ func TestHandleAllBackendsFail(t *testing.T) {
 
 	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	// With no rule retries the default became 10; opt out explicitly to keep
+	// this test fast (failure is instant anyway).
+	req.Header.Set("X-Router-Retries", "0")
 	w := httptest.NewRecorder()
 	r.Handle(w, req)
 
@@ -1548,5 +1551,167 @@ func TestRouterObservabilityHeadersRetriesRecovered(t *testing.T) {
 	}
 	if got := resp.Header.Get("X-Router-Fallback-Errors"); got != "" {
 		t.Errorf("X-Router-Fallback-Errors should be empty, got %q", got)
+	}
+}
+
+func TestHandleRetriesStreamErrorBody(t *testing.T) {
+	// Regression: a backend that died mid-generation answers 5xx with a body
+	// of buffered SSE frames. The router must retry it like a transport error
+	// instead of forwarding the unparseable response to the client.
+	var calls atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
+	}))
+	defer backend.Close()
+
+	r, store, _ := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "s1",
+		Name:     "test-server",
+		URL:      backend.URL,
+		APIKey:   "key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "s1",
+		NumRetries:     1,
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200: %s", resp.StatusCode, w.Body.String())
+	}
+	if calls.Load() != 2 {
+		t.Errorf("backend hit %d times, want 2 (1 + 1 retry)", calls.Load())
+	}
+	if got := resp.Header.Get("X-Router-Retries"); got != "1" {
+		t.Errorf("X-Router-Retries = %q, want 1", got)
+	}
+}
+
+func TestHandleFallbackOnStreamErrorBody(t *testing.T) {
+	// 5xx with SSE body from the primary must trigger fallback to the next
+	// server instead of being forwarded to the client.
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"dead\"}}]}\n\n")) //nolint:errcheck
+	}))
+	defer primary.Close()
+
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer backup.Close()
+
+	r, store, _ := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "dead",
+		Name:     "Dead",
+		URL:      primary.URL,
+		APIKey:   "key1",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddServer(&domain.Server{
+		ID:       "backup",
+		Name:     "Backup",
+		URL:      backup.URL,
+		APIKey:   "key2",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "dead",
+		Fallbacks: []domain.FallbackEntry{
+			{ServerID: "backup", TargetModel: "backup-model"},
+		},
+		Enabled: true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	// Rule has no num_retries (now defaulted to 10); opt out to keep this
+	// test fast — fallback must trigger on the first failed attempt.
+	req.Header.Set("X-Router-Retries", "0")
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200 (via fallback): %s", resp.StatusCode, w.Body.String())
+	}
+	if got := resp.Header.Get("X-Router-Server"); got != "backup" {
+		t.Errorf("X-Router-Server = %q, want backup", got)
+	}
+	if got := resp.Header.Get("X-Router-Fallback-Errors"); got == "" {
+		t.Error("X-Router-Fallback-Errors should list the failed attempt")
+	}
+	if !strings.Contains(w.Body.String(), "backup-model") {
+		t.Errorf("response model should not be rewritten on fallback, got %q", w.Body.String())
+	}
+}
+
+func TestHandleDefaultNumRetries(t *testing.T) {
+	// Rules without num_retries get defaultNumRetries: the router keeps
+	// retrying a flaky backend up to the default instead of failing at once.
+	var calls atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"die\"}}]}\n\n")) //nolint:errcheck
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
+	}))
+	defer backend.Close()
+
+	r, store, _ := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "s1",
+		Name:     "test-server",
+		URL:      backend.URL,
+		APIKey:   "key",
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200 after default retries: %s", resp.StatusCode, w.Body.String())
+	}
+	if calls.Load() != 3 {
+		t.Errorf("backend hit %d times, want 3 (2 failures + success via defaults)", calls.Load())
+	}
+	if got := resp.Header.Get("X-Router-Retries"); got != "2" {
+		t.Errorf("X-Router-Retries = %q, want 2", got)
 	}
 }

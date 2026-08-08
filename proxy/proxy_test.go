@@ -1096,3 +1096,88 @@ func TestEscapeJSONString(t *testing.T) {
 		})
 	}
 }
+
+func TestStreamProxy5xxSSEBodyRetryable(t *testing.T) {
+	// A backend that died mid-generation may answer 5xx with a body of
+	// already-buffered SSE frames. Nothing may reach the client.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"tial\"}}]}\n\n"))
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	w := httptest.NewRecorder()
+
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
+
+	var sseErr *StreamErrorResponse
+	if err == nil || !errors.As(err, &sseErr) {
+		t.Fatalf("expected *StreamErrorResponse, got err=%v pm=%+v", err, pm)
+	}
+	if sseErr.StatusCode != 500 {
+		t.Errorf("StatusCode = %d, want 500", sseErr.StatusCode)
+	}
+	if !strings.Contains(sseErr.Error(), "SSE-form") {
+		t.Errorf("error message should describe the response: %s", sseErr.Error())
+	}
+	if len(w.Body.Bytes()) != 0 {
+		t.Errorf("client must receive no bytes, got %q", w.Body.Bytes())
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("recorder code = %d, want default 200 (no WriteHeader)", w.Code)
+	}
+}
+
+func TestStreamProxy5xxSSEBodyWithJsonPrefixForwarded(t *testing.T) {
+	// A plain JSON 5xx (even with text/event-stream content type set by a bad
+	// backend) must be forwarded as before.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte(`{"error":{"message":"slot full","code":500}}`))
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	w := httptest.NewRecorder()
+
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
+
+	if err != nil {
+		t.Fatalf("plain JSON 5xx must be forwarded, got err: %v", err)
+	}
+	if pm.StatusCode != 500 {
+		t.Errorf("StatusCode = %d, want 500", pm.StatusCode)
+	}
+	if w.Code != 500 {
+		t.Errorf("recorder code = %d, want 500", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "slot full") {
+		t.Errorf("body must pass through, got %q", w.Body.String())
+	}
+}
+
+func TestStreamProxy5xxEmptyBodyForwarded(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	w := httptest.NewRecorder()
+
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
+
+	if err != nil {
+		t.Fatalf("empty 5xx must be forwarded, got err: %v", err)
+	}
+	if pm.StatusCode != 500 {
+		t.Errorf("StatusCode = %d, want 500", pm.StatusCode)
+	}
+	if w.Code != 500 {
+		t.Errorf("recorder code = %d, want 500", w.Code)
+	}
+}

@@ -222,6 +222,12 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		// same server up to NumRetries times before moving to the next server.
 		// Precedence: X-Router-Retries header > rule's num_retries.
 		numRetries := rule.NumRetries
+		if numRetries == 0 {
+			// Rules without num_retries get a generous default: absorb a dying
+			// backend (crashed worker, restart) before marking it unhealthy and
+			// falling back. Disable per request with X-Router-Retries: 0.
+			numRetries = defaultNumRetries
+		}
 		if h := req.Header.Get("X-Router-Retries"); h != "" {
 			if n, parseErr := strconv.Atoi(h); parseErr == nil && n >= 0 {
 				numRetries = n
@@ -376,6 +382,12 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)
 	http.Error(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
 }
+
+// defaultNumRetries is the effective num_retries for rules that don't set one:
+// a dying backend (crashed llama.cpp worker, restart) usually recovers within
+// seconds, so retry before marking the server unhealthy and falling back.
+// Override per request via X-Router-Retries ("0" disables retries).
+const defaultNumRetries = 10
 
 // retryBackoff returns the delay before retry attempt n (0-based): 100ms, 250ms,
 // 500ms, then capped at 1s. Keeps retries fast but avoids hammering a failing

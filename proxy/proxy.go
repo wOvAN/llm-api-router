@@ -860,9 +860,39 @@ func (e *MidStreamError) Unwrap() error {
 	return e.Err
 }
 
+// StreamErrorResponse is returned when the backend answers a 5xx whose body is
+// already-accumulated SSE stream frames (a backend that died mid-generation
+// after buffering output). Nothing was written to the client, so the router can
+// retry or fall back instead of forwarding an unparseable response.
+type StreamErrorResponse struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *StreamErrorResponse) Error() string {
+	body := e.Body
+	if len(body) > 512 {
+		body = body[:512] + "..."
+	}
+	return fmt.Sprintf("backend returned HTTP %d with SSE-form error body: %q", e.StatusCode, body)
+}
+
+// looksLikeStreamFrameBody reports whether body reads as SSE text frames
+// (starts with a "data:", "event:", or comment line).
+func looksLikeStreamFrameBody(body []byte) bool {
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	return len(trimmed) > 0 &&
+		(bytes.HasPrefix(trimmed, []byte("data:")) ||
+			bytes.HasPrefix(trimmed, []byte("event:")) ||
+			bytes.HasPrefix(trimmed, []byte(": ")))
+}
+
 // StreamProxy forwards the request and streams the response directly to the writer.
 // Returns an error on network failure (before any headers are written to w).
 // HTTP 5xx responses are NOT treated as errors — they are forwarded to the client.
+// Exception: a 5xx whose body is already SSE stream frames is returned as
+// *StreamErrorResponse without writing anything to the client, so the router
+// can retry/fall back (see docs above).
 // If originalModel is non-empty and differs from targetModel, the "model" field
 // in the response is rewritten from targetModel back to originalModel so the
 // client sees its own model name.
@@ -952,6 +982,23 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		}
 	}()
 
+	// A dying backend may answer 5xx with a body of already-accumulated SSE
+	// frames (its buffered stream). No SSE client can parse such a response —
+	// forwarding it changes a crash into "stream idle timeout" noise. Nothing
+	// has been written to the client yet, so treat it as a retryable failure.
+	// `pre` carries the peeked bytes into the normal relay below when the body
+	// turns out to be a real error payload (5xx forwarding stays unchanged).
+	var pre []byte
+	if upstreamResp.StatusCode >= 500 {
+		const peekLimit = 32 * 1024
+		pre, _ = io.ReadAll(io.LimitReader(upstreamResp.Body, peekLimit+1))
+		if looksLikeStreamFrameBody(pre) {
+			m := mw.metrics()
+			m.StatusCode = upstreamResp.StatusCode
+			return &m, &StreamErrorResponse{StatusCode: upstreamResp.StatusCode, Body: string(pre)}
+		}
+	}
+
 	// Copy response headers
 	headers := ld.Header()
 	for k, vv := range upstreamResp.Header {
@@ -972,22 +1019,33 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// Write status code (this triggers TTFB / headerInjector)
 	ld.WriteHeader(upstreamResp.StatusCode)
 
-	// Stream the response body, chunk by chunk, to detect mid-stream errors
+	// Stream the response body, chunk by chunk, to detect mid-stream errors.
+	// `pending` holds bytes already read while inspecting a 5xx response above.
 	buf := make([]byte, 32*1024)
 	firstChunk := true
+	pending := pre
 	for {
-		n, readErr := upstreamResp.Body.Read(buf)
-		if n > 0 {
+		chunk := pending
+		pending = nil
+		var readErr error
+		if chunk == nil {
+			var n int
+			n, readErr = upstreamResp.Body.Read(buf)
+			if n > 0 {
+				chunk = buf[:n]
+			}
+		}
+		if chunk != nil {
 			// Log first chunk for debugging model rewrite
 			if firstChunk {
 				firstChunk = false
-				chunk := buf[:n]
-				if len(chunk) > 512 {
-					chunk = chunk[:512]
+				debug := chunk
+				if len(debug) > 512 {
+					debug = debug[:512]
 				}
-				log.Debugf("upstream first chunk: %s", chunk)
+				log.Debugf("upstream first chunk: %s", debug)
 			}
-			_, writeErr := ld.Write(buf[:n])
+			_, writeErr := ld.Write(chunk)
 			if writeErr != nil {
 				// Loop detected: the error event was already appended to the stream
 				// and headers are sent. Classify as mid-stream so the router does
