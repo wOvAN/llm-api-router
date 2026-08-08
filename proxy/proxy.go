@@ -927,9 +927,13 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		return nil, fmt.Errorf("parse target URL: %w", err)
 	}
 
-	targetPath := strings.TrimRight(target.Path, "/") + req.URL.Path
-	if strings.HasSuffix(target.Path, "/v1") && strings.HasPrefix(req.URL.Path, "/v1") {
-		targetPath = strings.TrimRight(target.Path, "/") + req.URL.Path[1:]
+	targetBase := strings.TrimRight(target.Path, "/")
+	targetPath := targetBase + req.URL.Path
+	// URL dedup: a server URL that already ends with /v1 plus a request path
+	// that starts with /v1 would otherwise produce /v1/v1/... — drop the
+	// redundant prefix so the two merge into a single /v1.
+	if strings.HasSuffix(targetBase, "/v1") && strings.HasPrefix(req.URL.Path, "/v1") {
+		targetPath = targetBase + req.URL.Path[len("/v1"):]
 	}
 
 	start := time.Now()

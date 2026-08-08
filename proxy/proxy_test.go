@@ -1297,3 +1297,56 @@ func TestStreamProxy5xxEmptyBodyForwarded(t *testing.T) {
 		t.Errorf("recorder code = %d, want 500", w.Code)
 	}
 }
+
+func TestStreamProxyURLDedupV1(t *testing.T) {
+	// Server URL ends with /v1 and the request path starts with /v1: they must
+	// merge into a single /v1, not become /v1v1/....
+	gotPath := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath <- r.URL.Path
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"id":"1","object":"chat.completion","model":"gpt-4"}`))
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	w := httptest.NewRecorder()
+
+	if _, err := StreamProxy(req.Context(), backend.URL+"/v1", "key", req, w, "gpt-4", "gpt-4", nil, false, nil); err != nil {
+		t.Fatalf("unexpected upstream error: %v", err)
+	}
+	select {
+	case p := <-gotPath:
+		if p != "/v1/chat/completions" {
+			t.Errorf("upstream path = %q, want /v1/chat/completions", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend never received the request")
+	}
+}
+
+func TestStreamProxyURLDedupLongBase(t *testing.T) {
+	// Same dedup with a multi-segment base: /api/v1 + /v1/... -> /api/v1/...
+	gotPath := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath <- r.URL.Path
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("{\"ok\":true}"))
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/models", strings.NewReader(``))
+	w := httptest.NewRecorder()
+
+	if _, err := StreamProxy(req.Context(), backend.URL+"/api/v1", "key", req, w, "gpt-4", "gpt-4", nil, false, nil); err != nil {
+		t.Fatalf("unexpected upstream error: %v", err)
+	}
+	select {
+	case p := <-gotPath:
+		if p != "/api/v1/models" {
+			t.Errorf("upstream path = %q, want /api/v1/models", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend never received the request")
+	}
+}
