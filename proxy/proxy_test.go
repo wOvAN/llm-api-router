@@ -1350,3 +1350,60 @@ func TestStreamProxyURLDedupLongBase(t *testing.T) {
 		t.Fatal("backend never received the request")
 	}
 }
+
+func TestStreamProxyAnthropicAuthHeaders(t *testing.T) {
+	// A Claude Code style client authenticates with its personal x-api-key.
+	// The configured server key must replace it (and set Authorization too),
+	// so the upstream never sees (nor checks) the client's own key.
+	got := make(chan http.Header, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"type":"message","model":"opus","content":[]}`))
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"opus","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-api-key", "client-personal-key")
+	w := httptest.NewRecorder()
+
+	if _, err := StreamProxy(req.Context(), backend.URL+"/v1", "server-key", req, w, "opus", "opus", nil, false, nil); err != nil {
+		t.Fatalf("unexpected upstream error: %v", err)
+	}
+	h := <-got
+	if got := h.Get("x-api-key"); got != "server-key" {
+		t.Errorf("upstream x-api-key = %q, want configured server-key (client key leaked)", got)
+	}
+	if got := h.Get("Authorization"); got != "Bearer server-key" {
+		t.Errorf("upstream Authorization = %q, want Bearer server-key", got)
+	}
+}
+
+func TestStreamProxyClientKeyPassthroughWhenConfiguredEmpty(t *testing.T) {
+	// Empty configured key: the router adds no auth headers of its own, the
+	// client's key passes through untouched.
+	got := make(chan http.Header, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"id":"m","object":"chat.completion","model":"gpt-4"}`))
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","stream":false,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-api-key", "client-key")
+	w := httptest.NewRecorder()
+
+	if _, err := StreamProxy(req.Context(), backend.URL+"/v1", "", req, w, "gpt-4", "gpt-4", nil, false, nil); err != nil {
+		t.Fatalf("unexpected upstream error: %v", err)
+	}
+	h := <-got
+	if got := h.Get("x-api-key"); got != "client-key" {
+		t.Errorf("upstream x-api-key = %q, want client-key passthrough", got)
+	}
+	if h.Get("Authorization") != "" {
+		t.Errorf("upstream Authorization = %q, want none", h.Get("Authorization"))
+	}
+}

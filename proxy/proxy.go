@@ -986,6 +986,15 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	proxyReq.URL.RawQuery = req.URL.RawQuery
 	proxyReq.Header = proxyReq.Header.Clone()
 	if apiKey != "" {
+		// Set BOTH authentication conventions: OpenAI-compatible upstreams
+		// expect `Authorization: Bearer`, Anthropic-compatible ones (and
+		// llama.cpp's /v1/messages) expect `x-api-key`. Forcing x-api-key
+		// also overwrites the client's own key — Claude Code authenticates
+		// with a personal x-api-key that must not reach (or be checked
+		// against) the configured upstream. llama.cpp validates
+		// `Authorization` first and falls back to `X-Api-Key`, so setting
+		// both satisfies either check.
+		proxyReq.Header.Set("x-api-key", apiKey)
 		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	proxyReq.Header.Del("Host")
