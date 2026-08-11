@@ -595,6 +595,7 @@ function getServerAPITypes() {
   return types;
 }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
 // --- Fallbacks ---
 let fallbackCounter = 0;
@@ -824,7 +825,7 @@ async function loadMetrics() {
     const statusColor = r.status_code >= 200 && r.status_code < 300 ? '#3fb950' : r.status_code >= 400 ? '#f85149' : '#8b949e';
     const errText = r.status_code !== 200 && r.error_body ? r.error_body : '';
     const statusCell = errText
-      ? `<td style="color:${statusColor}" title="${esc(errText)}">${r.status_code}<button class="copy-icon" data-err="${esc(errText)}" onclick="copyErrorText(this)" title="Copy error text">⧉</button></td>`
+      ? `<td style="color:${statusColor}" title="${escAttr(errText)}">${r.status_code}<button class="copy-icon" data-err="${escAttr(errText)}" onclick="copyErrorText(this)" title="Copy error text">⧉</button></td>`
       : `<td style="color:${statusColor}">${r.status_code}</td>`;
     const size = r.response_size ? formatBytes(r.response_size) : '-';
     const fallback = r.was_fallback ? '<span class="tag" style="background:#3a3a1a;color:#d29922">yes</span>' : '-';
