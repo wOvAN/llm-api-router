@@ -360,7 +360,11 @@ func (h *Handler) reloadConfig(w http.ResponseWriter, req *http.Request) {
 
 func (h *Handler) getMetrics(w http.ResponseWriter, req *http.Request) {
 	summaries := h.metrics.Summaries()
-	writeJSON(w, http.StatusOK, summaries)
+	active := h.metrics.ActiveRequests()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"summaries":  summaries,
+		"active_requests": active,
+	})
 }
 
 func (h *Handler) getRecentRequests(w http.ResponseWriter, req *http.Request) {

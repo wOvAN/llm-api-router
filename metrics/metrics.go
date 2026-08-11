@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"llm-api-router/domain"
 )
@@ -15,6 +16,7 @@ type Store struct {
 	ringCount      int
 	summaries      map[string]*domain.Summary
 	maxRecent      int
+	activeRequests atomic.Int64
 }
 
 // New creates a new metrics store.
@@ -153,4 +155,20 @@ func (s *Store) Reset() {
 	s.ringIndex = 0
 	s.ringCount = 0
 	s.summaries = make(map[string]*domain.Summary)
+	s.activeRequests.Store(0)
+}
+
+// ActiveRequests returns the current number of in-flight requests.
+func (s *Store) ActiveRequests() int64 {
+	return s.activeRequests.Load()
+}
+
+// IncrActive increments the active request counter.
+func (s *Store) IncrActive() {
+	s.activeRequests.Add(1)
+}
+
+// DecrActive decrements the active request counter.
+func (s *Store) DecrActive() {
+	s.activeRequests.Add(-1)
 }

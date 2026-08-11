@@ -98,6 +98,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
 <div id="panel-metrics" class="panel">
   <div class="btn-row">
     <span id="metrics-timer" style="font-size:0.8rem;color:#484f58;margin-right:auto;">auto-refresh 3s</span>
+    <span id="active-requests" style="font-size:0.9rem;font-weight:600;margin-right:15px;color:#58a6ff;">Active: 0</span>
     <button onclick="loadMetrics()">↻ Refresh</button>
     <button onclick="resetMetrics()" class="danger">Reset</button>
   </div>
@@ -786,9 +787,13 @@ document.getElementById('rule-target-inp').addEventListener('focusout', function
 async function loadMetrics() {
   // Load summaries
   const res = await fetch(API + '/metrics');
-  const summaries = await res.json();
+  const data = await res.json();
+  const summaries = data.summaries || {};
+  const active = data.active_requests || 0;
+  const activeEl = document.getElementById('active-requests');
+  if (activeEl) activeEl.textContent = 'Active: ' + active;
   const tbody = document.getElementById('metrics-body');
-  if (!Object.keys(summaries).length) { tbody.innerHTML = '<tr><td colspan="9" class="empty">No metrics yet</td></tr>'; }
+  if (!Object.keys(summaries).length) { tbody.innerHTML = '<tr><td colspan="13" class="empty">No metrics yet</td></tr>'; }
   tbody.innerHTML = Object.entries(summaries).map(([key, s]) => {
     const avgLat = s.avg_latency_ms ? s.avg_latency_ms.toFixed(0) + 'ms' : '-';
     const minMax = (s.min_latency_ms || s.max_latency_ms) ? s.min_latency_ms + 'ms / ' + s.max_latency_ms + 'ms' : '-';

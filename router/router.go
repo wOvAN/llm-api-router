@@ -120,6 +120,10 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Track active requests for metrics display.
+	r.metrics.IncrActive()
+	defer r.metrics.DecrActive()
+
 	rule, ok := r.store.GetRuleByModel(model)
 	if !ok {
 		log.Errorf("[%s] no routing rule for model %q", req.URL.Path, model)
