@@ -155,7 +155,9 @@ func (s *Store) Reset() {
 	s.ringIndex = 0
 	s.ringCount = 0
 	s.summaries = make(map[string]*domain.Summary)
-	s.activeRequests.Store(0)
+	// NOTE: activeRequests is intentionally NOT reset here — it counts live
+	// in-flight requests; zeroing it while requests run would let their deferred
+	// DecrActive push the counter negative.
 }
 
 // ActiveRequests returns the current number of in-flight requests.
