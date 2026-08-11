@@ -1,0 +1,3 @@
+[registry."docker.host"]
+http = false
+insecure = false

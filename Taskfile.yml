@@ -37,3 +37,28 @@ tasks:
     desc: Remove build artifacts
     cmds:
       - rm -f llm-api-router
+
+  build:docker:
+    desc: Build the Docker image (amd64 + arm64)
+    deps: [build:docker:prepare]
+    cmds:
+      - docker buildx build --push --platform linux/amd64,linux/arm64 -t registry.dev.lan/llm-api-router .
+      # - task: build:docker:cleanup
+    after:
+      - task: build:docker:cleanup
+
+  build:docker:prepare:
+    desc: Prepare buildx multiarch builder
+    cmds:
+      - |
+        if ! docker buildx inspect multiarch > /dev/null 2>&1; then
+          echo "Creating multiarch builder..."
+          docker buildx create --name multiarch --driver docker-container --platform linux/amd64,linux/arm64
+        fi
+        docker buildx use multiarch
+        docker buildx inspect --bootstrap > /dev/null
+
+  build:docker:cleanup:
+    desc: Remove buildx multiarch builder
+    cmds:
+      - docker buildx rm multiarch 2>/dev/null || true

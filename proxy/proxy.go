@@ -153,11 +153,11 @@ func (k *keepAliveWriter) pingTick() {
 // waitSignalWriter injects "still waiting" SSE events into the stream when the
 // upstream stays silent for WaitSignalIdle. Long backend think times (slow
 // models, large prompts) otherwise trip client-side read timeouts ("Request
-// timed out", "api timeout") even though the proxy is working. The signal is a
-// custom `event: router_wait` frame that Anthropic/OpenAI SDKs ignore (they
-// only parse known event types like content_block_delta, message_start, etc.),
-// but it keeps the TCP read side of the client socket alive so the SDK does
-// not give up.
+// timed out", "api timeout") even though the proxy is working. The signal uses
+// the standard Anthropic `event: ping` frame (which SDKs recognize and use to
+// reset their internal timeouts), keeping the client from giving up while the
+// backend thinks. For OpenAI, falls back to a comment line (ignored by all
+// SSE parsers but keeps TCP alive).
 //
 // Start/Stop/Write/Flush are mutex-guarded because the signal timer fires from
 // its own goroutine while the relay loop writes from another.
@@ -229,8 +229,9 @@ func (w *waitSignalWriter) armLocked() {
 	w.timer = time.AfterFunc(w.idle, w.signalTick)
 }
 
-// signalTick runs on the timer goroutine: inject a wait signal, flush, and arm
-// the next idle window.
+// signalTick runs on the timer goroutine: inject a ping event, flush, and arm
+// the next idle window. Uses the standard `event: ping` frame (recognized by
+// Anthropic SDK to reset internal timeouts) plus a data line for OpenAI.
 func (w *waitSignalWriter) signalTick() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -244,7 +245,9 @@ func (w *waitSignalWriter) signalTick() {
 		w.armLocked()
 		return
 	}
-	signal := []byte("event: router_wait\ndata: {\"status\":\"waiting\"}\n\n")
+	// Standard Anthropic ping frame; OpenAI SSE parsers ignore unknown event
+	// types but the TCP write keeps the read side alive.
+	signal := []byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")
 	if _, err := w.ResponseWriter.Write(signal); err != nil {
 		log.Warnf("waitSignal: write failed: %v", err)
 		w.started = false
