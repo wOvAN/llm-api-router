@@ -50,6 +50,16 @@ var KeepAliveIdle = 15 * time.Second
 // draining (legacy behavior: close upstream immediately).
 var UpstreamDrainTimeout = 10 * time.Minute
 
+// WaitSignalIdle is the silence threshold after which StreamProxy injects a
+// "still waiting" SSE event into an SSE client stream. Long backend think
+// times (slow models, large prompts) otherwise trip client-side read timeouts
+// ("Request timed out", "api timeout") even though the proxy is working. The
+// signal is a custom `event: router_wait` frame that Anthropic/OpenAI SDKs
+// ignore (they only parse known event types), but it keeps the TCP read side
+// of the client socket alive so the SDK does not give up. Exported so tests
+// (and operators) can tune it.
+var WaitSignalIdle = 30 * time.Second
+
 // keepAliveWriter injects heartbeat frames into the SSE stream when the
 // upstream stays silent for KeepAliveIdle. The heartbeat is written directly
 // to the underlying ResponseWriter — bypassing the frame-buffering layers
@@ -138,6 +148,112 @@ func (k *keepAliveWriter) pingTick() {
 		f.Flush()
 	}
 	k.armLocked()
+}
+
+// waitSignalWriter injects "still waiting" SSE events into the stream when the
+// upstream stays silent for WaitSignalIdle. Long backend think times (slow
+// models, large prompts) otherwise trip client-side read timeouts ("Request
+// timed out", "api timeout") even though the proxy is working. The signal is a
+// custom `event: router_wait` frame that Anthropic/OpenAI SDKs ignore (they
+// only parse known event types like content_block_delta, message_start, etc.),
+// but it keeps the TCP read side of the client socket alive so the SDK does
+// not give up.
+//
+// Start/Stop/Write/Flush are mutex-guarded because the signal timer fires from
+// its own goroutine while the relay loop writes from another.
+type waitSignalWriter struct {
+	http.ResponseWriter
+	mu        sync.Mutex
+	idle      time.Duration
+	timer     *time.Timer
+	started   bool
+	lastWrite time.Time
+}
+
+func newWaitSignalWriter(w http.ResponseWriter, idle time.Duration) *waitSignalWriter {
+	return &waitSignalWriter{ResponseWriter: w, idle: idle}
+}
+
+// Start arms the signal timer. Must be called once the response is known to be
+// an SSE stream and headers have been written; before Start no signals are sent.
+func (w *waitSignalWriter) Start() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.started {
+		return
+	}
+	w.started = true
+	w.lastWrite = time.Now()
+	w.armLocked()
+}
+
+// Stop disarms the timer; safe to call multiple times.
+func (w *waitSignalWriter) Stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.started = false
+	if w.timer != nil {
+		w.timer.Stop()
+	}
+}
+
+func (w *waitSignalWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	w.lastWrite = time.Now()
+	if w.started {
+		w.armLocked()
+	}
+	n, err := w.ResponseWriter.Write(data)
+	w.mu.Unlock()
+	return n, err
+}
+
+func (w *waitSignalWriter) Flush() {
+	w.mu.Lock()
+	if w.started {
+		w.armLocked()
+	}
+	w.mu.Unlock()
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// armLocked (re)arms the timer to fire after idle of silence. Called with mu
+// held. A fresh AfterFunc timer is created instead of Reset so re-arming from
+// inside the callback (signalTick) can never deadlock on Reset's wait.
+func (w *waitSignalWriter) armLocked() {
+	if w.timer != nil {
+		w.timer.Stop()
+	}
+	w.timer = time.AfterFunc(w.idle, w.signalTick)
+}
+
+// signalTick runs on the timer goroutine: inject a wait signal, flush, and arm
+// the next idle window.
+func (w *waitSignalWriter) signalTick() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.started {
+		return
+	}
+	// Only send if we haven't written anything recently (avoids sending right
+	// after a real data write that arrived just before the timer fired).
+	elapsed := time.Since(w.lastWrite)
+	if elapsed < w.idle {
+		w.armLocked()
+		return
+	}
+	signal := []byte("event: router_wait\ndata: {\"status\":\"waiting\"}\n\n")
+	if _, err := w.ResponseWriter.Write(signal); err != nil {
+		log.Warnf("waitSignal: write failed: %v", err)
+		w.started = false
+		return
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+	w.armLocked()
 }
 
 // bufPool reuses bytes.Buffer instances across requests to reduce GC pressure.
@@ -945,10 +1061,18 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		defer ka.Stop()
 		baseW = ka
 	}
+	// waitSignalWriter sits between the upstream response and the client-facing
+	// writers. It monitors silence and injects `event: router_wait` frames when
+	// the upstream stays quiet for WaitSignalIdle. This keeps client SDK read
+	// loops alive during long backend think times, preventing "Request timed
+	// out" retries that waste work.
+	var ws *waitSignalWriter
+	ws = newWaitSignalWriter(baseW, WaitSignalIdle)
+	defer ws.Stop()
 	if strip {
-		clientW = newUsageStripper(baseW)
+		clientW = newUsageStripper(ws)
 	} else {
-		clientW = newSSEFrameWriter(baseW)
+		clientW = newSSEFrameWriter(ws)
 	}
 	mw := newMetricsWriter(clientW, start)
 	defer bufPool.Put(mw.bodyBuffer) //nolint:errcheck
@@ -1044,11 +1168,17 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	headers.Del("Transfer-Encoding")
 	headers.Del("Content-Length")
 
-	// Arm heartbeats for SSE streams: while the backend thinks (or pauses
-	// between tokens) the client would otherwise see silence long enough to
-	// trip its read timeout.
+	// Arm heartbeats and wait signals for SSE streams: while the backend thinks
+	// (or pauses between tokens) the client would otherwise see silence long
+	// enough to trip its read timeout. Heartbeats use protocol-appropriate
+	// frames (Anthropic "event: ping" or OpenAI comment); wait signals use a
+	// custom `router_wait` event that SDKs ignore but that keeps the TCP read
+	// side alive.
 	if ka != nil && strings.Contains(upstreamResp.Header.Get("Content-Type"), "text/event-stream") {
 		ka.Start()
+	}
+	if ws != nil && strings.Contains(upstreamResp.Header.Get("Content-Type"), "text/event-stream") {
+		ws.Start()
 	}
 
 	// Write status code (this triggers TTFB / headerInjector)
