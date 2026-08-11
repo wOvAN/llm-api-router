@@ -108,7 +108,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   </table>
   <h2 style="margin-top:20px;">Recent Requests</h2>
   <table>
-    <thead><tr><th>Time</th><th>Model</th><th>Target</th><th>Server</th><th>API</th><th>Status</th><th>Latency</th><th>Prefill</th><th>Decode</th><th>P tok/s</th><th>D tok/s</th><th>P tok</th><th>D tok</th><th>Cached</th><th>Size</th><th>Fallback</th></tr></thead>
+    <thead><tr><th>Time</th><th>Model</th><th>Target</th><th>Server</th><th>API</th><th>Status</th><th>Latency</th><th>Prefill</th><th>Decode</th><th>P tok/s</th><th>D tok/s</th><th>P tok</th><th>D tok</th><th>Cached</th><th>Size</th><th>Fallback</th><th>Client</th></tr></thead>
     <tbody id="recent-body"></tbody>
   </table>
 </div>
@@ -818,7 +818,7 @@ async function loadMetrics() {
   const res2 = await fetch(API + '/metrics/recent');
   const recent = await res2.json();
   const rbody = document.getElementById('recent-body');
-  if (!recent.length) { rbody.innerHTML = '<tr><td colspan="16" class="empty">No requests yet</td></tr>'; return; }
+  if (!recent.length) { rbody.innerHTML = '<tr><td colspan="17" class="empty">No requests yet</td></tr>'; return; }
   rbody.innerHTML = recent.slice().reverse().map(r => {
     const time = new Date(r.timestamp).toLocaleTimeString([], { hour12: false });
     const statusColor = r.status_code >= 200 && r.status_code < 300 ? '#3fb950' : r.status_code >= 400 ? '#f85149' : '#8b949e';
@@ -864,6 +864,7 @@ async function loadMetrics() {
       <td>${cached}</td>
       <td>${size}</td>
       <td>${fallback}</td>
+      <td style="font-family:monospace;font-size:0.85rem;">${esc(r.client_ip || '-')}</td>
     </tr>`;
   }).join('');
 }

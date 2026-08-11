@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,6 +38,24 @@ func apiTypeFromPath(path string) domain.APIType {
 		return domain.APITypeAnthropic
 	}
 	return domain.APITypeOpenAI
+}
+
+// clientIP extracts the client IP from the request, checking X-Forwarded-For
+// and X-Real-IP first (for proxied traffic), then falling back to RemoteAddr.
+func clientIP(req *http.Request) string {
+	if fwd := req.Header.Get("X-Forwarded-For"); fwd != "" {
+		if idx := strings.IndexByte(fwd, ','); idx >= 0 {
+			return strings.TrimSpace(fwd[:idx])
+		}
+		return strings.TrimSpace(fwd)
+	}
+	if rip := req.Header.Get("X-Real-IP"); rip != "" {
+		return strings.TrimSpace(rip)
+	}
+	if ip, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+		return ip
+	}
+	return req.RemoteAddr
 }
 
 // apiEndpointFromPath extracts the specific API endpoint from the request path.
@@ -290,6 +309,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					NativeDecodeTokPerSec: pm.TokensPerSec,
 					APIType:               apiType,
 					APIEndpoint:           apiEndpointFromPath(req.URL.Path),
+					ClientIP:              clientIP(req),
 				})
 				return
 			}
@@ -330,6 +350,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					CachedTokens:     pm.CachedTokens,
 					APIType:          apiType,
 					APIEndpoint:      apiEndpointFromPath(req.URL.Path),
+					ClientIP:         clientIP(req),
 				})
 				return
 			}
@@ -377,6 +398,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		WasFallback:  len(attempts) > 1,
 		APIType:      apiType,
 		APIEndpoint:  apiEndpointFromPath(req.URL.Path),
+		ClientIP:     clientIP(req),
 	})
 
 	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)

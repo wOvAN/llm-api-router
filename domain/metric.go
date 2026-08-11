@@ -21,6 +21,7 @@ type RequestMetric struct {
 	CachedTokens     int       `json:"cached_tokens"`
 	APIType          APIType   `json:"api_type"`
 	APIEndpoint      string    `json:"api_endpoint"`
+	ClientIP         string    `json:"client_ip"`
 
 	PrefillTimeMs         int64   `json:"prefill_time_ms"`
 	DecodeTimeMs          int64   `json:"decode_time_ms"`
