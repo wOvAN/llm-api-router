@@ -1066,8 +1066,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// the upstream stays quiet for WaitSignalIdle. This keeps client SDK read
 	// loops alive during long backend think times, preventing "Request timed
 	// out" retries that waste work.
-	var ws *waitSignalWriter
-	ws = newWaitSignalWriter(baseW, WaitSignalIdle)
+	ws := newWaitSignalWriter(baseW, WaitSignalIdle)
 	defer ws.Stop()
 	if strip {
 		clientW = newUsageStripper(ws)
