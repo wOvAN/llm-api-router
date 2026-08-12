@@ -156,8 +156,8 @@ func (k *keepAliveWriter) pingTick() {
 // timed out", "api timeout") even though the proxy is working. The signal uses
 // the standard Anthropic `event: ping` frame (which SDKs recognize and use to
 // reset their internal timeouts), keeping the client from giving up while the
-// backend thinks. For OpenAI, falls back to a comment line (ignored by all
-// SSE parsers but keeps TCP alive).
+// backend thinks. For OpenAI, the caller passes an SSE comment line (ignored by
+// all SSE parsers but keeps TCP alive).
 //
 // Start/Stop/Write/Flush are mutex-guarded because the signal timer fires from
 // its own goroutine while the relay loop writes from another.
@@ -165,13 +165,14 @@ type waitSignalWriter struct {
 	http.ResponseWriter
 	mu        sync.Mutex
 	idle      time.Duration
+	signal    []byte
 	timer     *time.Timer
 	started   bool
 	lastWrite time.Time
 }
 
-func newWaitSignalWriter(w http.ResponseWriter, idle time.Duration) *waitSignalWriter {
-	return &waitSignalWriter{ResponseWriter: w, idle: idle}
+func newWaitSignalWriter(w http.ResponseWriter, idle time.Duration, signal []byte) *waitSignalWriter {
+	return &waitSignalWriter{ResponseWriter: w, idle: idle, signal: signal}
 }
 
 // Start arms the signal timer. Must be called once the response is known to be
@@ -245,9 +246,11 @@ func (w *waitSignalWriter) signalTick() {
 		w.armLocked()
 		return
 	}
-	// Standard Anthropic ping frame; OpenAI SSE parsers ignore unknown event
-	// types but the TCP write keeps the read side alive.
-	signal := []byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")
+	// Signal frame supplied by the caller: Anthropic `event: ping` or an OpenAI
+	// SSE comment line. Never send an event-bearing frame on an OpenAI stream —
+	// strict clients (opencode) validate every event as a chat chunk and reject
+	// unknown payloads like {"type":"ping"}.
+	signal := w.signal
 	if _, err := w.ResponseWriter.Write(signal); err != nil {
 		log.Warnf("waitSignal: write failed: %v", err)
 		w.started = false
@@ -1069,7 +1072,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// the upstream stays quiet for WaitSignalIdle. This keeps client SDK read
 	// loops alive during long backend think times, preventing "Request timed
 	// out" retries that waste work.
-	ws := newWaitSignalWriter(baseW, WaitSignalIdle)
+	ws := newWaitSignalWriter(baseW, WaitSignalIdle, ping)
 	defer ws.Stop()
 	if strip {
 		clientW = newUsageStripper(ws)

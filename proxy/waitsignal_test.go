@@ -6,9 +6,11 @@ import (
 	"time"
 )
 
+var anthropicPing = []byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")
+
 func TestWaitSignalWriterSendsSignalAfterIdle(t *testing.T) {
 	w := &syncWriter{}
-	ws := newWaitSignalWriter(w, 50*time.Millisecond)
+	ws := newWaitSignalWriter(w, 50*time.Millisecond, anthropicPing)
 	ws.Start()
 	defer ws.Stop()
 
@@ -21,7 +23,7 @@ func TestWaitSignalWriterSendsSignalAfterIdle(t *testing.T) {
 
 func TestWaitSignalWriterNoSignalBeforeStart(t *testing.T) {
 	w := &syncWriter{}
-	ws := newWaitSignalWriter(w, 30*time.Millisecond)
+	ws := newWaitSignalWriter(w, 30*time.Millisecond, anthropicPing)
 	defer ws.Stop()
 
 	time.Sleep(80 * time.Millisecond)
@@ -32,7 +34,7 @@ func TestWaitSignalWriterNoSignalBeforeStart(t *testing.T) {
 
 func TestWaitSignalWriterWriteResetsIdle(t *testing.T) {
 	w := &syncWriter{}
-	ws := newWaitSignalWriter(w, 60*time.Millisecond)
+	ws := newWaitSignalWriter(w, 60*time.Millisecond, anthropicPing)
 	ws.Start()
 	defer ws.Stop()
 
@@ -55,7 +57,7 @@ func TestWaitSignalWriterWriteResetsIdle(t *testing.T) {
 
 func TestWaitSignalWriterStopPreventsSignals(t *testing.T) {
 	w := &syncWriter{}
-	ws := newWaitSignalWriter(w, 30*time.Millisecond)
+	ws := newWaitSignalWriter(w, 30*time.Millisecond, anthropicPing)
 	ws.Start()
 
 	time.Sleep(80 * time.Millisecond)
@@ -77,7 +79,7 @@ func TestWaitSignalWriterStopPreventsSignals(t *testing.T) {
 
 func TestWaitSignalWriterSignalFormat(t *testing.T) {
 	w := &syncWriter{}
-	ws := newWaitSignalWriter(w, 30*time.Millisecond)
+	ws := newWaitSignalWriter(w, 30*time.Millisecond, anthropicPing)
 	ws.Start()
 	defer ws.Stop()
 
@@ -88,5 +90,24 @@ func TestWaitSignalWriterSignalFormat(t *testing.T) {
 	}
 	if !strings.Contains(content, `"type":"ping"`) {
 		t.Errorf("expected 'type: ping' in output, got %q", content)
+	}
+}
+
+func TestWaitSignalWriterOpenAISignalIsCommentOnly(t *testing.T) {
+	openaiKeepAlive := []byte(": keep-alive\n\n")
+	w := &syncWriter{}
+	ws := newWaitSignalWriter(w, 20*time.Millisecond, openaiKeepAlive)
+	ws.Start()
+	defer ws.Stop()
+
+	time.Sleep(80 * time.Millisecond)
+	content := w.content()
+	if !strings.Contains(content, ": keep-alive") {
+		t.Errorf("expected SSE comment in output, got %q", content)
+	}
+	// No event/data frames — strict OpenAI clients (opencode) validate every
+	// event as a chat chunk and reject unknown payloads.
+	if strings.Contains(content, "event:") || strings.Contains(content, "data:") {
+		t.Errorf("must not emit event/data frames on OpenAI stream, got %q", content)
 	}
 }
