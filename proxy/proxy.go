@@ -17,14 +17,25 @@ import (
 	"llm-api-router/pkg/log"
 )
 
+// ResponseHeaderTimeout bounds how long StreamProxy waits for the upstream to
+// send response headers after the request is fully written. A backend that
+// accepts the connection but never responds (wedged/zombie worker) otherwise
+// hangs the request indefinitely — and because the upstream request is detached
+// from client cancellation (see StreamProxy), a client with no deadline would
+// hang forever, holding a goroutine and a pooled connection. 0 disables the
+// bound (net/http default: wait forever). It only covers the header wait, not
+// the streamed body, so long generations are unaffected.
+var ResponseHeaderTimeout = 5 * time.Minute
+
 // upstreamTransport is a shared HTTP transport with connection pooling.
 // Reused across all proxied requests to enable TCP connection reuse,
 // TLS session resumption, and keep-alive. Eliminates ~50-200ms per-request
 // overhead from new TCP+TLS handshakes.
 var upstreamTransport = &http.Transport{
-	MaxIdleConns:        200,
-	MaxIdleConnsPerHost: 50,
-	IdleConnTimeout:     90 * time.Second,
+	MaxIdleConns:          200,
+	MaxIdleConnsPerHost:   50,
+	IdleConnTimeout:       90 * time.Second,
+	ResponseHeaderTimeout: ResponseHeaderTimeout,
 	DialContext: (&net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -300,6 +311,10 @@ type RouterHeaders struct {
 	// FallbackErrors sets X-Router-Fallback-Errors: JSON list of errors from
 	// earlier failed attempts.
 	FallbackErrors []string
+	// KeepAliveIdle, when non-zero, is the server-configured SSE keep-alive
+	// heartbeat interval. A per-request X-Router-KeepAlive header still
+	// overrides it; zero falls back to the global proxy.KeepAliveIdle.
+	KeepAliveIdle time.Duration
 }
 
 // SetRouterHeaders sets eager headers (server info) on the given ResponseWriter.
@@ -457,6 +472,29 @@ func RewriteModelInBody(body []byte, newModel string) ([]byte, error) {
 	}
 
 	return out, nil
+}
+
+// DeclaredOutputBudget returns the request's declared output token budget: the
+// larger of max_tokens and max_completion_tokens (both spellings can arrive
+// together; the provider honours whichever it supports, so the larger keeps the
+// TPM reservation an upper bound). 0 when neither is set. Used for TPM
+// pre-call reservation.
+func DeclaredOutputBudget(body []byte) int64 {
+	var s struct {
+		MaxTokens           *int64 `json:"max_tokens"`
+		MaxCompletionTokens *int64 `json:"max_completion_tokens"`
+	}
+	if err := json.Unmarshal(body, &s); err != nil {
+		return 0
+	}
+	var max int64
+	if s.MaxTokens != nil && *s.MaxTokens > max {
+		max = *s.MaxTokens
+	}
+	if s.MaxCompletionTokens != nil && *s.MaxCompletionTokens > max {
+		max = *s.MaxCompletionTokens
+	}
+	return max
 }
 
 // modelRewriteWriter wraps a metricsWriter to replace the target model name
@@ -1062,8 +1100,29 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	var clientW http.ResponseWriter
 	baseW := w
 	var ka *keepAliveWriter
-	if ping != nil {
-		ka = newKeepAliveWriter(w, ping, KeepAliveIdle)
+	// Per-request keepalive override, resolved as: X-Router-KeepAlive header
+	// (seconds, clamped [1,300], "0" disables) > server-configured
+	// rh.KeepAliveIdle > global KeepAliveIdle.
+	kaIdle := KeepAliveIdle
+	if rh != nil && rh.KeepAliveIdle > 0 {
+		kaIdle = rh.KeepAliveIdle
+	}
+	if h := req.Header.Get("X-Router-KeepAlive"); h != "" {
+		if n, err := strconv.Atoi(h); err == nil {
+			switch {
+			case n == 0:
+				kaIdle = 0
+			case n < 1:
+				kaIdle = time.Second
+			case n > 300:
+				kaIdle = 300 * time.Second
+			default:
+				kaIdle = time.Duration(n) * time.Second
+			}
+		}
+	}
+	if ping != nil && kaIdle > 0 {
+		ka = newKeepAliveWriter(w, ping, kaIdle)
 		defer ka.Stop()
 		baseW = ka
 	}

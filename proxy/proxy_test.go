@@ -1407,3 +1407,54 @@ func TestStreamProxyClientKeyPassthroughWhenConfiguredEmpty(t *testing.T) {
 		t.Errorf("upstream Authorization = %q, want none", h.Get("Authorization"))
 	}
 }
+
+func TestDeclaredOutputBudget(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int64
+	}{
+		{"max_tokens only", `{"max_tokens":500}`, 500},
+		{"max_completion_tokens only", `{"max_completion_tokens":750}`, 750},
+		{"both, larger wins", `{"max_tokens":1,"max_completion_tokens":10000}`, 10000},
+		{"both, smaller wins", `{"max_tokens":9000,"max_completion_tokens":10}`, 9000},
+		{"neither", `{"model":"gpt-4"}`, 0},
+		{"invalid json", `{not json`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DeclaredOutputBudget([]byte(tc.body)); got != tc.want {
+				t.Errorf("DeclaredOutputBudget(%q) = %d, want %d", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStreamProxyResponseHeaderTimeout verifies a backend that accepts the
+// connection but never sends headers is cut off by ResponseHeaderTimeout
+// instead of hanging forever (the client context here has no deadline, so the
+// header timeout is the only bound).
+func TestStreamProxyResponseHeaderTimeout(t *testing.T) {
+	old := upstreamTransport.ResponseHeaderTimeout
+	upstreamTransport.ResponseHeaderTimeout = 100 * time.Millisecond
+	defer func() { upstreamTransport.ResponseHeaderTimeout = old }()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body) // fully "write" the request, then stall
+		time.Sleep(500 * time.Millisecond) // longer than the 100ms header timeout
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	w := httptest.NewRecorder()
+	start := time.Now()
+	_, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected a response-header timeout error, got nil")
+	}
+	if elapsed > 400*time.Millisecond {
+		t.Errorf("request took %v; ResponseHeaderTimeout (100ms) should have cut it off", elapsed)
+	}
+}

@@ -23,6 +23,7 @@ type QuotaTracker struct {
 	mu       sync.Mutex
 	tokens   map[string][]tokenEvent          // per-server token events
 	requests map[string][]time.Time           // per-server request timestamps
+	reserved map[string]int64                 // per-server in-flight reserved tokens
 	limits   func(id string) (tpm, rpm int64) // optional lazy limit lookup (0 = unlimited)
 }
 
@@ -31,6 +32,7 @@ func NewQuotaTracker() *QuotaTracker {
 	return &QuotaTracker{
 		tokens:   make(map[string][]tokenEvent),
 		requests: make(map[string][]time.Time),
+		reserved: make(map[string]int64),
 	}
 }
 
@@ -107,6 +109,61 @@ func (q *QuotaTracker) RecordTokens(id string, tokens int64) {
 	defer q.mu.Unlock()
 	now := time.Now()
 	q.tokens[id] = append(pruneEvents(q.tokens[id], now.Add(-window60s)), tokenEvent{at: now, tokens: tokens})
+}
+
+// Reserve admits a request whose declared output budget is estimate tokens,
+// holding it as an in-flight reservation so concurrent requests cannot
+// collectively exceed the server's TPM limit. It returns false (blocked,
+// nothing reserved) when completed usage plus in-flight reservations plus
+// estimate would exceed the TPM limit. estimate <= 0 (no declared budget) and
+// servers without a TPM limit are always admitted and reserve nothing. The
+// reservation is released by Complete.
+func (q *QuotaTracker) Reserve(id string, estimate int64) bool {
+	if q == nil || estimate <= 0 {
+		return true
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	tpm, _ := q.limitsFor(id)
+	if tpm <= 0 {
+		return true
+	}
+	now := time.Now()
+	evs := pruneEvents(q.tokens[id], now.Add(-window60s))
+	q.tokens[id] = evs
+	var used int64
+	for _, e := range evs {
+		used += e.tokens
+	}
+	if used+q.reserved[id]+estimate > tpm {
+		log.Debugf("[quota] %s blocked (reserved): used=%d reserved=%d estimate=%d tpm=%d",
+			id, used, q.reserved[id], estimate, tpm)
+		return false
+	}
+	q.reserved[id] += estimate
+	return true
+}
+
+// Complete releases a request's in-flight reservation (reservedTokens, 0 if it
+// reserved nothing) and records its actual token usage in the sliding window.
+// Call it once per sent request, on every exit path (success, mid-stream
+// error, client disconnect, or fallback after retries are exhausted).
+func (q *QuotaTracker) Complete(id string, reservedTokens, actual int64) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if reservedTokens > 0 {
+		q.reserved[id] -= reservedTokens
+		if q.reserved[id] < 0 {
+			q.reserved[id] = 0
+		}
+	}
+	if actual > 0 {
+		now := time.Now()
+		q.tokens[id] = append(pruneEvents(q.tokens[id], now.Add(-window60s)), tokenEvent{at: now, tokens: actual})
+	}
 }
 
 // Usage returns the current window usage for a server (tokens, requests).

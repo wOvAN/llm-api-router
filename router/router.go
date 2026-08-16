@@ -215,6 +215,23 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
+		// TPM pre-call reservation: hold the declared output budget so
+		// concurrent requests can't collectively exceed the server's TPM limit.
+		// Released by quota.Complete on every exit path below. The last attempt
+		// sends even if the reservation would exceed the limit (better to try
+		// than to fail); it simply reserves nothing.
+		estimate := proxy.DeclaredOutputBudget(rewrittenBody)
+		reservedTokens := int64(0)
+		if r.quota != nil && estimate > 0 {
+			if r.quota.Reserve(srv.ID, estimate) {
+				reservedTokens = estimate
+			} else if i < len(attempts)-1 {
+				log.Warnf("[%s] model=%q — skipping TPM-reserved server %s (attempt %d/%d)",
+					req.URL.Path, model, srv.Name, i+1, len(attempts))
+				continue
+			}
+		}
+
 		wasFallback := i > 0
 
 		log.Infof("[%s] model=%q -> %q on %s (attempt %d/%d)",
@@ -234,11 +251,24 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		} else {
 			log.Debugf("[%s] response rewrite: any model → %q (backend may return its actual model)", req.URL.Path, responseModel)
 		}
+		// Per-server keep-alive override (seconds), clamped to the same [1,300]s
+		// bounds as the per-request header. 0 = use the global default.
+		var srvKeepAlive time.Duration
+		if srv.KeepAliveIdle > 0 {
+			n := srv.KeepAliveIdle
+			if n < 1 {
+				n = 1
+			} else if n > 300 {
+				n = 300
+			}
+			srvKeepAlive = time.Duration(n) * time.Second
+		}
 		rh := &proxy.RouterHeaders{
 			ServerID:       srv.ID,
 			ServerName:     srv.Name,
 			Attempts:       fmt.Sprintf("%d/%d", i+1, len(attempts)),
 			FallbackErrors: attemptErrors,
+			KeepAliveIdle:  srvKeepAlive,
 		}
 
 		// Retry-before-fallback: on transport (pre-response) errors retry the
@@ -279,10 +309,12 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 						r.rateLimit.RecordSuccess(srv.ID)
 					}
 				}
-				// Account quota usage (TPM/RPM) for successful responses.
+				// Account quota usage (TPM/RPM) for successful responses: count
+				// the request (RPM) and release the reservation, recording actual
+				// usage (TPM).
 				if r.quota != nil {
 					r.quota.RecordRequest(srv.ID)
-					r.quota.RecordTokens(srv.ID, int64(pm.TotalTokens))
+					r.quota.Complete(srv.ID, reservedTokens, int64(pm.TotalTokens))
 				}
 
 				if pm.StatusCode >= 400 {
@@ -320,6 +352,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 			// Client disconnect: stop immediately, no fallback needed
 			if req.Context().Err() != nil {
+				if r.quota != nil {
+					r.quota.Complete(srv.ID, reservedTokens, 0)
+				}
 				log.Warnf("[%s] model=%q — client disconnected during proxy (attempt %d/%d)",
 					req.URL.Path, model, i+1, len(attempts))
 				return
@@ -331,6 +366,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				}
 				if r.rateLimit != nil {
 					r.rateLimit.RecordFailure(srv.ID, pm.StatusCode)
+				}
+				if r.quota != nil {
+					r.quota.Complete(srv.ID, reservedTokens, int64(pm.TotalTokens))
 				}
 				log.Errorf("[%s] model=%q — mid-stream error on %s (attempt %d/%d): %v",
 					req.URL.Path, model, srv.Name, i+1, len(attempts), err)
@@ -377,6 +415,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			}
 			if r.rateLimit != nil {
 				r.rateLimit.RecordFailure(srv.ID, 0)
+			}
+			if r.quota != nil {
+				r.quota.Complete(srv.ID, reservedTokens, 0)
 			}
 			attemptErrors = append(attemptErrors, err.Error())
 			log.Errorf("[%s] fallback from %s: %v", req.URL.Path, srv.Name, err)

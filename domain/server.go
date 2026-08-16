@@ -25,6 +25,10 @@ type Server struct {
 	TPMLimit int64 `json:"tpm_limit,omitempty"`
 	// RPMLimit caps requests-per-minute sent to this server (0 = unlimited).
 	RPMLimit int64 `json:"rpm_limit,omitempty"`
+	// KeepAliveIdle overrides the SSE keep-alive heartbeat interval for this
+	// server (seconds). 0 = use the global proxy.KeepAliveIdle. A per-request
+	// X-Router-KeepAlive header still overrides this.
+	KeepAliveIdle int `json:"keep_alive_idle,omitempty"`
 }
 
 // GetURLForAPIType returns the URL to use for the given API type.
