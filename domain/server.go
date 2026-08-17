@@ -60,4 +60,15 @@ func (s *Server) SupportsAPIType(t APIType) bool {
 type FallbackEntry struct {
 	ServerID    string `json:"server_id"`
 	TargetModel string `json:"target_model,omitempty"`
+	// Enabled toggles whether this fallback is used. nil = enabled (default,
+	// preserving configs that predate the field); explicit false disables it.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Priority orders fallbacks: lower number is tried first. 0 = unset, which
+	// sorts after all prioritized fallbacks (original list order kept among ties).
+	Priority int `json:"priority,omitempty"`
+}
+
+// IsEnabled reports whether the fallback is active. A nil Enabled means enabled.
+func (f FallbackEntry) IsEnabled() bool {
+	return f.Enabled == nil || *f.Enabled
 }

@@ -44,7 +44,8 @@
       "fallbacks": [
         {
           "server_id": "fallback",
-          "target_model": "gpt-4o-mini"
+          "target_model": "gpt-4o-mini",
+          "priority": 1
         }
       ],
       "enabled": true
@@ -55,7 +56,9 @@
       "server_id": "primary-anthropic",
       "fallbacks": [
         {
-          "server_id": "fallback"
+          "server_id": "fallback",
+          "priority": 1,
+          "enabled": false
         }
       ],
       "enabled": true

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,33 @@ type Router struct {
 // New creates a new Router.
 func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter, quota *config.QuotaTracker) *Router {
 	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit, quota: quota}
+}
+
+// orderedFallbacks returns the rule's enabled fallbacks in attempt order:
+// sorted by priority ascending (lower number tried first). Fallbacks with
+// priority 0 (unset) sort after all prioritized ones, and their original list
+// order is preserved among ties (stable sort).
+func orderedFallbacks(rule *domain.RoutingRule) []domain.FallbackEntry {
+	fbs := make([]domain.FallbackEntry, 0, len(rule.Fallbacks))
+	for _, fb := range rule.Fallbacks {
+		if fb.IsEnabled() {
+			fbs = append(fbs, fb)
+		}
+	}
+	sort.SliceStable(fbs, func(i, j int) bool {
+		a, b := fbs[i].Priority, fbs[j].Priority
+		if a == b {
+			return false
+		}
+		if a == 0 {
+			return false // unset sorts after set
+		}
+		if b == 0 {
+			return true
+		}
+		return a < b
+	})
+	return fbs
 }
 
 // apiTypeFromPath determines the API type from the request path.
@@ -143,7 +171,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		targetModel string
 	}
 	attempts := []serverAttempt{{server: primaryServer, targetModel: rule.TargetModel}}
-	for _, fb := range rule.Fallbacks {
+	for _, fb := range orderedFallbacks(rule) {
 		if srv, ok := r.store.GetServer(fb.ServerID); ok {
 			tm := fb.TargetModel
 			if tm == "" {

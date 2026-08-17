@@ -29,6 +29,82 @@ func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
 	return New(store, ms, nil, nil, nil), store, ms
 }
 
+func bptr(b bool) *bool { return &b }
+
+func TestOrderedFallbacks(t *testing.T) {
+	rule := func(fbs ...domain.FallbackEntry) *domain.RoutingRule {
+		return &domain.RoutingRule{Fallbacks: fbs}
+	}
+	ids := func(fbs []domain.FallbackEntry) []string {
+		out := make([]string, 0, len(fbs))
+		for _, f := range fbs {
+			out = append(out, f.ServerID)
+		}
+		return out
+	}
+	eq := func(got, want []string) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	tests := []struct {
+		name string
+		rule *domain.RoutingRule
+		want []string
+	}{
+		{"all disabled", rule(
+			domain.FallbackEntry{ServerID: "a", Enabled: bptr(false)},
+			domain.FallbackEntry{ServerID: "b", Enabled: bptr(false)},
+		), []string{}},
+		{"priority ascending", rule(
+			domain.FallbackEntry{ServerID: "a", Priority: 2},
+			domain.FallbackEntry{ServerID: "b", Priority: 1},
+			domain.FallbackEntry{ServerID: "c", Priority: 3},
+		), []string{"b", "a", "c"}},
+		{"unset sorts last, stable", rule(
+			domain.FallbackEntry{ServerID: "a"},
+			domain.FallbackEntry{ServerID: "b", Priority: 1},
+			domain.FallbackEntry{ServerID: "c"},
+		), []string{"b", "a", "c"}},
+		{"disabled filtered out", rule(
+			domain.FallbackEntry{ServerID: "a", Enabled: bptr(false)},
+			domain.FallbackEntry{ServerID: "b", Priority: 1},
+			domain.FallbackEntry{ServerID: "c"},
+		), []string{"b", "c"}},
+		{"stable among equal priority", rule(
+			domain.FallbackEntry{ServerID: "a", Priority: 1},
+			domain.FallbackEntry{ServerID: "b", Priority: 1},
+			domain.FallbackEntry{ServerID: "c", Priority: 1},
+		), []string{"a", "b", "c"}},
+		{"mixed set and unset", rule(
+			domain.FallbackEntry{ServerID: "a"},
+			domain.FallbackEntry{ServerID: "b", Priority: 2},
+			domain.FallbackEntry{ServerID: "c", Priority: 1},
+			domain.FallbackEntry{ServerID: "d"},
+		), []string{"c", "b", "a", "d"}},
+		{"explicit enabled true kept", rule(
+			domain.FallbackEntry{ServerID: "a", Enabled: bptr(true), Priority: 2},
+			domain.FallbackEntry{ServerID: "b", Priority: 1},
+		), []string{"b", "a"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ids(orderedFallbacks(tt.rule))
+			if !eq(got, tt.want) {
+				t.Errorf("orderedFallbacks() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAPITypeFromPath(t *testing.T) {
 	tests := []struct {
 		path string

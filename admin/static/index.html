@@ -435,7 +435,10 @@ async function loadRules() {
     const fbs = r.fallbacks || (r.fallback_server_ids || []).map(id => ({server_id: id}));
     const fallbacks = fbs.map(f => {
       const tm = f.target_model ? ' → ' + esc(f.target_model) : '';
-      return `<span class="tag" style="background:#3a3a1a;color:#d29922">${esc(f.server_id)}${tm}</span>`;
+      const pr = f.priority ? '#' + f.priority + ' ' : '';
+      const dis = f.enabled === false;
+      const style = dis ? 'background:#3a3a1a;color:#484f58;text-decoration:line-through' : 'background:#3a3a1a;color:#d29922';
+      return `<span class="tag" style="${style}" title="${dis ? 'disabled fallback' : (f.priority ? 'priority ' + f.priority : '')}">${pr}${esc(f.server_id)}${tm}</span>`;
     }).join('') || '(none)';
     const models = (r.incoming_models || []).map(m => `<span class="tag" style="background:#1a1a3a;color:#58a6ff">${esc(m)}</span>`).join(' ');
     const enabled = r.enabled !== false ? '<input type="checkbox" checked onchange="toggleRuleEnabled(' + r._idx + ',this.checked)" title="Enable rule">' : '<input type="checkbox" onchange="toggleRuleEnabled(' + r._idx + ',this.checked)" title="Disable rule">';
@@ -558,7 +561,7 @@ async function editRule(idx) {
   const fbs = r.fallbacks || (r.fallback_server_ids || []).map(id => ({server_id: id, target_model: ''}));
   document.getElementById('fallbacks-container').innerHTML = '';
   for (const fb of fbs) {
-    addFallbackRow(fb.server_id, fb.target_model || '');
+    addFallbackRow(fb.server_id, fb.target_model || '', fb.priority || 0, fb.enabled !== false);
   }
   document.getElementById('rule-modal').classList.add('open');
   // Fetch models for the selected server
@@ -610,7 +613,7 @@ function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;
 
 // --- Fallbacks ---
 let fallbackCounter = 0;
-async function addFallbackRow(serverId, targetModel) {
+async function addFallbackRow(serverId, targetModel, priority, enabled) {
   const servers = getServersFromDropdown();
   const container = document.getElementById('fallbacks-container');
   const idx = fallbackCounter++;
@@ -678,8 +681,23 @@ async function addFallbackRow(serverId, targetModel) {
         + others.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
     } catch { modelSel.innerHTML = '<option value="">(error)</option>'; }
   };
+  const priorityInp = document.createElement('input');
+  priorityInp.type = 'number';
+  priorityInp.className = 'fb-priority';
+  priorityInp.min = '0';
+  priorityInp.value = priority || 0;
+  priorityInp.title = 'Priority: lower number tried first, 0 = after all numbered';
+  priorityInp.style.cssText = 'flex:0 0 70px;margin-top:2px;padding:4px 6px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.85rem;';
+  const enabledChk = document.createElement('input');
+  enabledChk.type = 'checkbox';
+  enabledChk.className = 'fb-enabled';
+  enabledChk.checked = enabled !== false;
+  enabledChk.title = 'Enabled (uncheck to disable this fallback)';
+  enabledChk.style.cssText = 'margin-top:9px;width:auto;';
   row.appendChild(sel);
   row.appendChild(modelWrap);
+  row.appendChild(priorityInp);
+  row.appendChild(enabledChk);
   row.appendChild(btn);
   container.appendChild(row);
   // Fetch models if server is pre-selected
@@ -709,12 +727,21 @@ function getFallbacks() {
     const serverSel = row.querySelector('select'); // server select
     const modelInp = row.querySelector('input');   // manual model input
     const modelSel = row.querySelectorAll('select')[1]; // model select
+    const priorityInp = row.querySelector('.fb-priority');
+    const enabledChk = row.querySelector('.fb-enabled');
     const modelValue = modelInp.style.display !== 'none' ? modelInp.value.trim() : (modelSel ? modelSel.value : '');
     if (serverSel.value) {
-      fallbacks.push({
+      const fb = {
         server_id: serverSel.value,
         target_model: modelValue !== '__type__' ? modelValue : ''
-      });
+      };
+      if (priorityInp && parseInt(priorityInp.value, 10) > 0) {
+        fb.priority = parseInt(priorityInp.value, 10);
+      }
+      if (enabledChk && !enabledChk.checked) {
+        fb.enabled = false;
+      }
+      fallbacks.push(fb);
     }
   });
   return fallbacks;
