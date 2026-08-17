@@ -61,7 +61,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
 </head>
 <body>
 
-<h1>LLM API Router</h1>
+<h1>LLM API Router <span id="app-version" style="font-size:0.9rem;font-weight:400;color:#484f58;vertical-align:middle;"></span></h1>
 
 <div class="tabs">
   <div class="tab active" onclick="switchTab('servers')">Servers</div>
@@ -173,6 +173,16 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
 
 <script>
 const API = '/admin/api';
+
+// --- Version ---
+async function loadVersion() {
+  try {
+    const res = await fetch(API + '/version');
+    const data = await res.json();
+    const el = document.getElementById('app-version');
+    if (el && data.version) el.textContent = data.version;
+  } catch (e) { /* non-fatal */ }
+}
 
 // --- Cookies ---
 function setCookie(name, value, days) {
@@ -738,6 +748,7 @@ function restoreSortState() {
   }
 }
 restoreSortState();
+loadVersion();
 loadServers();
 loadRules();
 // Auto-refresh servers tab (it's the default active tab)

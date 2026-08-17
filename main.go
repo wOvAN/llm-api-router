@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
+	"flag"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -23,6 +26,13 @@ var staticFS embed.FS
 
 func main() {
 	log.InitFromEnv()
+
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(Version)
+		return
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -84,6 +94,18 @@ func main() {
 	mux.HandleFunc("/v1/", apiRouter.Handle)
 	mux.HandleFunc("/admin/api/", adminHandler.ServeHTTP)
 
+	// Build version (exact pattern beats the /admin/api/ catch-all above).
+	mux.HandleFunc("/admin/api/version", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{"version": Version}); err != nil {
+			log.Errorf("failed to encode version response: %v", err)
+		}
+	})
+
 	// Prometheus text-format metrics endpoint (zero deps).
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
@@ -137,7 +159,7 @@ func main() {
 		}
 	}()
 
-	log.Infof("LLM API Router starting on %s", addr)
+	log.Infof("LLM API Router %s starting on %s", Version, addr)
 	log.Infof("Admin GUI: http://localhost%s/admin", addr)
 	log.Infof("API routes: http://localhost%s/v1/*", addr)
 
