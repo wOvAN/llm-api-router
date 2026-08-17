@@ -627,6 +627,17 @@ func TestExtractSSEContents(t *testing.T) {
 		}
 	})
 
+	t.Run("skips event lines", func(t *testing.T) {
+		data := []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n\nevent: message_stop\n\n")
+		contents := extractSSEContents(data)
+		if len(contents) != 1 {
+			t.Fatalf("got %d contents, want 1", len(contents))
+		}
+		if contents[0] != "hi" {
+			t.Errorf("contents[0] = %q, want %q", contents[0], "hi")
+		}
+	})
+
 	t.Run("skips non-content events", func(t *testing.T) {
 		data := []byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n")
 		contents := extractSSEContents(data)

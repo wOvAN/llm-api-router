@@ -940,10 +940,14 @@ func extractSSEContents(data []byte) []string {
 			continue
 		}
 
-		// Extract content from JSON
+		// Extract content from JSON; fragments that are not JSON objects
+		// (event: lines, partial frames) are skipped, not logged
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
 		var obj map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &obj); err != nil {
-			log.Debugf("loopDetector: failed to parse SSE data line: %v", err)
+			log.Debugf("extractSSEContents: failed to parse SSE data line: %v", err)
 			continue
 		}
 
