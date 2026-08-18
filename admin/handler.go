@@ -308,12 +308,7 @@ func rulesProfileID(req *http.Request) string {
 }
 
 func (h *Handler) listRules(w http.ResponseWriter, req *http.Request) {
-	pid := rulesProfileID(req)
-	if pid == "" {
-		writeJSON(w, http.StatusOK, h.store.GetActiveRules())
-		return
-	}
-	rules, err := h.store.GetRules(pid)
+	rules, err := h.store.GetRules(rulesProfileID(req))
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return

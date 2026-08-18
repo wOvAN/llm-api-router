@@ -432,8 +432,6 @@ async function deleteServer(id) {
 
 // --- Rules ---
 // --- Profiles ---
-let currentProfileID = '';
-
 async function loadProfiles(then, selectID) {
   const res = await fetch(API + '/profiles');
   const data = await res.json();
@@ -447,14 +445,11 @@ async function loadProfiles(then, selectID) {
   const want = selectID
     || (profiles.some(p => p.id === prev) ? prev : data.active_profile_id);
   sel.value = want;
-  currentProfileID = sel.value;
   if (then) then();
 }
 
 // Switch which profile's rules are viewed/edited. Does not change the active profile.
 function selectProfile() {
-  const sel = document.getElementById('profile-select');
-  currentProfileID = sel.value;
   closeRuleModal();
   loadRules();
 }
@@ -504,8 +499,9 @@ async function deleteProfile() {
 }
 
 function ruleURL(idx) {
+  const sel = document.getElementById('profile-select');
   const base = idx == null ? API + '/rules' : API + '/rules/' + idx;
-  return base + '?profile_id=' + encodeURIComponent(currentProfileID);
+  return base + '?profile_id=' + encodeURIComponent(sel.value);
 }
 
 async function loadRules() {
