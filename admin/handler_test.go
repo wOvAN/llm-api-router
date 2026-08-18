@@ -431,6 +431,82 @@ func TestActivateProfile(t *testing.T) {
 	}
 }
 
+func TestRulesWithProfileID(t *testing.T) {
+	h, store := newTestHandler(t)
+	if _, err := store.AddProfile("prod", false); err != nil {
+		t.Fatalf("AddProfile: %v", err)
+	}
+	_ = store.AddRule(&domain.RoutingRule{IncomingModels: []string{"m1"}, ServerID: "s1", Enabled: true})
+
+	// POST /rules?profile_id=prod adds to prod, not the active profile.
+	body := strings.NewReader(`{"incoming_models":["m2"],"server_id":"s2","enabled":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/rules?profile_id=prod", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("got status %d, want 201", w.Code)
+	}
+	if got := len(store.GetActiveRules()); got != 1 {
+		t.Errorf("active profile should have 1 rule, got %d", got)
+	}
+
+	// GET /rules?profile_id=prod lists prod's rules.
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/rules?profile_id=prod", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var rules []domain.RoutingRule
+	if err := json.NewDecoder(w.Body).Decode(&rules); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(rules) != 1 || rules[0].ServerID != "s2" {
+		t.Fatalf("prod rules = %+v, want 1 rule on s2", rules)
+	}
+
+	// PUT /rules/0?profile_id=prod updates prod's rule.
+	body = strings.NewReader(`{"incoming_models":["m2"],"server_id":"s3","enabled":false}`)
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/rules/0?profile_id=prod", body)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT got status %d, want 200", w.Code)
+	}
+	prodRules, _ := store.GetRules("prod")
+	if prodRules[0].ServerID != "s3" || prodRules[0].Enabled {
+		t.Errorf("prod rule not updated: %+v", prodRules[0])
+	}
+
+	// DELETE /rules/0?profile_id=prod removes prod's rule.
+	req = httptest.NewRequest(http.MethodDelete, "/admin/api/rules/0?profile_id=prod", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE got status %d, want 200", w.Code)
+	}
+	if prodRules, _ = store.GetRules("prod"); len(prodRules) != 0 {
+		t.Errorf("prod should be empty, got %d rules", len(prodRules))
+	}
+	if got := len(store.GetActiveRules()); got != 1 {
+		t.Errorf("active profile should be untouched, got %d rules", got)
+	}
+
+	// Unknown profile: 404 on GET and POST.
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/rules?profile_id=nope", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("GET unknown profile got status %d, want 404", w.Code)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/rules?profile_id=nope", strings.NewReader(`{"server_id":"s1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("POST unknown profile got status %d, want 404", w.Code)
+	}
+}
+
 func TestGetConfig(t *testing.T) {
 	h, store := newTestHandler(t)
 	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://test.com", APITypes: []domain.APIType{domain.APITypeOpenAI}})

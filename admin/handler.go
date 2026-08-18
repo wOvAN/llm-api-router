@@ -301,8 +301,24 @@ func (h *Handler) testServer(w http.ResponseWriter, req *http.Request) {
 
 // --- Rules ---
 
+// rulesProfileID extracts the optional ?profile_id= query parameter. Empty
+// means the active profile.
+func rulesProfileID(req *http.Request) string {
+	return req.URL.Query().Get("profile_id")
+}
+
 func (h *Handler) listRules(w http.ResponseWriter, req *http.Request) {
-	writeJSON(w, http.StatusOK, h.store.GetActiveRules())
+	pid := rulesProfileID(req)
+	if pid == "" {
+		writeJSON(w, http.StatusOK, h.store.GetActiveRules())
+		return
+	}
+	rules, err := h.store.GetRules(pid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rules)
 }
 
 func (h *Handler) addRule(w http.ResponseWriter, req *http.Request) {
@@ -311,8 +327,12 @@ func (h *Handler) addRule(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if err := h.store.AddRule(&rule); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := h.store.AddRuleToProfile(rulesProfileID(req), &rule); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, rule)
@@ -330,7 +350,7 @@ func (h *Handler) updateRule(w http.ResponseWriter, req *http.Request, idxStr st
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if err := h.store.UpdateRule(idx, &rule); err != nil {
+	if err := h.store.UpdateRuleInProfile(rulesProfileID(req), idx, &rule); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -343,7 +363,7 @@ func (h *Handler) deleteRule(w http.ResponseWriter, req *http.Request, idxStr st
 		writeError(w, http.StatusBadRequest, "invalid index")
 		return
 	}
-	if err := h.store.DeleteRule(idx); err != nil {
+	if err := h.store.DeleteRuleFromProfile(rulesProfileID(req), idx); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}

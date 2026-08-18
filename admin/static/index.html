@@ -85,9 +85,10 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
 <!-- Rules Panel -->
 <div id="panel-rules" class="panel">
   <div class="btn-row">
-    <label style="display:flex;align-items:center;gap:6px;font-size:0.9rem;">Active profile:
-      <select id="profile-select" onchange="switchProfile()"></select>
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.9rem;">Profile:
+      <select id="profile-select" onchange="selectProfile()"></select>
     </label>
+    <button onclick="activateProfile()" title="Route traffic through the selected profile">★ Activate</button>
     <button onclick="createProfile()">+ New Profile</button>
     <button class="danger" onclick="deleteProfile()">Delete Profile</button>
   </div>
@@ -428,36 +429,52 @@ async function deleteServer(id) {
 
 // --- Rules ---
 // --- Profiles ---
-async function loadProfiles(then) {
+let currentProfileID = '';
+
+async function loadProfiles(then, selectID) {
   const res = await fetch(API + '/profiles');
   const data = await res.json();
   const sel = document.getElementById('profile-select');
   const profiles = data.profiles || [];
+  const prev = sel.value;
   sel.innerHTML = profiles.map(p =>
-    `<option value="${esc(p.id)}"${p.id === data.active_profile_id ? ' selected' : ''}>${esc(p.name)}</option>`
+    `<option value="${esc(p.id)}">${esc(p.name)}${p.id === data.active_profile_id ? ' (active)' : ''}</option>`
   ).join('');
+  // Keep the profile being viewed; fall back to the active one.
+  const want = selectID
+    || (profiles.some(p => p.id === prev) ? prev : data.active_profile_id);
+  sel.value = want;
+  currentProfileID = sel.value;
   if (then) then();
 }
 
-async function switchProfile() {
+// Switch which profile's rules are viewed/edited. Does not change the active profile.
+function selectProfile() {
   const sel = document.getElementById('profile-select');
+  currentProfileID = sel.value;
   closeRuleModal();
+  loadRules();
+}
+
+async function activateProfile() {
+  const sel = document.getElementById('profile-select');
   const res = await fetch(API + '/profiles/' + encodeURIComponent(sel.value) + '/activate', { method: 'POST' });
-  if (!res.ok) { alert('Failed to switch profile: ' + (await res.text())); return; }
-  loadProfiles(loadRules);
+  if (!res.ok) { alert('Failed to activate profile: ' + (await res.text())); return; }
+  loadProfiles();
 }
 
 async function createProfile() {
   const name = prompt('Profile name:');
   if (!name || !name.trim()) return;
-  const copy = confirm('Copy rules from the current profile?');
+  const copy = confirm('Copy rules from the active profile?');
   const res = await fetch(API + '/profiles', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: name.trim(), copy_from_active: copy })
   });
   if (!res.ok) { alert('Failed to create profile: ' + (await res.text())); return; }
-  loadProfiles(loadRules);
+  const created = await res.json();
+  loadProfiles(loadRules, created.id);
 }
 
 async function deleteProfile() {
@@ -469,8 +486,13 @@ async function deleteProfile() {
   loadProfiles(loadRules);
 }
 
+function ruleURL(idx) {
+  const base = idx == null ? API + '/rules' : API + '/rules/' + idx;
+  return base + '?profile_id=' + encodeURIComponent(currentProfileID);
+}
+
 async function loadRules() {
-  const res = await fetch(API + '/rules');
+  const res = await fetch(ruleURL());
   let rules = await res.json();
   // Tag each rule with its original index before sorting
   rules.forEach((r, i) => { r._idx = i; });
@@ -565,7 +587,7 @@ async function saveRule() {
     context_window: parseInt(document.getElementById('rule-context-window').value, 10) || 0,
   };
   const method = idx !== '' ? 'PUT' : 'POST';
-  const url = idx !== '' ? API + '/rules/' + idx : API + '/rules';
+  const url = ruleURL(idx !== '' ? idx : null);
   const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
   if (!res.ok) {
     const err = await res.json().catch(() => ({error: res.statusText}));
@@ -577,12 +599,12 @@ async function saveRule() {
 }
 
 async function toggleRuleEnabled(idx, newState) {
-  const res = await fetch(API + '/rules');
+  const res = await fetch(ruleURL());
   const rules = await res.json();
   const r = rules[idx];
   if (!r) return;
   r.enabled = newState;
-  const putRes = await fetch(API + '/rules/' + idx, {
+  const putRes = await fetch(ruleURL(idx), {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(r),
@@ -595,7 +617,7 @@ async function toggleRuleEnabled(idx, newState) {
 }
 
 async function editRule(idx) {
-  const res = await fetch(API + '/rules');
+  const res = await fetch(ruleURL());
   const rules = await res.json();
   const r = rules[idx];
   if (!r) return;
@@ -641,7 +663,7 @@ async function editRule(idx) {
 
 async function deleteRule(idx) {
   if (!confirm('Delete rule #' + idx + '?')) return;
-  const res = await fetch(API + '/rules/' + idx, { method: 'DELETE' });
+  const res = await fetch(ruleURL(idx), { method: 'DELETE' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({error: res.statusText}));
     alert('Delete failed: ' + (err.error || res.statusText));

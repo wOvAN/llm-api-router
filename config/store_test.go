@@ -543,6 +543,70 @@ func TestRulesScopedToActiveProfile(t *testing.T) {
 	}
 }
 
+func TestProfileScopedRuleCRUD(t *testing.T) {
+	s := newEmptyStore(t)
+	_ = s.AddRule(&domain.RoutingRule{IncomingModels: []string{"m1"}, ServerID: "s1", Enabled: true})
+	if _, err := s.AddProfile("prod", false); err != nil {
+		t.Fatalf("AddProfile: %v", err)
+	}
+
+	// Rules can be added to a non-active profile without activating it.
+	err := s.AddRuleToProfile("prod", &domain.RoutingRule{IncomingModels: []string{"m2"}, ServerID: "s2", Enabled: true})
+	if err != nil {
+		t.Fatalf("AddRuleToProfile: %v", err)
+	}
+	if got := len(s.GetActiveRules()); got != 1 {
+		t.Fatalf("active profile should still have 1 rule, got %d", got)
+	}
+	rules, err := s.GetRules("prod")
+	if err != nil {
+		t.Fatalf("GetRules: %v", err)
+	}
+	if len(rules) != 1 || rules[0].ServerID != "s2" {
+		t.Fatalf("prod rules = %+v, want 1 rule on s2", rules)
+	}
+
+	// Update and delete by index in the target profile.
+	if err := s.UpdateRuleInProfile("prod", 0, &domain.RoutingRule{IncomingModels: []string{"m2"}, ServerID: "s3", Enabled: false}); err != nil {
+		t.Fatalf("UpdateRuleInProfile: %v", err)
+	}
+	rules, _ = s.GetRules("prod")
+	if rules[0].ServerID != "s3" || rules[0].Enabled {
+		t.Errorf("update not applied: %+v", rules[0])
+	}
+	if err := s.DeleteRuleFromProfile("prod", 0); err != nil {
+		t.Fatalf("DeleteRuleFromProfile: %v", err)
+	}
+	if rules, _ = s.GetRules("prod"); len(rules) != 0 {
+		t.Errorf("prod should be empty after delete, got %d", len(rules))
+	}
+	if got := len(s.GetActiveRules()); got != 1 {
+		t.Errorf("active profile should be untouched, got %d rules", got)
+	}
+
+	// Unknown profile errors on every operation.
+	if _, err := s.GetRules("nope"); err == nil {
+		t.Error("GetRules unknown profile should error")
+	}
+	if err := s.AddRuleToProfile("nope", &domain.RoutingRule{}); err == nil {
+		t.Error("AddRuleToProfile unknown profile should error")
+	}
+	if err := s.UpdateRuleInProfile("nope", 0, &domain.RoutingRule{}); err == nil {
+		t.Error("UpdateRuleInProfile unknown profile should error")
+	}
+	if err := s.DeleteRuleFromProfile("nope", 0); err == nil {
+		t.Error("DeleteRuleFromProfile unknown profile should error")
+	}
+
+	// Out-of-range index errors.
+	if err := s.UpdateRuleInProfile("prod", 0, &domain.RoutingRule{}); err == nil {
+		t.Error("UpdateRuleInProfile out of range should error")
+	}
+	if err := s.DeleteRuleFromProfile("prod", 5); err == nil {
+		t.Error("DeleteRuleFromProfile out of range should error")
+	}
+}
+
 func TestServerGetURLForAPIType(t *testing.T) {
 	tests := []struct {
 		name    string

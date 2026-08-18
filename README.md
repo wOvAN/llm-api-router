@@ -99,7 +99,7 @@ The config is stored in `config.json` (path configurable via `CONFIG_FILE`). You
 
 ### Key config quirks
 
-- Rules live in named **profiles**; `active_profile_id` selects which profile routes traffic. Only the active profile's rules are used (and listed by `/v1/models`). Manage profiles from the GUI or the `/admin/api/profiles` endpoints
+- Rules live in named **profiles**; `active_profile_id` selects which profile routes traffic. Only the active profile's rules are used (and listed by `/v1/models`). Any profile's rules can be edited independently of the active one — GUI profile selector, or `/admin/api/rules?profile_id=`
 - Legacy top-level `rules` arrays auto-migrate to a single `default` profile on load (the file is rewritten in the new shape on the next save)
 - `api_types` accepts `"openai"` and/or `"anthropic"` per server; legacy `api_type` (string) is auto-migrated to array on load
 - Each server can specify `openai_url` / `anthropic_url` overrides; falls back to base `url`
@@ -148,10 +148,10 @@ curl http://localhost:8080/v1/models
 | DELETE | `/admin/api/servers/:id` | Delete server |
 | GET | `/admin/api/servers/:id/models` | Fetch model list from upstream |
 | POST | `/admin/api/servers/test` | Test connectivity to a server |
-| GET | `/admin/api/rules` | List the active profile's routing rules |
-| POST | `/admin/api/rules` | Add routing rule to the active profile |
-| PUT | `/admin/api/rules/:idx` | Update routing rule (by index) in the active profile |
-| DELETE | `/admin/api/rules/:idx` | Delete routing rule (by index) from the active profile |
+| GET | `/admin/api/rules` | List routing rules (`?profile_id=` to target a specific profile; default = active) |
+| POST | `/admin/api/rules` | Add routing rule (`?profile_id=` to target a specific profile; default = active) |
+| PUT | `/admin/api/rules/:idx` | Update routing rule by index (`?profile_id=` to target a specific profile; default = active) |
+| DELETE | `/admin/api/rules/:idx` | Delete routing rule by index (`?profile_id=` to target a specific profile; default = active) |
 | GET | `/admin/api/profiles` | List profiles + active profile id |
 | POST | `/admin/api/profiles` | Create profile (optionally copy the active profile's rules) |
 | PUT | `/admin/api/profiles/:id` | Rename profile |

@@ -242,41 +242,38 @@ func (s *Store) DeleteServer(id string) error {
 
 // AddRule appends a new routing rule to the active profile.
 func (s *Store) AddRule(rule *domain.RoutingRule) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	p := s.activeProfile()
-	if p == nil {
-		return fmt.Errorf("no active profile")
-	}
-	p.Rules = append(p.Rules, cloneRule(rule))
-	return s.save()
+	return s.AddRuleToProfile("", rule)
 }
 
 // UpdateRule updates a rule by index in the active profile.
 func (s *Store) UpdateRule(idx int, rule *domain.RoutingRule) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	p := s.activeProfile()
-	if p == nil || idx < 0 || idx >= len(p.Rules) {
-		return fmt.Errorf("rule index %d out of range", idx)
-	}
-	p.Rules[idx] = cloneRule(rule)
-	return s.save()
+	return s.UpdateRuleInProfile("", idx, rule)
 }
 
 // DeleteRule removes a rule by index from the active profile.
 func (s *Store) DeleteRule(idx int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.DeleteRuleFromProfile("", idx)
+}
 
-	p := s.activeProfile()
-	if p == nil || idx < 0 || idx >= len(p.Rules) {
-		return fmt.Errorf("rule index %d out of range", idx)
+// profileByID returns the profile with the given ID, or nil if not found.
+// Caller must hold s.mu (read or write).
+func (s *Store) profileByID(id string) *domain.RuleProfile {
+	for i := range s.config.Profiles {
+		if s.config.Profiles[i].ID == id {
+			return &s.config.Profiles[i]
+		}
 	}
-	p.Rules = append(p.Rules[:idx], p.Rules[idx+1:]...)
-	return s.save()
+	return nil
+}
+
+// resolveProfile returns the profile to operate on: the active profile when
+// id is empty, otherwise the profile with that ID (nil if not found).
+// Caller must hold s.mu (read or write).
+func (s *Store) resolveProfile(id string) *domain.RuleProfile {
+	if id == "" {
+		return s.activeProfile()
+	}
+	return s.profileByID(id)
 }
 
 // activeProfile returns the profile pointed to by ActiveProfileID, falling
@@ -284,13 +281,11 @@ func (s *Store) DeleteRule(idx int) error {
 // (read or write). Returns nil only if Profiles is empty, which the
 // len(Profiles) >= 1 invariant prevents.
 func (s *Store) activeProfile() *domain.RuleProfile {
+	if p := s.profileByID(s.config.ActiveProfileID); p != nil {
+		return p
+	}
 	if len(s.config.Profiles) == 0 {
 		return nil
-	}
-	for i := range s.config.Profiles {
-		if s.config.Profiles[i].ID == s.config.ActiveProfileID {
-			return &s.config.Profiles[i]
-		}
 	}
 	return &s.config.Profiles[0]
 }
@@ -304,18 +299,73 @@ func (s *Store) GetActiveProfileID() string {
 
 // GetActiveRules returns a deep copy of the active profile's rules.
 func (s *Store) GetActiveRules() []*domain.RoutingRule {
+	rules, _ := s.GetRules("")
+	return rules
+}
+
+// GetRules returns a deep copy of the rules of the profile with the given ID.
+// An empty ID selects the active profile.
+func (s *Store) GetRules(id string) ([]*domain.RoutingRule, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	p := s.activeProfile()
+	p := s.resolveProfile(id)
 	if p == nil {
-		return make([]*domain.RoutingRule, 0)
+		return nil, fmt.Errorf("profile %q not found", id)
 	}
 	out := make([]*domain.RoutingRule, 0, len(p.Rules))
 	for _, rule := range p.Rules {
 		out = append(out, cloneRule(rule))
 	}
-	return out
+	return out, nil
+}
+
+// AddRuleToProfile appends a rule to the profile with the given ID
+// (empty = active profile).
+func (s *Store) AddRuleToProfile(id string, rule *domain.RoutingRule) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p := s.resolveProfile(id)
+	if p == nil {
+		return fmt.Errorf("profile %q not found", id)
+	}
+	p.Rules = append(p.Rules, cloneRule(rule))
+	return s.save()
+}
+
+// UpdateRuleInProfile updates a rule by index in the profile with the given
+// ID (empty = active profile).
+func (s *Store) UpdateRuleInProfile(id string, idx int, rule *domain.RoutingRule) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p := s.resolveProfile(id)
+	if p == nil {
+		return fmt.Errorf("profile %q not found", id)
+	}
+	if idx < 0 || idx >= len(p.Rules) {
+		return fmt.Errorf("rule index %d out of range", idx)
+	}
+	p.Rules[idx] = cloneRule(rule)
+	return s.save()
+}
+
+// DeleteRuleFromProfile removes a rule by index from the profile with the
+// given ID (empty = active profile).
+func (s *Store) DeleteRuleFromProfile(id string, idx int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p := s.resolveProfile(id)
+	if p == nil {
+		return fmt.Errorf("profile %q not found", id)
+	}
+	if idx < 0 || idx >= len(p.Rules) {
+		return fmt.Errorf("rule index %d out of range", idx)
+	}
+	p.Rules = append(p.Rules[:idx], p.Rules[idx+1:]...)
+	return s.save()
 }
 
 // GetProfiles returns a deep copy of all profiles.
