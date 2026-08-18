@@ -80,21 +80,24 @@ func (t *HealthTracker) checkAll() {
 	}
 }
 
-// checkServer pings the server's /v1/models endpoint.
-func (t *HealthTracker) checkServer(srv *domain.Server) bool {
+// ModelsURL returns the server's /v1/models probe URL: the protocol-specific
+// URL override for OpenAI, scheme defaulted to https, /v1 suffix dedup'd
+// against the probe path.
+func ModelsURL(srv *domain.Server) string {
 	rawURL := srv.GetURLForAPIType(domain.APITypeOpenAI)
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "https://" + rawURL
 	}
+	u := strings.TrimRight(rawURL, "/") + "/v1/models"
+	return strings.ReplaceAll(u, "/v1/v1", "/v1")
+}
 
-	// TrimRight avoids a double slash when the URL ends with "/".
-	modelsURL := strings.TrimRight(rawURL, "/") + "/v1/models"
-	modelsURL = strings.ReplaceAll(modelsURL, "/v1/v1", "/v1")
-
+// checkServer pings the server's /v1/models endpoint.
+func (t *HealthTracker) checkServer(srv *domain.Server) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ModelsURL(srv), nil)
 	if err != nil {
 		log.Debugf("[health] %s: failed to create probe request: %v", srv.Name, err)
 		return false

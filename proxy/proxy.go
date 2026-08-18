@@ -71,108 +71,24 @@ var UpstreamDrainTimeout = 10 * time.Minute
 // (and operators) can tune it.
 var WaitSignalIdle = 30 * time.Second
 
-// keepAliveWriter injects heartbeat frames into the SSE stream when the
-// upstream stays silent for KeepAliveIdle. The heartbeat is written directly
-// to the underlying ResponseWriter — bypassing the frame-buffering layers
-// above — so it can never be glued onto a partial frame, and it is only armed
-// for text/event-stream responses (JSON bodies must not be polluted).
-//
-// Start/Stop/Write/Flush are mutex-guarded because the heartbeat timer fires
-// from its own goroutine while the relay loop writes from another.
-type keepAliveWriter struct {
-	http.ResponseWriter
-	mu      sync.Mutex
-	ping    []byte
-	idle    time.Duration
-	timer   *time.Timer
-	started bool
-}
-
-func newKeepAliveWriter(w http.ResponseWriter, ping []byte, idle time.Duration) *keepAliveWriter {
-	return &keepAliveWriter{ResponseWriter: w, ping: ping, idle: idle}
-}
-
-// Start arms the heartbeat timer. Must be called once the response is known
-// to be an SSE stream; before Start no heartbeats are sent.
-func (k *keepAliveWriter) Start() {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if k.started {
-		return
-	}
-	k.started = true
-	k.armLocked()
-}
-
-// Stop disarms the heartbeat timer; safe to call multiple times.
-func (k *keepAliveWriter) Stop() {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.started = false
-	if k.timer != nil {
-		k.timer.Stop()
-	}
-}
-
-func (k *keepAliveWriter) Write(data []byte) (int, error) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	n, err := k.ResponseWriter.Write(data)
-	if k.started {
-		k.armLocked()
-	}
-	return n, err
-}
-
-func (k *keepAliveWriter) Flush() {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if f, ok := k.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
-
-// armLocked (re)arms the timer to fire after idle of silence. Called with mu
-// held. A fresh AfterFunc timer is created instead of Reset so re-arming from
-// inside the callback (pingTick) can never deadlock on Reset's wait.
-func (k *keepAliveWriter) armLocked() {
-	if k.timer != nil {
-		k.timer.Stop()
-	}
-	k.timer = time.AfterFunc(k.idle, k.pingTick)
-}
-
-// pingTick runs on the timer goroutine: inject a heartbeat, flush, and arm
-// the next idle window.
-func (k *keepAliveWriter) pingTick() {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if !k.started {
-		return
-	}
-	if _, err := k.ResponseWriter.Write(k.ping); err != nil {
-		log.Warnf("keepAlive: heartbeat write failed: %v", err)
-		k.started = false
-		return
-	}
-	if f, ok := k.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-	k.armLocked()
-}
-
-// waitSignalWriter injects "still waiting" SSE events into the stream when the
-// upstream stays silent for WaitSignalIdle. Long backend think times (slow
-// models, large prompts) otherwise trip client-side read timeouts ("Request
-// timed out", "api timeout") even though the proxy is working. The signal uses
-// the standard Anthropic `event: ping` frame (which SDKs recognize and use to
-// reset their internal timeouts), keeping the client from giving up while the
-// backend thinks. For OpenAI, the caller passes an SSE comment line (ignored by
-// all SSE parsers but keeps TCP alive).
+// silenceWriter injects a signal frame into an SSE stream when the upstream
+// stays silent for idle. Two instances sit in the writer chain with different
+// jobs: the bottom-most one (directly on the client writer, so it can never be
+// glued onto a partial frame) sends protocol heartbeats after KeepAliveIdle of
+// silence; the one above the frame buffer sends "still waiting" signals after
+// WaitSignalIdle. Both use the same protocol-appropriate frame — the standard
+// Anthropic `event: ping` (recognized by SDKs to reset internal timeouts) or
+// an OpenAI SSE comment line, which every SSE parser ignores but keeps TCP
+// alive. Never send an event-bearing frame on an OpenAI stream — strict
+// clients (opencode) validate every event as a chat chunk and reject unknown
+// payloads. Both are only armed for text/event-stream responses (JSON bodies
+// must not be polluted).
 //
 // Start/Stop/Write/Flush are mutex-guarded because the signal timer fires from
-// its own goroutine while the relay loop writes from another.
-type waitSignalWriter struct {
+// its own goroutine while the relay loop writes from another. A fresh
+// AfterFunc timer is created instead of Reset so re-arming from inside the
+// callback (signalTick) can never deadlock on Reset's wait.
+type silenceWriter struct {
 	http.ResponseWriter
 	mu        sync.Mutex
 	idle      time.Duration
@@ -182,95 +98,85 @@ type waitSignalWriter struct {
 	lastWrite time.Time
 }
 
-func newWaitSignalWriter(w http.ResponseWriter, idle time.Duration, signal []byte) *waitSignalWriter {
-	return &waitSignalWriter{ResponseWriter: w, idle: idle, signal: signal}
+func newSilenceWriter(w http.ResponseWriter, idle time.Duration, signal []byte) *silenceWriter {
+	return &silenceWriter{ResponseWriter: w, idle: idle, signal: signal}
 }
 
 // Start arms the signal timer. Must be called once the response is known to be
-// an SSE stream and headers have been written; before Start no signals are sent.
-func (w *waitSignalWriter) Start() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.started {
+// an SSE stream; before Start no signals are sent.
+func (s *silenceWriter) Start() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.started {
 		return
 	}
-	w.started = true
-	w.lastWrite = time.Now()
-	w.armLocked()
+	s.started = true
+	s.lastWrite = time.Now()
+	s.armLocked()
 }
 
 // Stop disarms the timer; safe to call multiple times.
-func (w *waitSignalWriter) Stop() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.started = false
-	if w.timer != nil {
-		w.timer.Stop()
+func (s *silenceWriter) Stop() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.started = false
+	if s.timer != nil {
+		s.timer.Stop()
 	}
 }
 
-func (w *waitSignalWriter) Write(data []byte) (int, error) {
-	w.mu.Lock()
-	w.lastWrite = time.Now()
-	if w.started {
-		w.armLocked()
+func (s *silenceWriter) Write(data []byte) (int, error) {
+	s.mu.Lock()
+	s.lastWrite = time.Now()
+	if s.started {
+		s.armLocked()
 	}
-	n, err := w.ResponseWriter.Write(data)
-	w.mu.Unlock()
+	n, err := s.ResponseWriter.Write(data)
+	s.mu.Unlock()
 	return n, err
 }
 
-func (w *waitSignalWriter) Flush() {
-	w.mu.Lock()
-	if w.started {
-		w.armLocked()
+func (s *silenceWriter) Flush() {
+	s.mu.Lock()
+	if s.started {
+		s.armLocked()
 	}
-	w.mu.Unlock()
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+	s.mu.Unlock()
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// armLocked (re)arms the timer to fire after idle of silence. Called with mu
-// held. A fresh AfterFunc timer is created instead of Reset so re-arming from
-// inside the callback (signalTick) can never deadlock on Reset's wait.
-func (w *waitSignalWriter) armLocked() {
-	if w.timer != nil {
-		w.timer.Stop()
+// armLocked (re)arms the timer to fire after idle of silence. Called with mu held.
+func (s *silenceWriter) armLocked() {
+	if s.timer != nil {
+		s.timer.Stop()
 	}
-	w.timer = time.AfterFunc(w.idle, w.signalTick)
+	s.timer = time.AfterFunc(s.idle, s.signalTick)
 }
 
-// signalTick runs on the timer goroutine: inject a ping event, flush, and arm
-// the next idle window. Uses the standard `event: ping` frame (recognized by
-// Anthropic SDK to reset internal timeouts) plus a data line for OpenAI.
-func (w *waitSignalWriter) signalTick() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.started {
+// signalTick runs on the timer goroutine: inject a signal, flush, and arm the
+// next idle window. Skips when a real data write arrived just before the timer
+// fired (re-arms instead of sending on top of fresh data).
+func (s *silenceWriter) signalTick() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.started {
 		return
 	}
-	// Only send if we haven't written anything recently (avoids sending right
-	// after a real data write that arrived just before the timer fired).
-	elapsed := time.Since(w.lastWrite)
-	if elapsed < w.idle {
-		w.armLocked()
+	if time.Since(s.lastWrite) < s.idle {
+		s.armLocked()
 		return
 	}
-	// Signal frame supplied by the caller: Anthropic `event: ping` or an OpenAI
-	// SSE comment line. Never send an event-bearing frame on an OpenAI stream —
-	// strict clients (opencode) validate every event as a chat chunk and reject
-	// unknown payloads like {"type":"ping"}.
-	signal := w.signal
-	if _, err := w.ResponseWriter.Write(signal); err != nil {
-		log.Warnf("waitSignal: write failed: %v", err)
-		w.started = false
+	if _, err := s.ResponseWriter.Write(s.signal); err != nil {
+		log.Warnf("silenceWriter: signal write failed: %v", err)
+		s.started = false
 		return
 	}
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
-	w.armLocked()
+	s.armLocked()
 }
 
 // bufPool reuses bytes.Buffer instances across requests to reduce GC pressure.
@@ -341,43 +247,6 @@ func SetRouterHeaders(w http.ResponseWriter, h *RouterHeaders) {
 	}
 }
 
-// headerInjector wraps an http.ResponseWriter to inject X-Router-* headers
-// at WriteHeader time. TTFB is measured at first Write() time (first content
-// byte) via metricsWriter, so it's not available here.
-//
-// Headers set eagerly (via SetRouterHeaders): X-Router-Server, X-Router-Server-Name.
-// Headers set at WriteHeader time: X-Router-Status.
-// Latency and token headers are NOT set in streaming responses — they are
-// available in /admin/api/metrics after the fact.
-type headerInjector struct {
-	http.ResponseWriter
-	statusCode int
-	written    bool
-}
-
-func newHeaderInjector(w http.ResponseWriter) *headerInjector {
-	return &headerInjector{ResponseWriter: w}
-}
-
-func (h *headerInjector) WriteHeader(code int) {
-	h.statusCode = code
-	h.written = true
-
-	// Inject headers BEFORE forwarding to client.
-	// TTFB is measured at first Write() time (first content byte), not here.
-	// At WriteHeader time, we only know the status code.
-	headers := h.Header()
-	headers.Set("X-Router-Status", strconv.Itoa(code))
-
-	h.ResponseWriter.WriteHeader(code)
-}
-
-func (h *headerInjector) Flush() {
-	if flusher, ok := h.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
 // metricsWriter wraps an http.ResponseWriter to track TTFB and response size.
 type metricsWriter struct {
 	http.ResponseWriter
@@ -388,6 +257,7 @@ type metricsWriter struct {
 	bodyBuffer      *bytes.Buffer
 	contentType     string
 	contentEncoding string
+	injectStatus    bool // set X-Router-Status at WriteHeader (router mode)
 }
 
 func newMetricsWriter(w http.ResponseWriter, start time.Time) *metricsWriter {
@@ -405,6 +275,9 @@ func (m *metricsWriter) WriteHeader(code int) {
 	m.statusCode = code
 	m.contentType = m.ResponseWriter.Header().Get("Content-Type")
 	m.contentEncoding = m.ResponseWriter.Header().Get("Content-Encoding")
+	if m.injectStatus {
+		m.Header().Set("X-Router-Status", strconv.Itoa(code))
+	}
 	m.ResponseWriter.WriteHeader(code)
 }
 
@@ -549,7 +422,7 @@ func rewriteModelInResponse(data []byte, oldModel, newModel string) ([]byte, str
 
 	result, n := replaceJSONModelValue(data, oldModel, newModel)
 	if n == 0 {
-		if bytesIndex(data, []byte(`"model"`)) >= 0 {
+		if bytes.Contains(data, []byte(`"model"`)) {
 			log.Debugf("modelRewrite: found 'model' key but no match for %q in chunk: %s", oldModel, truncateBytes(data, 256))
 		}
 		return data, ""
@@ -570,7 +443,7 @@ func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 	replacements := 0
 
 	for {
-		keyIdx := bytesIndex(data[start:], key)
+		keyIdx := bytes.Index(data[start:], key)
 		if keyIdx < 0 {
 			break
 		}
@@ -578,13 +451,13 @@ func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 		endOfKey := absKeyIdx + len(key)
 
 		// Skip if it's a longer key like "model_id"
-		if endOfKey < len(data) && isJSONNameChar(data[endOfKey]) {
+		if endOfKey < len(data) && IsJSONNameChar(data[endOfKey]) {
 			start = endOfKey
 			continue
 		}
 
 		// Find colon
-		colonIdx := bytesIndex(data[endOfKey:], []byte{':'})
+		colonIdx := bytes.Index(data[endOfKey:], []byte{':'})
 		if colonIdx < 0 {
 			break
 		}
@@ -601,7 +474,7 @@ func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 
 		// Find end of string value
 		strStart := valueStart + 1
-		strEnd := findJSONStringEnd(data, strStart)
+		strEnd := FindJSONStringEnd(data, strStart)
 		if strEnd < 0 {
 			start = valueStart
 			continue
@@ -610,7 +483,7 @@ func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 		currentValue := data[strStart:strEnd]
 
 		// Skip if already the target model
-		if bytesEqual(currentValue, escaped) {
+		if bytes.Equal(currentValue, escaped) {
 			start = strEnd + 1
 			continue
 		}
@@ -641,9 +514,9 @@ func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 	return append(result, data[start:]...), captured
 }
 
-// findJSONStringEnd finds the closing quote of a JSON string starting at pos.
+// FindJSONStringEnd finds the closing quote of a JSON string starting at pos.
 // Returns the index of the closing quote, or -1 if not found.
-func findJSONStringEnd(data []byte, pos int) int {
+func FindJSONStringEnd(data []byte, pos int) int {
 	for pos < len(data) {
 		if data[pos] == '\\' {
 			pos += 2 // skip escaped character
@@ -672,7 +545,7 @@ func replaceJSONModelValue(data []byte, oldModel, newModel string) ([]byte, int)
 	start := 0
 
 	for {
-		keyIdx := bytesIndex(data[start:], key)
+		keyIdx := bytes.Index(data[start:], key)
 		if keyIdx < 0 {
 			break
 		}
@@ -680,13 +553,13 @@ func replaceJSONModelValue(data []byte, oldModel, newModel string) ([]byte, int)
 		endOfKey := absKeyIdx + len(key)
 
 		// Verify it's the exact key
-		if endOfKey < len(data) && isJSONNameChar(data[endOfKey]) {
+		if endOfKey < len(data) && IsJSONNameChar(data[endOfKey]) {
 			start = endOfKey
 			continue
 		}
 
 		// Find colon
-		colonIdx := bytesIndex(data[endOfKey:], []byte{':'})
+		colonIdx := bytes.Index(data[endOfKey:], []byte{':'})
 		if colonIdx < 0 {
 			break
 		}
@@ -709,7 +582,7 @@ func replaceJSONModelValue(data []byte, oldModel, newModel string) ([]byte, int)
 		if valueStart+len(pattern) > len(data) {
 			break
 		}
-		if !bytesEqual(data[valueStart:valueStart+len(pattern)], pattern) {
+		if !bytes.Equal(data[valueStart:valueStart+len(pattern)], pattern) {
 			start = valueStart + 1
 			continue
 		}
@@ -772,29 +645,8 @@ func hex(n byte) byte {
 	return 'a' + n - 10
 }
 
-func bytesIndex(data, sub []byte) int {
-	for i := 0; i <= len(data)-len(sub); i++ {
-		if bytesEqual(data[i:i+len(sub)], sub) {
-			return i
-		}
-	}
-	return -1
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // isJSONNameChar reports whether b is a valid JSON object key character.
-func isJSONNameChar(b byte) bool {
+func IsJSONNameChar(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }
 
@@ -976,29 +828,16 @@ func extractSSEContents(data []byte) []string {
 // It handles both streaming (data: {...}) and non-streaming ({...}) formats.
 // Returns the first model name found, or empty string if not found.
 func extractModelFromData(data []byte) string {
-	// Try to extract from SSE data: lines
-	prefix := []byte("data:")
-	for offset := 0; offset < len(data); {
-		nl := bytes.IndexByte(data[offset:], '\n')
-		var line []byte
-		if nl == -1 {
-			line = data[offset:]
-			offset = len(data)
-		} else {
-			line = data[offset : offset+nl]
-			offset += nl + 1
+	var model string
+	forEachDataLine(data, func(payload []byte) bool {
+		if m := extractModelFromJSON(payload); m != "" {
+			model = m
+			return true
 		}
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 || !bytes.HasPrefix(line, prefix) {
-			continue
-		}
-		jsonData := bytes.TrimSpace(line[len(prefix):])
-		if len(jsonData) == 0 {
-			continue
-		}
-		if m := extractModelFromJSON(jsonData); m != "" {
-			return m
-		}
+		return false
+	})
+	if model != "" {
+		return model
 	}
 	// Try as plain JSON (non-streaming or data doesn't come in SSE format)
 	return extractModelFromJSON(data)
@@ -1101,9 +940,8 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	}
 
 	start := time.Now()
-	var clientW http.ResponseWriter
 	baseW := w
-	var ka *keepAliveWriter
+	var ka *silenceWriter
 	// Per-request keepalive override, resolved as: X-Router-KeepAlive header
 	// (seconds, clamped [1,300], "0" disables) > server-configured
 	// rh.KeepAliveIdle > global KeepAliveIdle.
@@ -1126,31 +964,28 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		}
 	}
 	if ping != nil && kaIdle > 0 {
-		ka = newKeepAliveWriter(w, ping, kaIdle)
+		ka = newSilenceWriter(w, kaIdle, ping)
 		defer ka.Stop()
 		baseW = ka
 	}
-	// waitSignalWriter sits between the upstream response and the client-facing
-	// writers. It monitors silence and injects `event: router_wait` frames when
-	// the upstream stays quiet for WaitSignalIdle. This keeps client SDK read
-	// loops alive during long backend think times, preventing "Request timed
-	// out" retries that waste work.
-	ws := newWaitSignalWriter(baseW, WaitSignalIdle, ping)
+	// The wait-signal writer sits between the upstream response and the
+	// client-facing writers: it monitors silence and injects "still waiting"
+	// frames when the upstream stays quiet for WaitSignalIdle. This keeps
+	// client SDK read loops alive during long backend think times, preventing
+	// "Request timed out" retries that waste work.
+	ws := newSilenceWriter(baseW, WaitSignalIdle, ping)
 	defer ws.Stop()
-	if strip {
-		clientW = newUsageStripper(ws)
-	} else {
-		clientW = newSSEFrameWriter(ws)
-	}
+	clientW := newSSERelay(ws, strip)
 	mw := newMetricsWriter(clientW, start)
 	defer bufPool.Put(mw.bodyBuffer) //nolint:errcheck
 	mrw := newModelRewriteWriter(mw, targetModel, originalModel)
 	var rw http.ResponseWriter = mrw
 
-	// Wrap with headerInjector to inject X-Router-* headers at WriteHeader time.
+	// Inject X-Router-* headers: eager ones (Server/Server-Name) now,
+	// X-Router-Status at WriteHeader time via metricsWriter.
 	if rh != nil {
-		SetRouterHeaders(rw, rh) // Set ServerID and ServerName eagerly
-		rw = newHeaderInjector(rw)
+		SetRouterHeaders(rw, rh)
+		mw.injectStatus = true
 	}
 
 	// Wrap with loop detector to catch backends that get stuck repeating content.
@@ -1249,7 +1084,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		ws.Start()
 	}
 
-	// Write status code (this triggers TTFB / headerInjector)
+	// Write status code (triggers TTFB and X-Router-Status injection)
 	ld.WriteHeader(upstreamResp.StatusCode)
 
 	// Stream the response body, chunk by chunk, to detect mid-stream errors.
@@ -1338,17 +1173,11 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		return &m, fmt.Errorf("stream loop detected: backend is repeating content")
 	}
 
-	// Deliver any bytes the usage stripper is still holding (e.g. a trailing
-	// frame the backend closed without a blank-line terminator). Regular flush
-	// no longer pushes pending bytes mid-stream (it must not fragment data
-	// lines), so the stripper gets an explicit finish at stream end.
-	if s, ok := clientW.(*usageStripper); ok {
-		s.finish()
-	} else if f, ok := clientW.(*sseFrameWriter); ok {
-		f.finish()
-	} else if flusher, ok := clientW.(http.Flusher); ok {
-		flusher.Flush()
-	}
+	// Deliver any bytes the relay is still holding (e.g. a trailing frame the
+	// backend closed without a blank-line terminator). Regular flush no longer
+	// pushes pending bytes mid-stream (it must not fragment data lines), so the
+	// relay gets an explicit finish at stream end.
+	clientW.finish()
 
 	m := mw.metrics()
 	m.BackendModel = mrw.capturedModel

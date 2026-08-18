@@ -96,7 +96,7 @@ func TestEnsureStreamUsage_MalformedBodyUntouched(t *testing.T) {
 
 func TestUsageStripperRemovesInjectedArtifact(t *testing.T) {
 	rec := httptest.NewRecorder()
-	st := newUsageStripper(rec)
+	st := newSSERelay(rec, true)
 
 	stream := strings.Join([]string{
 		`data: {"choices":[{"delta":{"content":"hello"}}]}`,
@@ -124,7 +124,7 @@ func TestUsageStripperRemovesInjectedArtifact(t *testing.T) {
 
 func TestUsageStripperSplitFrames(t *testing.T) {
 	rec := httptest.NewRecorder()
-	st := newUsageStripper(rec)
+	st := newSSERelay(rec, true)
 
 	// Usage artifact split across two Write calls mid-frame.
 	prefix := `data: {"choices":[{"delta":{"content":"ok"}}]}` + "\n\ndata: {\"choices\":[],\"us"
@@ -153,7 +153,7 @@ func TestUsageStripperSplitFrames(t *testing.T) {
 
 func TestUsageStripperDroppedCounting(t *testing.T) {
 	rec := httptest.NewRecorder()
-	st := newUsageStripper(rec)
+	st := newSSERelay(rec, true)
 	in := []string{`data: {"choices":[{"delta":{"content":"x"}}]}`, `data: {"choices":[],"usage":{}}`}
 	payload := strings.Join(in, "\n\n") + "\n\n"
 
@@ -237,7 +237,7 @@ var _ = context.Background
 // clients glue the tail of one JSON onto the start of the next.
 func TestUsageStripperMidStreamFlushKeepsFramesIntact(t *testing.T) {
 	rec := httptest.NewRecorder()
-	st := newUsageStripper(rec)
+	st := newSSERelay(rec, true)
 
 	// One data line split across two writes, flushed in between (as the proxy
 	// copy loop now does per chunk).
@@ -450,7 +450,7 @@ func TestStreamProxyFlushesPerCoalescedRead(t *testing.T) {
 // delivery as one SSE event mis-split frames that arrive in a single lump.
 func TestSSEFrameWriterDeliversEachFrameSeparately(t *testing.T) {
 	rec := &flushCaptureWriter{}
-	fw := newSSEFrameWriter(rec)
+	fw := newSSERelay(rec, false)
 
 	stream := strings.Join([]string{
 		`data: {"choices":[{"delta":{"content":"one"}}]}`,
@@ -477,7 +477,7 @@ func TestSSEFrameWriterDeliversEachFrameSeparately(t *testing.T) {
 // do not leak fragments to the client.
 func TestSSEFrameWriterHoldsPartialFrames(t *testing.T) {
 	rec := &flushCaptureWriter{}
-	fw := newSSEFrameWriter(rec)
+	fw := newSSERelay(rec, false)
 
 	if _, err := fw.Write([]byte(`data: {"choices":[{"delta":{"content":"hel`)); err != nil {
 		t.Fatal(err)
@@ -502,7 +502,7 @@ func TestSSEFrameWriterHoldsPartialFrames(t *testing.T) {
 // backend closed without a blank-line terminator is delivered at stream end.
 func TestSSEFrameWriterFinishDeliversTrailingBytes(t *testing.T) {
 	rec := &flushCaptureWriter{}
-	fw := newSSEFrameWriter(rec)
+	fw := newSSERelay(rec, false)
 
 	if _, err := fw.Write([]byte(`data: {"choices":[{"delta":{"content":"tail"}}]}`)); err != nil {
 		t.Fatal(err)
@@ -536,7 +536,7 @@ func TestSSEFrameWriterTransparentAtEverySplitPoint(t *testing.T) {
 
 	for split := 0; split <= len(stream); split++ {
 		rec := &flushCaptureWriter{}
-		fw := newSSEFrameWriter(rec)
+		fw := newSSERelay(rec, false)
 		if _, err := fw.Write([]byte(stream[:split])); err != nil {
 			t.Fatalf("split %d first write: %v", split, err)
 		}
@@ -562,7 +562,7 @@ func TestSSEFrameWriterTransparentAtEverySplitPoint(t *testing.T) {
 // upstream: the router never produces or fixes such bytes.
 func TestSSEFrameWriterDetectsMalformedUpstreamFrame(t *testing.T) {
 	rec := &flushCaptureWriter{}
-	fw := newSSEFrameWriter(rec)
+	fw := newSSERelay(rec, false)
 
 	// The glued frame from the client error: one chunk with its middle
 	// "created"/"id"/"model" section duplicated, spliced without a separator.
@@ -580,7 +580,7 @@ func TestSSEFrameWriterDetectsMalformedUpstreamFrame(t *testing.T) {
 
 	// Same glued frame through the stripping writer: also flagged and forwarded.
 	rec2 := &flushCaptureWriter{}
-	us := newUsageStripper(rec2)
+	us := newSSERelay(rec2, true)
 	if _, err := us.Write([]byte(glued)); err != nil {
 		t.Fatal(err)
 	}

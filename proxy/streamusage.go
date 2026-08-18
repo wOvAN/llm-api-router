@@ -53,25 +53,29 @@ func EnsureStreamUsage(body []byte, alwaysInclude bool) ([]byte, bool) {
 	return out, !alwaysInclude
 }
 
-// usageStripper filters injected stream-usage artifacts out of an SSE response
-// as it streams to the client. It sits between the metrics writer and the
-// client so metric capture (which reads unfiltered response bytes) is
-// unaffected while the client never sees the injected usage chunk.
-type usageStripper struct {
+// sseRelay delivers SSE frames to the client one at a time. Incoming bytes are
+// buffered until a complete frame (blank-line-terminated event) is available,
+// then each frame is written and flushed separately; partial frames are never
+// forwarded mid-stream. With strip=true it additionally filters injected
+// stream-usage artifacts out of the stream (frames whose choices are all
+// empty) while metrics capture the unfiltered bytes upstream of it.
+type sseRelay struct {
 	http.ResponseWriter
 	pending []byte
-	dropped bool // true once we have stripped at least one frame
+	strip   bool
+	dropped bool // true once at least one artifact frame was stripped
 }
 
-func newUsageStripper(w http.ResponseWriter) *usageStripper {
-	return &usageStripper{ResponseWriter: w}
+func newSSERelay(w http.ResponseWriter, strip bool) *sseRelay {
+	return &sseRelay{ResponseWriter: w, strip: strip}
 }
 
-// Write buffers incoming SSE bytes and forwards it, minus usage-only frames.
-// A frame is dropped when all of its choices are empty (no finish_reason, no
-// logprobs, no populated delta) or when it has an empty choices array — the
-// exact shape of the injected usage / prompt-filter chunk.
-func (s *usageStripper) Write(data []byte) (int, error) {
+// Write buffers incoming SSE bytes and forwards complete frames, minus
+// usage-only frames when stripping. A frame is dropped when all of its choices
+// are empty (no finish_reason, no logprobs, no populated delta) or when it has
+// an empty choices array — the exact shape of the injected usage /
+// prompt-filter chunk.
+func (s *sseRelay) Write(data []byte) (int, error) {
 	s.pending = append(s.pending, data...)
 
 	total := 0
@@ -82,11 +86,11 @@ func (s *usageStripper) Write(data []byte) (int, error) {
 		}
 		frame := s.pending[:end]
 		s.pending = s.pending[end:]
-		if isUsageArtifact(frame) {
+		if s.strip && isUsageArtifact(frame) {
 			s.dropped = true
 			continue
 		}
-		validateSSEFrame(frame, "usageStripper")
+		validateSSEFrame(frame, "sseRelay")
 		// A dropped frame's bytes still count as "written" from the caller's
 		// perspective (the metrics layer already accounted for them separately).
 		n, err := s.ResponseWriter.Write(frame)
@@ -103,7 +107,7 @@ func (s *usageStripper) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func (s *usageStripper) flush() {
+func (s *sseRelay) flush() {
 	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
@@ -114,82 +118,17 @@ func (s *usageStripper) flush() {
 // line to the client — that is exactly the fragmentation that makes clients
 // glue the tail of one frame onto the next. Trailing bytes are delivered by
 // finish() once the stream ends.
-func (s *usageStripper) Flush() {
-	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
+func (s *sseRelay) Flush() {
+	s.flush()
 }
 
 // finish writes any remaining buffered bytes (a trailing frame the backend
 // closed without a blank-line terminator) and flushes. Called once, at the end
 // of the stream.
-func (s *usageStripper) finish() {
+func (s *sseRelay) finish() {
 	if len(s.pending) > 0 {
 		if _, err := s.ResponseWriter.Write(s.pending); err != nil {
-			log.Errorf("usageStripper: failed to flush buffered SSE frames to client: %v", err)
-		}
-		s.pending = nil
-	}
-	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
-// sseFrameWriter delivers SSE frames to the client one at a time. Incoming
-// bytes are buffered until a complete frame (blank-line-terminated event) is
-// available, then each frame is written and flushed separately; partial frames
-// are never forwarded mid-stream. Used when the usage stripper is disabled
-// (client opted into stream usage itself) so the client gets the same
-// per-frame delivery guarantees as the stripping path.
-type sseFrameWriter struct {
-	http.ResponseWriter
-	pending []byte
-}
-
-func newSSEFrameWriter(w http.ResponseWriter) *sseFrameWriter {
-	return &sseFrameWriter{ResponseWriter: w}
-}
-
-func (s *sseFrameWriter) Write(data []byte) (int, error) {
-	s.pending = append(s.pending, data...)
-
-	total := 0
-	for {
-		end := findSSEFrameEnd(s.pending)
-		if end < 0 {
-			break
-		}
-		frame := s.pending[:end]
-		s.pending = s.pending[end:]
-		validateSSEFrame(frame, "sseFrameWriter")
-		n, err := s.ResponseWriter.Write(frame)
-		total += n
-		s.flush()
-		if err != nil {
-			return total, err
-		}
-	}
-	return len(data), nil
-}
-
-func (s *sseFrameWriter) Flush() {
-	s.flush()
-}
-
-func (s *sseFrameWriter) flush() {
-	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
-// finish writes any remaining buffered bytes (a trailing frame the backend
-// closed without a blank-line terminator) and flushes. Called once, at stream
-// end. The usageStripper has an equivalent finish that also delivers pending
-// bytes after dropping artifact frames.
-func (s *sseFrameWriter) finish() {
-	if len(s.pending) > 0 {
-		if _, err := s.ResponseWriter.Write(s.pending); err != nil {
-			log.Errorf("sseFrameWriter: failed to flush buffered SSE frames to client: %v", err)
+			log.Errorf("sseRelay: failed to flush buffered SSE frames to client: %v", err)
 		}
 		s.pending = nil
 	}

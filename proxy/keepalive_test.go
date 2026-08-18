@@ -33,7 +33,7 @@ func (s *syncWriter) content() string {
 
 func TestKeepAliveWriterPingsAfterIdle(t *testing.T) {
 	w := &syncWriter{}
-	k := newKeepAliveWriter(w, []byte(": keep-alive\n\n"), 20*time.Millisecond)
+	k := newSilenceWriter(w, 20*time.Millisecond, []byte(": keep-alive\n\n"))
 	k.Start()
 	defer k.Stop()
 
@@ -48,7 +48,7 @@ func TestKeepAliveWriterPingsAfterIdle(t *testing.T) {
 
 func TestKeepAliveWriterNoPingBeforeStart(t *testing.T) {
 	w := &syncWriter{}
-	k := newKeepAliveWriter(w, []byte(": keep-alive\n\n"), 10*time.Millisecond)
+	k := newSilenceWriter(w, 10*time.Millisecond, []byte(": keep-alive\n\n"))
 	defer k.Stop()
 
 	if _, err := k.Write([]byte("data: {\"a\":1}\n\n")); err != nil {
@@ -62,7 +62,7 @@ func TestKeepAliveWriterNoPingBeforeStart(t *testing.T) {
 
 func TestKeepAliveWriterWriteResetsIdle(t *testing.T) {
 	w := &syncWriter{}
-	k := newKeepAliveWriter(w, []byte(": keep-alive\n\n"), 40*time.Millisecond)
+	k := newSilenceWriter(w, 40*time.Millisecond, []byte(": keep-alive\n\n"))
 	k.Start()
 	defer k.Stop()
 
@@ -85,7 +85,7 @@ func TestKeepAliveWriterWriteResetsIdle(t *testing.T) {
 
 func TestKeepAliveWriterStopPreventsPings(t *testing.T) {
 	w := &syncWriter{}
-	k := newKeepAliveWriter(w, []byte(": keep-alive\n\n"), 20*time.Millisecond)
+	k := newSilenceWriter(w, 20*time.Millisecond, []byte(": keep-alive\n\n"))
 	k.Start()
 
 	if _, err := k.Write([]byte("data: {\"a\":1}\n\n")); err != nil {

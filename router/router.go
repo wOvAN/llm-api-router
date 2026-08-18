@@ -265,7 +265,6 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		log.Infof("[%s] model=%q -> %q on %s (attempt %d/%d)",
 			req.URL.Path, model, targetModel, srv.Name, i+1, len(attempts))
 
-		apiType := apiTypeFromPath(req.URL.Path)
 		serverURL := srv.GetURLForAPIType(apiType)
 		// On fallback, preserve the actual model used (don't rewrite back to
 		// the original) so the client knows which model actually responded.
@@ -350,31 +349,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 						req.URL.Path, model, targetModel, srv.Name, pm.StatusCode, http.StatusText(pm.StatusCode), pm.ErrorBody)
 				}
 
-				latency := time.Since(requestStart).Milliseconds()
-				r.metrics.Add(domain.RequestMetric{
-					Timestamp:             requestStart,
-					Model:                 model,
-					TargetModel:           targetModel,
-					BackendModel:          pm.BackendModel,
-					ServerID:              srv.ID,
-					StatusCode:            pm.StatusCode,
-					ErrorBody:             pm.ErrorBody,
-					LatencyMs:             latency,
-					TTFBMs:                pm.TTFBMs,
-					ResponseSize:          pm.ResponseSize,
-					WasFallback:           wasFallback,
-					PromptTokens:          pm.PromptTokens,
-					CompletionTokens:      pm.CompletionTokens,
-					TotalTokens:           pm.TotalTokens,
-					CachedTokens:          pm.CachedTokens,
-					NativePromptMs:        pm.PromptMs,
-					NativePredictedMs:     pm.PredictedMs,
-					NativePromptTokPerSec: pm.PromptPerSec,
-					NativeDecodeTokPerSec: pm.TokensPerSec,
-					APIType:               apiType,
-					APIEndpoint:           apiEndpointFromPath(req.URL.Path),
-					ClientIP:              clientIP(req),
-				})
+				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType)
 				return
 			}
 
@@ -401,27 +376,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				log.Errorf("[%s] model=%q — mid-stream error on %s (attempt %d/%d): %v",
 					req.URL.Path, model, srv.Name, i+1, len(attempts), err)
 				// Record whatever metrics we have
-				latency := time.Since(requestStart).Milliseconds()
-				r.metrics.Add(domain.RequestMetric{
-					Timestamp:        requestStart,
-					Model:            model,
-					TargetModel:      targetModel,
-					BackendModel:     pm.BackendModel,
-					ServerID:         srv.ID,
-					StatusCode:       pm.StatusCode,
-					ErrorBody:        pm.ErrorBody,
-					LatencyMs:        latency,
-					TTFBMs:           pm.TTFBMs,
-					ResponseSize:     pm.ResponseSize,
-					WasFallback:      wasFallback,
-					PromptTokens:     pm.PromptTokens,
-					CompletionTokens: pm.CompletionTokens,
-					TotalTokens:      pm.TotalTokens,
-					CachedTokens:     pm.CachedTokens,
-					APIType:          apiType,
-					APIEndpoint:      apiEndpointFromPath(req.URL.Path),
-					ClientIP:         clientIP(req),
-				})
+				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType)
 				return
 			}
 
@@ -453,38 +408,49 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	latency := time.Since(requestStart).Milliseconds()
 	errorBody := ""
 	if lastErr != nil {
 		errorBody = lastErr.Error()
 	}
-	r.metrics.Add(domain.RequestMetric{
-		Timestamp:    requestStart,
-		Model:        model,
-		TargetModel:  rule.TargetModel,
-		ServerID:     primaryServer.ID,
-		StatusCode:   http.StatusBadGateway,
-		ErrorBody:    errorBody,
-		LatencyMs:    latency,
-		TTFBMs:       0,
-		ResponseSize: 0,
-		WasFallback:  len(attempts) > 1,
-		APIType:      apiType,
-		APIEndpoint:  apiEndpointFromPath(req.URL.Path),
-		ClientIP:     clientIP(req),
-	})
+	r.record(req, requestStart, model, rule.TargetModel, primaryServer.ID, proxy.ProxyMetrics{}, http.StatusBadGateway, errorBody, len(attempts) > 1, apiType)
 
 	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)
 	http.Error(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
+}
+
+// record stores a request metric; pm fields feed the usage/timing columns.
+func (r *Router) record(req *http.Request, requestStart time.Time, model, targetModel, serverID string, pm proxy.ProxyMetrics, statusCode int, errorBody string, wasFallback bool, apiType domain.APIType) {
+	r.metrics.Add(domain.RequestMetric{
+		Timestamp:             requestStart,
+		Model:                 model,
+		TargetModel:           targetModel,
+		BackendModel:          pm.BackendModel,
+		ServerID:              serverID,
+		StatusCode:            statusCode,
+		ErrorBody:             errorBody,
+		LatencyMs:             time.Since(requestStart).Milliseconds(),
+		TTFBMs:                pm.TTFBMs,
+		ResponseSize:          pm.ResponseSize,
+		WasFallback:           wasFallback,
+		PromptTokens:          pm.PromptTokens,
+		CompletionTokens:      pm.CompletionTokens,
+		TotalTokens:           pm.TotalTokens,
+		CachedTokens:          pm.CachedTokens,
+		NativePromptMs:        pm.PromptMs,
+		NativePredictedMs:     pm.PredictedMs,
+		NativePromptTokPerSec: pm.PromptPerSec,
+		NativeDecodeTokPerSec: pm.TokensPerSec,
+		APIType:               apiType,
+		APIEndpoint:           apiEndpointFromPath(req.URL.Path),
+		ClientIP:              clientIP(req),
+	})
 }
 
 // defaultNumRetries is the effective num_retries for rules that don't set one:
 // a dying backend (crashed llama.cpp worker, restart) usually recovers within
 // seconds, so retry before marking the server unhealthy and falling back.
 // Override per request via X-Router-Retries ("0" disables retries).
-const defaultNumRetries = 10
-
-// retryBackoff returns the delay before retry attempt n (0-based): 100ms, 250ms,
+const defaultNumRetries = 10 // retryBackoff returns the delay before retry attempt n (0-based): 100ms, 250ms,
 // 500ms, then capped at 1s. Keeps retries fast but avoids hammering a failing
 // backend.
 func retryBackoff(n int) time.Duration {
@@ -536,22 +502,6 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// findJSONStringEnd finds the closing quote of a JSON string starting at pos.
-// Returns the index of the closing quote, or -1 if not found.
-func findJSONStringEnd(data []byte, pos int) int {
-	for pos < len(data) {
-		if data[pos] == '\\' {
-			pos += 2 // skip escaped character
-			continue
-		}
-		if data[pos] == '"' {
-			return pos
-		}
-		pos++
-	}
-	return -1
-}
-
 // extractModel reads the top-level "model" field from a JSON body using byte-level
 // scanning. Tracks object depth and string boundaries so "model" keys nested
 // inside other objects or quoted string content (e.g. a prompt discussing model
@@ -576,7 +526,7 @@ func extractModel(body []byte) (string, error) {
 			if depth == 1 && i+keyLen <= len(body) && bytes.Equal(body[i:i+keyLen], key) {
 				endOfKey := i + keyLen
 				// Skip longer keys like "model_id" / "model_name".
-				if endOfKey == len(body) || !isNameChar(body[endOfKey]) {
+				if endOfKey == len(body) || !proxy.IsJSONNameChar(body[endOfKey]) {
 					model, found, err := parseModelValue(body, endOfKey)
 					if err != nil {
 						return "", err
@@ -612,7 +562,7 @@ func parseModelValue(body []byte, afterKey int) (string, bool, error) {
 		return "", false, nil
 	}
 	strStart := valueStart + 1
-	strEnd := findJSONStringEnd(body, strStart)
+	strEnd := proxy.FindJSONStringEnd(body, strStart)
 	if strEnd < 0 {
 		return "", false, fmt.Errorf("invalid model value")
 	}
@@ -635,9 +585,4 @@ func skipString(body []byte, i int) int {
 		}
 	}
 	return len(body)
-}
-
-// isNameChar reports whether b can extend a JSON object key past "model".
-func isNameChar(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
 }

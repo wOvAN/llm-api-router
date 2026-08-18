@@ -497,14 +497,14 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 	})
 }
 
-func TestHeaderInjector(t *testing.T) {
+func TestMetricsWriterStatusHeader(t *testing.T) {
 	recorder := &testResponseWriter{header: make(http.Header)}
 	start := time.Now()
 	mw := newMetricsWriter(recorder, start)
-	hj := newHeaderInjector(recorder)
+	mw.injectStatus = true
 
 	// Simulate WriteHeader (sets status only; TTFB is measured at first Write)
-	hj.WriteHeader(201)
+	mw.WriteHeader(201)
 
 	// Simulate Write (triggers TTFB in metricsWriter)
 	time.Sleep(10 * time.Millisecond)

@@ -31,16 +31,10 @@ func extractUsageFromResponse(body []byte, contentEncoding string, isStream bool
 	return extractUsageFromJSON(body)
 }
 
-// extractUsageFromStream parses SSE events looking for usage and timings.
-func extractUsageFromStream(body []byte) ProxyMetrics {
-	var (
-		inputTokens  int64
-		outputTokens int64
-		cachedTokens int64 = -1
-		hasAny       bool
-		timings      map[string]interface{}
-	)
-
+// forEachDataLine splits body into lines and invokes fn for each non-empty
+// `data:`-prefixed line, passing the trimmed JSON payload. fn returns true to
+// stop iteration early.
+func forEachDataLine(body []byte, fn func(jsonData []byte) bool) {
 	prefix := []byte("data:")
 	for offset := 0; offset < len(body); {
 		nl := bytes.IndexByte(body[offset:], '\n')
@@ -52,20 +46,39 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 			line = body[offset : offset+nl]
 			offset += nl + 1
 		}
-
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 || !bytes.HasPrefix(line, prefix) {
 			continue
 		}
-		data := bytes.TrimSpace(line[len(prefix):])
-		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		payload := bytes.TrimSpace(line[len(prefix):])
+		if len(payload) == 0 {
 			continue
+		}
+		if fn(payload) {
+			return
+		}
+	}
+}
+
+// extractUsageFromStream parses SSE events looking for usage and timings.
+func extractUsageFromStream(body []byte) ProxyMetrics {
+	var (
+		inputTokens  int64
+		outputTokens int64
+		cachedTokens int64 = -1
+		hasAny       bool
+		timings      map[string]interface{}
+	)
+
+	forEachDataLine(body, func(data []byte) bool {
+		if bytes.Equal(data, []byte("[DONE]")) {
+			return false
 		}
 
 		var obj map[string]interface{}
 		if err := json.Unmarshal(data, &obj); err != nil {
 			log.Debugf("extractUsage from stream: failed to parse SSE data line: %v", err)
-			continue
+			return false
 		}
 
 		for _, path := range usagePaths {
@@ -90,7 +103,8 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 			timings = t
 			hasAny = true
 		}
-	}
+		return false
+	})
 
 	if !hasAny {
 		return ProxyMetrics{CachedTokens: -1}

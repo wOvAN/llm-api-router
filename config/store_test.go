@@ -266,7 +266,7 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 
 func TestMigrateOldAPIType(t *testing.T) {
 	input := []byte(`{"servers":{"s1":{"api_type":"openai","url":"http://x.com"}}}`)
-	output := migrateOldAPIType(input)
+	output := migrateLegacy(input)
 
 	var raw map[string]interface{}
 	if err := json.Unmarshal(output, &raw); err != nil {
@@ -291,7 +291,7 @@ func TestMigrateOldAPIType(t *testing.T) {
 
 func TestMigrateOldAPIType_NoChange(t *testing.T) {
 	input := []byte(`{"servers":{"s1":{"api_types":["openai"],"url":"http://x.com"}}}`)
-	output := migrateOldAPIType(input)
+	output := migrateLegacy(input)
 	if string(output) != string(input) {
 		t.Error("output should match input when no migration needed")
 	}
@@ -299,7 +299,7 @@ func TestMigrateOldAPIType_NoChange(t *testing.T) {
 
 func TestMigrateOldAPIType_NotJSON(t *testing.T) {
 	input := []byte(`not json`)
-	output := migrateOldAPIType(input)
+	output := migrateLegacy(input)
 	if string(output) != string(input) {
 		t.Error("should return original data for invalid JSON")
 	}
@@ -338,7 +338,7 @@ func TestLegacyFallbackServerIDs(t *testing.T) {
 
 func TestMigrateRulesToProfiles(t *testing.T) {
 	input := []byte(`{"servers":{"s1":{"id":"s1","url":"http://x.com"}},"rules":[{"incoming_models":["m1"],"target_model":"m1","server_id":"s1","enabled":true}]}`)
-	output := migrateRulesToProfiles(input)
+	output := migrateLegacy(input)
 
 	var raw map[string]interface{}
 	if err := json.Unmarshal(output, &raw); err != nil {
@@ -365,7 +365,7 @@ func TestMigrateRulesToProfiles(t *testing.T) {
 
 func TestMigrateRulesToProfiles_NoChange(t *testing.T) {
 	input := []byte(`{"servers":{},"profiles":[{"id":"default","name":"default","rules":[]}],"active_profile_id":"default"}`)
-	output := migrateRulesToProfiles(input)
+	output := migrateLegacy(input)
 	if string(output) != string(input) {
 		t.Error("output should match input when profiles already present")
 	}
@@ -373,7 +373,7 @@ func TestMigrateRulesToProfiles_NoChange(t *testing.T) {
 
 func TestMigrateRulesToProfiles_NoRulesKey(t *testing.T) {
 	input := []byte(`{"servers":{"s1":{"id":"s1","url":"http://x.com"}}}`)
-	output := migrateRulesToProfiles(input)
+	output := migrateLegacy(input)
 	if string(output) != string(input) {
 		t.Error("output should match input when no rules key")
 	}
@@ -656,53 +656,6 @@ func TestServerSupportsAPIType(t *testing.T) {
 	}
 	if s.SupportsAPIType(domain.APITypeAnthropic) {
 		t.Error("should not support anthropic")
-	}
-}
-
-func TestRoutingRuleGetTargetModelForServer(t *testing.T) {
-	rule := &domain.RoutingRule{
-		TargetModel: "gpt-4",
-		ServerID:    "primary",
-		Fallbacks: []domain.FallbackEntry{
-			{ServerID: "fb1", TargetModel: "claude-3"},
-			{ServerID: "fb2"},
-		},
-	}
-
-	tests := []struct {
-		serverID string
-		want     string
-	}{
-		{"primary", "gpt-4"},
-		{"fb1", "claude-3"},
-		{"fb2", "gpt-4"},
-		{"unknown", "gpt-4"},
-	}
-	for _, tt := range tests {
-		got := rule.GetTargetModelForServer(tt.serverID)
-		if got != tt.want {
-			t.Errorf("GetTargetModelForServer(%q) = %q, want %q", tt.serverID, got, tt.want)
-		}
-	}
-}
-
-func TestRoutingRuleAllServerIDs(t *testing.T) {
-	rule := &domain.RoutingRule{
-		ServerID: "primary",
-		Fallbacks: []domain.FallbackEntry{
-			{ServerID: "fb1"},
-			{ServerID: "fb2"},
-		},
-	}
-	ids := rule.AllServerIDs()
-	want := []string{"primary", "fb1", "fb2"}
-	if len(ids) != len(want) {
-		t.Fatalf("got %v, want %v", ids, want)
-	}
-	for i, id := range ids {
-		if id != want[i] {
-			t.Errorf("ids[%d] = %q, want %q", i, id, want[i])
-		}
 	}
 }
 

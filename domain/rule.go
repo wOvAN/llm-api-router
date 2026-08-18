@@ -14,30 +14,3 @@ type RoutingRule struct {
 	// 0 = unknown (omitted from /v1/models).
 	ContextWindow int `json:"context_window,omitempty"`
 }
-
-// GetTargetModelForServer returns the target model to use for the given server ID.
-func (r *RoutingRule) GetTargetModelForServer(serverID string) string {
-	if serverID == r.ServerID {
-		return r.TargetModel
-	}
-	for _, fb := range r.Fallbacks {
-		if fb.ServerID == serverID {
-			if fb.TargetModel != "" {
-				return fb.TargetModel
-			}
-			return r.TargetModel
-		}
-	}
-	return r.TargetModel
-}
-
-// AllServerIDs returns all server IDs in the rule (primary + fallbacks).
-func (r *RoutingRule) AllServerIDs() []string {
-	ids := make([]string, 0, 1+len(r.Fallbacks)+len(r.FallbackServerIDs))
-	ids = append(ids, r.ServerID)
-	for _, fb := range r.Fallbacks {
-		ids = append(ids, fb.ServerID)
-	}
-	ids = append(ids, r.FallbackServerIDs...)
-	return ids
-}

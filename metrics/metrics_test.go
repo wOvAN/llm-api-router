@@ -307,17 +307,17 @@ func TestDecodeTokSingleToken(t *testing.T) {
 func TestNativeTimingsPreferred(t *testing.T) {
 	s := New(100)
 	s.Add(domain.RequestMetric{
-		Model:               "gpt-4",
-		ServerID:            "s1",
-		StatusCode:          200,
-		LatencyMs:           1000,
-		TTFBMs:              300,
-		PromptTokens:        500,
-		CompletionTokens:    200,
-		NativePromptMs:      150,         // server reports 150ms for prompt processing
-		NativePredictedMs:   600,         // server reports 600ms for token generation
-		NativePromptTokPerSec: 3333.33,  // 500 / 0.15
-		NativeDecodeTokPerSec: 333.33,   // 200 / 0.6
+		Model:                 "gpt-4",
+		ServerID:              "s1",
+		StatusCode:            200,
+		LatencyMs:             1000,
+		TTFBMs:                300,
+		PromptTokens:          500,
+		CompletionTokens:      200,
+		NativePromptMs:        150,     // server reports 150ms for prompt processing
+		NativePredictedMs:     600,     // server reports 600ms for token generation
+		NativePromptTokPerSec: 3333.33, // 500 / 0.15
+		NativeDecodeTokPerSec: 333.33,  // 200 / 0.6
 	})
 
 	recent := s.Recent()

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -160,24 +159,9 @@ func (h *Handler) getServerModels(w http.ResponseWriter, req *http.Request, id s
 		return
 	}
 
-	rawURL := srv.GetURLForAPIType(domain.APITypeOpenAI)
-	if !strings.Contains(rawURL, "://") {
-		rawURL = "https://" + rawURL
-	}
-
-	target, err := url.Parse(rawURL)
+	proxyReq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, config.ModelsURL(srv), nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid server URL: "+err.Error())
-		return
-	}
-
-	// TrimRight avoids a double slash when the URL ends with "/".
-	modelsURL := target.Scheme + "://" + target.Host + strings.TrimRight(target.Path, "/") + "/v1/models"
-	modelsURL = strings.ReplaceAll(modelsURL, "/v1/v1", "/v1")
-
-	proxyReq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, modelsURL, nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create request: "+err.Error())
 		return
 	}
 
@@ -238,22 +222,7 @@ func (h *Handler) testServer(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	rawURL := srv.GetURLForAPIType(domain.APITypeOpenAI)
-	if !strings.Contains(rawURL, "://") {
-		rawURL = "https://" + rawURL
-	}
-
-	target, err := url.Parse(rawURL)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid URL: "+err.Error())
-		return
-	}
-
-	// TrimRight avoids a double slash when the URL ends with "/".
-	modelsURL := target.Scheme + "://" + target.Host + strings.TrimRight(target.Path, "/") + "/v1/models"
-	modelsURL = strings.ReplaceAll(modelsURL, "/v1/v1", "/v1")
-
-	testReq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, modelsURL, nil)
+	testReq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, config.ModelsURL(&srv), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create request: "+err.Error())
 		return
@@ -451,7 +420,7 @@ func (h *Handler) getMetrics(w http.ResponseWriter, req *http.Request) {
 	summaries := h.metrics.Summaries()
 	active := h.metrics.ActiveRequests()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"summaries":  summaries,
+		"summaries":       summaries,
 		"active_requests": active,
 	})
 }

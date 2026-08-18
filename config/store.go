@@ -46,7 +46,7 @@ func (s *Store) Load() error {
 		return err
 	}
 
-	migrated := migrateRulesToProfiles(migrateOldAPIType(data))
+	migrated := migrateLegacy(data)
 
 	var cfg domain.Config
 	if err := json.Unmarshal(migrated, &cfg); err != nil {
@@ -504,70 +504,54 @@ func cloneRule(rule *domain.RoutingRule) *domain.RoutingRule {
 	return cpy
 }
 
-// migrateOldAPIType converts old "api_type": "openai" → "api_types": ["openai"] in raw JSON.
-func migrateOldAPIType(data []byte) []byte {
+// migrateLegacy upgrades pre-profile configs before unmarshal: converts old
+// "api_type": "openai" server fields to "api_types": ["openai"], and a legacy
+// top-level "rules" array into a "profiles" array holding a single "default"
+// profile (the new struct has no "rules" field, so without this the rules
+// would silently drop). No-op when the input isn't a JSON object or nothing
+// legacy is present.
+func migrateLegacy(data []byte) []byte {
 	var raw map[string]interface{}
 	if json.Unmarshal(data, &raw) != nil {
 		return data
 	}
 
-	servers, ok := raw["servers"].(map[string]interface{})
-	if !ok {
-		return data
+	changed := false
+
+	if servers, ok := raw["servers"].(map[string]interface{}); ok {
+		for _, srvVal := range servers {
+			srv, ok := srvVal.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if oldType, has := srv["api_type"]; has {
+				if str, ok := oldType.(string); ok {
+					srv["api_types"] = []string{str}
+					delete(srv, "api_type")
+					changed = true
+				}
+			}
+		}
 	}
 
-	changed := false
-	for _, srvVal := range servers {
-		srv, ok := srvVal.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if oldType, has := srv["api_type"]; has {
-			if str, ok := oldType.(string); ok {
-				srv["api_types"] = []string{str}
-				delete(srv, "api_type")
-				changed = true
+	if _, has := raw["profiles"]; !has {
+		if rules, has := raw["rules"]; has {
+			raw["profiles"] = []interface{}{
+				map[string]interface{}{
+					"id":    "default",
+					"name":  "default",
+					"rules": rules,
+				},
 			}
+			raw["active_profile_id"] = "default"
+			delete(raw, "rules")
+			changed = true
 		}
 	}
 
 	if !changed {
 		return data
 	}
-
-	out, _ := json.MarshalIndent(raw, "", "  ")
-	return out
-}
-
-// migrateRulesToProfiles converts a legacy top-level "rules" array into a
-// "profiles" array holding a single "default" profile, and sets
-// "active_profile_id". It runs before unmarshal so the new struct (which has
-// no "rules" field) doesn't silently drop the rules. No-op when "profiles" is
-// already present, when there is no "rules" key, or the input isn't a JSON
-// object.
-func migrateRulesToProfiles(data []byte) []byte {
-	var raw map[string]interface{}
-	if json.Unmarshal(data, &raw) != nil {
-		return data
-	}
-
-	if _, has := raw["profiles"]; has {
-		return data
-	}
-	rules, has := raw["rules"]
-	if !has {
-		return data
-	}
-
-	raw["profiles"] = []interface{}{
-		map[string]interface{}{
-			"id":    "default",
-			"name":  "default",
-			"rules": rules,
-		},
-	}
-	raw["active_profile_id"] = "default"
-	delete(raw, "rules")
 
 	out, _ := json.MarshalIndent(raw, "", "  ")
 	return out
