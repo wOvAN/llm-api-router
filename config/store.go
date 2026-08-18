@@ -19,7 +19,11 @@ type Store struct {
 // NewStore creates a new config store, loading from file if it exists.
 func NewStore(filepath string) (*Store, error) {
 	s := &Store{
-		config:   &domain.Config{Servers: make(map[string]*domain.Server), Rules: make([]*domain.RoutingRule, 0)},
+		config: &domain.Config{
+			Servers:         make(map[string]*domain.Server),
+			Profiles:        []domain.RuleProfile{{ID: "default", Name: "default", Rules: make([]*domain.RoutingRule, 0)}},
+			ActiveProfileID: "default",
+		},
 		filepath: filepath,
 	}
 
@@ -42,7 +46,7 @@ func (s *Store) Load() error {
 		return err
 	}
 
-	migrated := migrateOldAPIType(data)
+	migrated := migrateRulesToProfiles(migrateOldAPIType(data))
 
 	var cfg domain.Config
 	if err := json.Unmarshal(migrated, &cfg); err != nil {
@@ -52,16 +56,25 @@ func (s *Store) Load() error {
 	if cfg.Servers == nil {
 		cfg.Servers = make(map[string]*domain.Server)
 	}
-	if cfg.Rules == nil {
-		cfg.Rules = make([]*domain.RoutingRule, 0)
+	if len(cfg.Profiles) == 0 {
+		cfg.Profiles = []domain.RuleProfile{{ID: "default", Name: "default", Rules: make([]*domain.RoutingRule, 0)}}
+	}
+	if cfg.ActiveProfileID == "" {
+		cfg.ActiveProfileID = cfg.Profiles[0].ID
 	}
 
-	for _, rule := range cfg.Rules {
-		if len(rule.FallbackServerIDs) > 0 && len(rule.Fallbacks) == 0 {
-			for _, id := range rule.FallbackServerIDs {
-				rule.Fallbacks = append(rule.Fallbacks, domain.FallbackEntry{ServerID: id})
+	for i := range cfg.Profiles {
+		p := &cfg.Profiles[i]
+		if p.Rules == nil {
+			p.Rules = make([]*domain.RoutingRule, 0)
+		}
+		for _, rule := range p.Rules {
+			if len(rule.FallbackServerIDs) > 0 && len(rule.Fallbacks) == 0 {
+				for _, id := range rule.FallbackServerIDs {
+					rule.Fallbacks = append(rule.Fallbacks, domain.FallbackEntry{ServerID: id})
+				}
+				rule.FallbackServerIDs = nil
 			}
-			rule.FallbackServerIDs = nil
 		}
 	}
 
@@ -100,9 +113,10 @@ func (s *Store) GetConfig() *domain.Config {
 	defer s.mu.RUnlock()
 
 	cfg := &domain.Config{
-		Servers:  make(map[string]*domain.Server, len(s.config.Servers)),
-		Rules:    make([]*domain.RoutingRule, len(s.config.Rules)),
-		Settings: s.config.Settings,
+		Servers:         make(map[string]*domain.Server, len(s.config.Servers)),
+		Profiles:        make([]domain.RuleProfile, len(s.config.Profiles)),
+		ActiveProfileID: s.config.ActiveProfileID,
+		Settings:        s.config.Settings,
 	}
 
 	for id, srv := range s.config.Servers {
@@ -112,19 +126,15 @@ func (s *Store) GetConfig() *domain.Config {
 		cfg.Servers[id] = &srvCopy
 	}
 
-	for i, rule := range s.config.Rules {
-		ruleCopy := *rule
-		ruleCopy.IncomingModels = make([]string, len(rule.IncomingModels))
-		copy(ruleCopy.IncomingModels, rule.IncomingModels)
-		if rule.Fallbacks != nil {
-			ruleCopy.Fallbacks = make([]domain.FallbackEntry, len(rule.Fallbacks))
-			copy(ruleCopy.Fallbacks, rule.Fallbacks)
+	for i, p := range s.config.Profiles {
+		cfg.Profiles[i] = domain.RuleProfile{
+			ID:    p.ID,
+			Name:  p.Name,
+			Rules: make([]*domain.RoutingRule, 0, len(p.Rules)),
 		}
-		if rule.FallbackServerIDs != nil {
-			ruleCopy.FallbackServerIDs = make([]string, len(rule.FallbackServerIDs))
-			copy(ruleCopy.FallbackServerIDs, rule.FallbackServerIDs)
+		for _, rule := range p.Rules {
+			cfg.Profiles[i].Rules = append(cfg.Profiles[i].Rules, cloneRule(rule))
 		}
-		cfg.Rules[i] = &ruleCopy
 	}
 
 	return cfg
@@ -151,29 +161,23 @@ func (s *Store) GetServer(id string) (*domain.Server, bool) {
 	return srv, true
 }
 
-// GetRuleByModel returns the first routing rule matching the given incoming model name.
+// GetRuleByModel returns the first routing rule matching the given incoming
+// model name from the active profile.
 func (s *Store) GetRuleByModel(model string) (*domain.RoutingRule, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for _, rule := range s.config.Rules {
+	p := s.activeProfile()
+	if p == nil {
+		return nil, false
+	}
+	for _, rule := range p.Rules {
 		if !rule.Enabled {
 			continue
 		}
 		for _, m := range rule.IncomingModels {
 			if m == model {
-				cpy := *rule
-				cpy.IncomingModels = make([]string, len(rule.IncomingModels))
-				copy(cpy.IncomingModels, rule.IncomingModels)
-				if rule.Fallbacks != nil {
-					cpy.Fallbacks = make([]domain.FallbackEntry, len(rule.Fallbacks))
-					copy(cpy.Fallbacks, rule.Fallbacks)
-				}
-				if rule.FallbackServerIDs != nil {
-					cpy.FallbackServerIDs = make([]string, len(rule.FallbackServerIDs))
-					copy(cpy.FallbackServerIDs, rule.FallbackServerIDs)
-				}
-				return &cpy, true
+				return cloneRule(rule), true
 			}
 		}
 	}
@@ -236,37 +240,194 @@ func (s *Store) DeleteServer(id string) error {
 	return s.save()
 }
 
-// AddRule appends a new routing rule.
+// AddRule appends a new routing rule to the active profile.
 func (s *Store) AddRule(rule *domain.RoutingRule) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.config.Rules = append(s.config.Rules, cloneRule(rule))
+	p := s.activeProfile()
+	if p == nil {
+		return fmt.Errorf("no active profile")
+	}
+	p.Rules = append(p.Rules, cloneRule(rule))
 	return s.save()
 }
 
-// UpdateRule updates a rule by index.
+// UpdateRule updates a rule by index in the active profile.
 func (s *Store) UpdateRule(idx int, rule *domain.RoutingRule) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if idx < 0 || idx >= len(s.config.Rules) {
+	p := s.activeProfile()
+	if p == nil || idx < 0 || idx >= len(p.Rules) {
 		return fmt.Errorf("rule index %d out of range", idx)
 	}
-	s.config.Rules[idx] = cloneRule(rule)
+	p.Rules[idx] = cloneRule(rule)
 	return s.save()
 }
 
-// DeleteRule removes a rule by index.
+// DeleteRule removes a rule by index from the active profile.
 func (s *Store) DeleteRule(idx int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if idx < 0 || idx >= len(s.config.Rules) {
+	p := s.activeProfile()
+	if p == nil || idx < 0 || idx >= len(p.Rules) {
 		return fmt.Errorf("rule index %d out of range", idx)
 	}
-	s.config.Rules = append(s.config.Rules[:idx], s.config.Rules[idx+1:]...)
+	p.Rules = append(p.Rules[:idx], p.Rules[idx+1:]...)
 	return s.save()
+}
+
+// activeProfile returns the profile pointed to by ActiveProfileID, falling
+// back to Profiles[0] when the ID is unknown or empty. Caller must hold s.mu
+// (read or write). Returns nil only if Profiles is empty, which the
+// len(Profiles) >= 1 invariant prevents.
+func (s *Store) activeProfile() *domain.RuleProfile {
+	if len(s.config.Profiles) == 0 {
+		return nil
+	}
+	for i := range s.config.Profiles {
+		if s.config.Profiles[i].ID == s.config.ActiveProfileID {
+			return &s.config.Profiles[i]
+		}
+	}
+	return &s.config.Profiles[0]
+}
+
+// GetActiveProfileID returns the ID of the active profile.
+func (s *Store) GetActiveProfileID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.config.ActiveProfileID
+}
+
+// GetActiveRules returns a deep copy of the active profile's rules.
+func (s *Store) GetActiveRules() []*domain.RoutingRule {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	p := s.activeProfile()
+	if p == nil {
+		return make([]*domain.RoutingRule, 0)
+	}
+	out := make([]*domain.RoutingRule, 0, len(p.Rules))
+	for _, rule := range p.Rules {
+		out = append(out, cloneRule(rule))
+	}
+	return out
+}
+
+// GetProfiles returns a deep copy of all profiles.
+func (s *Store) GetProfiles() []domain.RuleProfile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]domain.RuleProfile, len(s.config.Profiles))
+	for i, p := range s.config.Profiles {
+		out[i] = domain.RuleProfile{
+			ID:    p.ID,
+			Name:  p.Name,
+			Rules: make([]*domain.RoutingRule, 0, len(p.Rules)),
+		}
+		for _, rule := range p.Rules {
+			out[i].Rules = append(out[i].Rules, cloneRule(rule))
+		}
+	}
+	return out
+}
+
+// AddProfile creates a new profile. Its ID is set to name. copyFromActive
+// clones the active profile's rules into the new profile. The new profile is
+// not activated. Returns the new profile's ID.
+func (s *Store) AddProfile(name string, copyFromActive bool) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if name == "" {
+		return "", fmt.Errorf("profile name is required")
+	}
+	for _, p := range s.config.Profiles {
+		if p.Name == name || p.ID == name {
+			return "", fmt.Errorf("profile %q already exists", name)
+		}
+	}
+
+	p := domain.RuleProfile{ID: name, Name: name, Rules: make([]*domain.RoutingRule, 0)}
+	if copyFromActive {
+		if active := s.activeProfile(); active != nil {
+			for _, rule := range active.Rules {
+				p.Rules = append(p.Rules, cloneRule(rule))
+			}
+		}
+	}
+	s.config.Profiles = append(s.config.Profiles, p)
+	return p.ID, s.save()
+}
+
+// RenameProfile changes a profile's display name. The ID is unchanged.
+func (s *Store) RenameProfile(id, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if name == "" {
+		return fmt.Errorf("profile name is required")
+	}
+	for i := range s.config.Profiles {
+		if s.config.Profiles[i].ID != id {
+			continue
+		}
+		for _, p := range s.config.Profiles {
+			if p.ID != id && (p.Name == name || p.ID == name) {
+				return fmt.Errorf("profile %q already exists", name)
+			}
+		}
+		s.config.Profiles[i].Name = name
+		return s.save()
+	}
+	return fmt.Errorf("profile %q not found", id)
+}
+
+// DeleteProfile removes a profile. The last remaining profile cannot be
+// deleted. If the active profile is deleted, the first remaining profile
+// becomes active.
+func (s *Store) DeleteProfile(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := -1
+	for i := range s.config.Profiles {
+		if s.config.Profiles[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("profile %q not found", id)
+	}
+	if len(s.config.Profiles) == 1 {
+		return fmt.Errorf("cannot delete the only profile")
+	}
+
+	s.config.Profiles = append(s.config.Profiles[:idx], s.config.Profiles[idx+1:]...)
+	if s.config.ActiveProfileID == id {
+		s.config.ActiveProfileID = s.config.Profiles[0].ID
+	}
+	return s.save()
+}
+
+// SetActiveProfile sets the active profile by ID.
+func (s *Store) SetActiveProfile(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.config.Profiles {
+		if s.config.Profiles[i].ID == id {
+			s.config.ActiveProfileID = id
+			return s.save()
+		}
+	}
+	return fmt.Errorf("profile %q not found", id)
 }
 
 // cloneRule returns a deep copy of a RoutingRule with fresh slices.
@@ -323,6 +484,40 @@ func migrateOldAPIType(data []byte) []byte {
 	if !changed {
 		return data
 	}
+
+	out, _ := json.MarshalIndent(raw, "", "  ")
+	return out
+}
+
+// migrateRulesToProfiles converts a legacy top-level "rules" array into a
+// "profiles" array holding a single "default" profile, and sets
+// "active_profile_id". It runs before unmarshal so the new struct (which has
+// no "rules" field) doesn't silently drop the rules. No-op when "profiles" is
+// already present, when there is no "rules" key, or the input isn't a JSON
+// object.
+func migrateRulesToProfiles(data []byte) []byte {
+	var raw map[string]interface{}
+	if json.Unmarshal(data, &raw) != nil {
+		return data
+	}
+
+	if _, has := raw["profiles"]; has {
+		return data
+	}
+	rules, has := raw["rules"]
+	if !has {
+		return data
+	}
+
+	raw["profiles"] = []interface{}{
+		map[string]interface{}{
+			"id":    "default",
+			"name":  "default",
+			"rules": rules,
+		},
+	}
+	raw["active_profile_id"] = "default"
+	delete(raw, "rules")
 
 	out, _ := json.MarshalIndent(raw, "", "  ")
 	return out

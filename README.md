@@ -70,28 +70,37 @@ The config is stored in `config.json` (path configurable via `CONFIG_FILE`). You
       "api_types": ["anthropic"]
     }
   },
-  "rules": [
+  "profiles": [
     {
-      "incoming_models": ["opus", "claude-3-opus"],
-      "target_model": "claude-3-5-haiku-latest",
-      "server_id": "primary",
-      "enabled": true
-    },
-    {
-      "incoming_models": ["sonnet"],
-      "target_model": "claude-3-5-haiku-latest",
-      "server_id": "primary",
-      "fallbacks": [
-        {"server_id": "fallback", "target_model": "claude-3-haiku"}
-      ],
-      "enabled": true
+      "id": "default",
+      "name": "default",
+      "rules": [
+        {
+          "incoming_models": ["opus", "claude-3-opus"],
+          "target_model": "claude-3-5-haiku-latest",
+          "server_id": "primary",
+          "enabled": true
+        },
+        {
+          "incoming_models": ["sonnet"],
+          "target_model": "claude-3-5-haiku-latest",
+          "server_id": "primary",
+          "fallbacks": [
+            {"server_id": "fallback", "target_model": "claude-3-haiku"}
+          ],
+          "enabled": true
+        }
+      ]
     }
-  ]
+  ],
+  "active_profile_id": "default"
 }
 ```
 
 ### Key config quirks
 
+- Rules live in named **profiles**; `active_profile_id` selects which profile routes traffic. Only the active profile's rules are used (and listed by `/v1/models`). Manage profiles from the GUI or the `/admin/api/profiles` endpoints
+- Legacy top-level `rules` arrays auto-migrate to a single `default` profile on load (the file is rewritten in the new shape on the next save)
 - `api_types` accepts `"openai"` and/or `"anthropic"` per server; legacy `api_type` (string) is auto-migrated to array on load
 - Each server can specify `openai_url` / `anthropic_url` overrides; falls back to base `url`
 - Base URL paths are deduplicated (e.g. `api.openai.com/v1` + `/v1/chat/completions` → `api.openai.com/v1/chat/completions`)
@@ -139,10 +148,15 @@ curl http://localhost:8080/v1/models
 | DELETE | `/admin/api/servers/:id` | Delete server |
 | GET | `/admin/api/servers/:id/models` | Fetch model list from upstream |
 | POST | `/admin/api/servers/test` | Test connectivity to a server |
-| GET | `/admin/api/rules` | List routing rules |
-| POST | `/admin/api/rules` | Add routing rule |
-| PUT | `/admin/api/rules/:idx` | Update routing rule (by index) |
-| DELETE | `/admin/api/rules/:idx` | Delete routing rule (by index) |
+| GET | `/admin/api/rules` | List the active profile's routing rules |
+| POST | `/admin/api/rules` | Add routing rule to the active profile |
+| PUT | `/admin/api/rules/:idx` | Update routing rule (by index) in the active profile |
+| DELETE | `/admin/api/rules/:idx` | Delete routing rule (by index) from the active profile |
+| GET | `/admin/api/profiles` | List profiles + active profile id |
+| POST | `/admin/api/profiles` | Create profile (optionally copy the active profile's rules) |
+| PUT | `/admin/api/profiles/:id` | Rename profile |
+| DELETE | `/admin/api/profiles/:id` | Delete profile (the last one is protected) |
+| POST | `/admin/api/profiles/:id/activate` | Set the active profile |
 | GET | `/admin/api/config` | Get full config |
 | POST | `/admin/api/config/reload` | Re-read config from disk |
 | GET | `/admin/api/metrics` | Get aggregated summaries |

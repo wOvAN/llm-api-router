@@ -204,8 +204,8 @@ func TestAddRule(t *testing.T) {
 	}
 
 	cfg := store.GetConfig()
-	if len(cfg.Rules) != 1 {
-		t.Errorf("got %d rules, want 1", len(cfg.Rules))
+	if len(cfg.Profiles[0].Rules) != 1 {
+		t.Errorf("got %d rules, want 1", len(cfg.Profiles[0].Rules))
 	}
 }
 
@@ -293,7 +293,7 @@ func TestDeleteRule(t *testing.T) {
 		t.Errorf("got status %d, want 200", w.Code)
 	}
 
-	if len(store.GetConfig().Rules) != 0 {
+	if len(store.GetConfig().Profiles[0].Rules) != 0 {
 		t.Error("rule should be deleted")
 	}
 }
@@ -306,6 +306,128 @@ func TestDeleteRuleOutOfRange(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("got status %d, want 404", w.Code)
+	}
+}
+
+func TestListProfiles(t *testing.T) {
+	h, store := newTestHandler(t)
+	if _, err := store.AddProfile("prod", false); err != nil {
+		t.Fatalf("AddProfile: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/profiles", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", w.Code)
+	}
+	var resp struct {
+		Profiles        []domain.RuleProfile `json:"profiles"`
+		ActiveProfileID string               `json:"active_profile_id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Profiles) != 2 {
+		t.Errorf("got %d profiles, want 2", len(resp.Profiles))
+	}
+	if resp.ActiveProfileID != "default" {
+		t.Errorf("active_profile_id = %q, want default", resp.ActiveProfileID)
+	}
+}
+
+func TestAddProfile(t *testing.T) {
+	h, store := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/profiles", strings.NewReader(`{"name":"prod","copy_from_active":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("got status %d, want 201", w.Code)
+	}
+	if len(store.GetProfiles()) != 2 {
+		t.Errorf("got %d profiles, want 2", len(store.GetProfiles()))
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/admin/api/profiles", strings.NewReader(`{"name":"prod"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusBadRequest {
+		t.Errorf("duplicate profile got status %d, want 400", w2.Code)
+	}
+}
+
+func TestRenameProfile(t *testing.T) {
+	h, store := newTestHandler(t)
+	if _, err := store.AddProfile("prod", false); err != nil {
+		t.Fatalf("AddProfile: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/profiles/prod", strings.NewReader(`{"name":"production"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", w.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodPut, "/admin/api/profiles/nope", strings.NewReader(`{"name":"x"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusNotFound {
+		t.Errorf("unknown profile got status %d, want 404", w2.Code)
+	}
+}
+
+func TestDeleteProfile(t *testing.T) {
+	h, store := newTestHandler(t)
+	if _, err := store.AddProfile("prod", false); err != nil {
+		t.Fatalf("AddProfile: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/profiles/prod", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", w.Code)
+	}
+	if len(store.GetProfiles()) != 1 {
+		t.Errorf("got %d profiles, want 1", len(store.GetProfiles()))
+	}
+
+	req2 := httptest.NewRequest(http.MethodDelete, "/admin/api/profiles/default", nil)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusBadRequest {
+		t.Errorf("deleting last profile got status %d, want 400", w2.Code)
+	}
+}
+
+func TestActivateProfile(t *testing.T) {
+	h, store := newTestHandler(t)
+	if _, err := store.AddProfile("prod", false); err != nil {
+		t.Fatalf("AddProfile: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/profiles/prod/activate", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", w.Code)
+	}
+	if store.GetActiveProfileID() != "prod" {
+		t.Errorf("active = %q, want prod", store.GetActiveProfileID())
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/admin/api/profiles/nope/activate", nil)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusNotFound {
+		t.Errorf("unknown profile got status %d, want 404", w2.Code)
 	}
 }
 
@@ -334,8 +456,8 @@ func TestGetConfig(t *testing.T) {
 	if len(cfg.Servers) != 1 {
 		t.Errorf("got %d servers, want 1", len(cfg.Servers))
 	}
-	if len(cfg.Rules) != 1 {
-		t.Errorf("got %d rules, want 1", len(cfg.Rules))
+	if len(cfg.Profiles[0].Rules) != 1 {
+		t.Errorf("got %d rules, want 1", len(cfg.Profiles[0].Rules))
 	}
 }
 

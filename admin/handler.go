@@ -53,6 +53,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.updateRule(w, req, strings.TrimPrefix(path, "/rules/"))
 	case strings.HasPrefix(path, "/rules/") && req.Method == http.MethodDelete:
 		h.deleteRule(w, req, strings.TrimPrefix(path, "/rules/"))
+	case path == "/profiles" && req.Method == http.MethodGet:
+		h.listProfiles(w, req)
+	case path == "/profiles" && req.Method == http.MethodPost:
+		h.addProfile(w, req)
+	case strings.HasPrefix(path, "/profiles/") && strings.HasSuffix(path, "/activate") && req.Method == http.MethodPost:
+		h.activateProfile(w, req, strings.TrimSuffix(strings.TrimPrefix(path, "/profiles/"), "/activate"))
+	case strings.HasPrefix(path, "/profiles/") && req.Method == http.MethodPut:
+		h.renameProfile(w, req, strings.TrimPrefix(path, "/profiles/"))
+	case strings.HasPrefix(path, "/profiles/") && req.Method == http.MethodDelete:
+		h.deleteProfile(w, req, strings.TrimPrefix(path, "/profiles/"))
 	case path == "/config" && req.Method == http.MethodGet:
 		h.getConfig(w, req)
 	case path == "/config/reload" && req.Method == http.MethodPost:
@@ -292,8 +302,7 @@ func (h *Handler) testServer(w http.ResponseWriter, req *http.Request) {
 // --- Rules ---
 
 func (h *Handler) listRules(w http.ResponseWriter, req *http.Request) {
-	cfg := h.store.GetConfig()
-	writeJSON(w, http.StatusOK, cfg.Rules)
+	writeJSON(w, http.StatusOK, h.store.GetActiveRules())
 }
 
 func (h *Handler) addRule(w http.ResponseWriter, req *http.Request) {
@@ -339,6 +348,71 @@ func (h *Handler) deleteRule(w http.ResponseWriter, req *http.Request, idxStr st
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Profiles ---
+
+func (h *Handler) listProfiles(w http.ResponseWriter, req *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"profiles":          h.store.GetProfiles(),
+		"active_profile_id": h.store.GetActiveProfileID(),
+	})
+}
+
+func (h *Handler) addProfile(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		Name           string `json:"name"`
+		CopyFromActive bool   `json:"copy_from_active"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	id, err := h.store.AddProfile(body.Name, body.CopyFromActive)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "name": body.Name})
+}
+
+func (h *Handler) renameProfile(w http.ResponseWriter, req *http.Request, id string) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if err := h.store.RenameProfile(id, body.Name); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "renamed"})
+}
+
+func (h *Handler) deleteProfile(w http.ResponseWriter, req *http.Request, id string) {
+	if err := h.store.DeleteProfile(id); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *Handler) activateProfile(w http.ResponseWriter, req *http.Request, id string) {
+	if err := h.store.SetActiveProfile(id); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "activated", "active_profile_id": id})
 }
 
 // --- Config ---

@@ -85,8 +85,15 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
 <!-- Rules Panel -->
 <div id="panel-rules" class="panel">
   <div class="btn-row">
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.9rem;">Active profile:
+      <select id="profile-select" onchange="switchProfile()"></select>
+    </label>
+    <button onclick="createProfile()">+ New Profile</button>
+    <button class="danger" onclick="deleteProfile()">Delete Profile</button>
+  </div>
+  <div class="btn-row">
     <button class="primary" onclick="openRuleModal()">+ Add Rule</button>
-    <button onclick="loadRules()">↻ Refresh</button>
+    <button onclick="loadProfiles(loadRules)">↻ Refresh</button>
   </div>
   <table>
     <thead><tr><th class="sortable" data-table="rules" data-col="idx">#</th><th class="sortable" data-table="rules" data-col="enabled">Enabled</th><th class="sortable" data-table="rules" data-col="incoming_models">Incoming Models</th><th class="sortable" data-table="rules" data-col="target_model">Target Model</th><th class="sortable" data-table="rules" data-col="server_id">Server</th><th>Fallbacks</th><th>Actions</th></tr></thead>
@@ -420,6 +427,48 @@ async function deleteServer(id) {
 }
 
 // --- Rules ---
+// --- Profiles ---
+async function loadProfiles(then) {
+  const res = await fetch(API + '/profiles');
+  const data = await res.json();
+  const sel = document.getElementById('profile-select');
+  const profiles = data.profiles || [];
+  sel.innerHTML = profiles.map(p =>
+    `<option value="${esc(p.id)}"${p.id === data.active_profile_id ? ' selected' : ''}>${esc(p.name)}</option>`
+  ).join('');
+  if (then) then();
+}
+
+async function switchProfile() {
+  const sel = document.getElementById('profile-select');
+  closeRuleModal();
+  const res = await fetch(API + '/profiles/' + encodeURIComponent(sel.value) + '/activate', { method: 'POST' });
+  if (!res.ok) { alert('Failed to switch profile: ' + (await res.text())); return; }
+  loadProfiles(loadRules);
+}
+
+async function createProfile() {
+  const name = prompt('Profile name:');
+  if (!name || !name.trim()) return;
+  const copy = confirm('Copy rules from the current profile?');
+  const res = await fetch(API + '/profiles', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim(), copy_from_active: copy })
+  });
+  if (!res.ok) { alert('Failed to create profile: ' + (await res.text())); return; }
+  loadProfiles(loadRules);
+}
+
+async function deleteProfile() {
+  const sel = document.getElementById('profile-select');
+  const label = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : sel.value;
+  if (!confirm('Delete profile "' + label + '"?')) return;
+  const res = await fetch(API + '/profiles/' + encodeURIComponent(sel.value), { method: 'DELETE' });
+  if (!res.ok) { alert('Failed to delete profile: ' + (await res.text())); return; }
+  loadProfiles(loadRules);
+}
+
 async function loadRules() {
   const res = await fetch(API + '/rules');
   let rules = await res.json();
@@ -777,7 +826,7 @@ function restoreSortState() {
 restoreSortState();
 loadVersion();
 loadServers();
-loadRules();
+loadProfiles(loadRules);
 // Auto-refresh servers tab (it's the default active tab)
 serversInterval = setInterval(loadServers, 5000);
 

@@ -20,8 +20,10 @@ func TestNewStore(t *testing.T) {
 		if cfg.Servers == nil {
 			t.Error("Servers map should not be nil")
 		}
-		if cfg.Rules == nil {
-			t.Error("Rules slice should not be nil")
+		if len(cfg.Profiles) != 1 {
+			t.Errorf("expected 1 profile, got %d", len(cfg.Profiles))
+		} else if cfg.Profiles[0].Rules == nil {
+			t.Error("profile Rules slice should not be nil")
 		}
 	})
 
@@ -41,8 +43,10 @@ func TestNewStore(t *testing.T) {
 		if len(cfg.Servers) != 1 {
 			t.Errorf("expected 1 server, got %d", len(cfg.Servers))
 		}
-		if len(cfg.Rules) != 1 {
-			t.Errorf("expected 1 rule, got %d", len(cfg.Rules))
+		if len(cfg.Profiles) != 1 {
+			t.Errorf("expected 1 profile, got %d", len(cfg.Profiles))
+		} else if len(cfg.Profiles[0].Rules) != 1 {
+			t.Errorf("expected 1 rule, got %d", len(cfg.Profiles[0].Rules))
 		}
 	})
 }
@@ -236,8 +240,10 @@ func TestStore_SaveAndLoad(t *testing.T) {
 	if len(cfg.Servers) != 1 {
 		t.Errorf("got %d servers, want 1", len(cfg.Servers))
 	}
-	if len(cfg.Rules) != 1 {
-		t.Errorf("got %d rules, want 1", len(cfg.Rules))
+	if len(cfg.Profiles) != 1 {
+		t.Errorf("got %d profiles, want 1", len(cfg.Profiles))
+	} else if len(cfg.Profiles[0].Rules) != 1 {
+		t.Errorf("got %d rules, want 1", len(cfg.Profiles[0].Rules))
 	}
 }
 
@@ -327,6 +333,213 @@ func TestLegacyFallbackServerIDs(t *testing.T) {
 	}
 	if rule.Fallbacks[0].ServerID != "s2" || rule.Fallbacks[1].ServerID != "s3" {
 		t.Errorf("got fallbacks %v, want [{s2 } {s3 }]", rule.Fallbacks)
+	}
+}
+
+func TestMigrateRulesToProfiles(t *testing.T) {
+	input := []byte(`{"servers":{"s1":{"id":"s1","url":"http://x.com"}},"rules":[{"incoming_models":["m1"],"target_model":"m1","server_id":"s1","enabled":true}]}`)
+	output := migrateRulesToProfiles(input)
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(output, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, has := raw["rules"]; has {
+		t.Error("rules key should be removed")
+	}
+	if raw["active_profile_id"] != "default" {
+		t.Errorf("active_profile_id = %v, want default", raw["active_profile_id"])
+	}
+	profiles, ok := raw["profiles"].([]interface{})
+	if !ok || len(profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %v", raw["profiles"])
+	}
+	p := profiles[0].(map[string]interface{})
+	if p["id"] != "default" || p["name"] != "default" {
+		t.Errorf("profile id/name = %v/%v, want default/default", p["id"], p["name"])
+	}
+	if rules, _ := p["rules"].([]interface{}); len(rules) != 1 {
+		t.Fatalf("expected 1 rule in profile, got %v", p["rules"])
+	}
+}
+
+func TestMigrateRulesToProfiles_NoChange(t *testing.T) {
+	input := []byte(`{"servers":{},"profiles":[{"id":"default","name":"default","rules":[]}],"active_profile_id":"default"}`)
+	output := migrateRulesToProfiles(input)
+	if string(output) != string(input) {
+		t.Error("output should match input when profiles already present")
+	}
+}
+
+func TestMigrateRulesToProfiles_NoRulesKey(t *testing.T) {
+	input := []byte(`{"servers":{"s1":{"id":"s1","url":"http://x.com"}}}`)
+	output := migrateRulesToProfiles(input)
+	if string(output) != string(input) {
+		t.Error("output should match input when no rules key")
+	}
+}
+
+func TestLoadLegacyRulesFile(t *testing.T) {
+	data := []byte(`{"servers":{"s1":{"id":"s1","url":"http://x.com","api_key":"k","api_types":["openai"]}},"rules":[{"incoming_models":["m1"],"target_model":"m1","server_id":"s1","enabled":true}]}`)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	cfg := s.GetConfig()
+	if len(cfg.Profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(cfg.Profiles))
+	}
+	if cfg.Profiles[0].ID != "default" || cfg.Profiles[0].Name != "default" {
+		t.Errorf("profile = %q/%q, want default/default", cfg.Profiles[0].ID, cfg.Profiles[0].Name)
+	}
+	if cfg.ActiveProfileID != "default" {
+		t.Errorf("active_profile_id = %q, want default", cfg.ActiveProfileID)
+	}
+	if len(cfg.Profiles[0].Rules) != 1 {
+		t.Errorf("expected 1 rule, got %d", len(cfg.Profiles[0].Rules))
+	}
+}
+
+func TestLoadNoRulesNoProfiles(t *testing.T) {
+	data := []byte(`{"servers":{"s1":{"id":"s1","url":"http://x.com","api_types":["openai"]}}}`)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	cfg := s.GetConfig()
+	if len(cfg.Profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(cfg.Profiles))
+	}
+	if cfg.ActiveProfileID != cfg.Profiles[0].ID {
+		t.Errorf("active_profile_id = %q, want %q", cfg.ActiveProfileID, cfg.Profiles[0].ID)
+	}
+}
+
+func TestLoadBadActiveProfileID(t *testing.T) {
+	data := []byte(`{"servers":{},"profiles":[{"id":"a","name":"A","rules":[{"incoming_models":["m1"],"target_model":"m1","server_id":"s1","enabled":true}]},{"id":"b","name":"B","rules":[]}],"active_profile_id":"ghost"}`)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	// Unknown active id falls back to Profiles[0] (id "a"), which holds the rule.
+	if _, ok := s.GetRuleByModel("m1"); !ok {
+		t.Error("GetRuleByModel should fall back to Profiles[0] for an unknown active id")
+	}
+}
+
+func TestProfileCRUD(t *testing.T) {
+	s := newEmptyStore(t)
+	_ = s.AddRule(&domain.RoutingRule{IncomingModels: []string{"m1"}, ServerID: "s1", Enabled: true})
+
+	if id, err := s.AddProfile("prod", false); err != nil {
+		t.Fatalf("AddProfile: %v", err)
+	} else if id != "prod" {
+		t.Errorf("id = %q, want prod", id)
+	}
+	if got := s.GetProfiles()[1].Rules; len(got) != 0 {
+		t.Errorf("non-copy profile should have no rules, got %d", len(got))
+	}
+
+	if _, err := s.AddProfile("prod-copy", true); err != nil {
+		t.Fatalf("AddProfile copy: %v", err)
+	}
+	if got := s.GetProfiles()[2].Rules; len(got) != 1 {
+		t.Errorf("copy profile should have 1 rule, got %d", len(got))
+	}
+
+	if _, err := s.AddProfile("prod", false); err == nil {
+		t.Error("duplicate profile name should error")
+	}
+
+	if err := s.RenameProfile("prod", "production"); err != nil {
+		t.Fatalf("RenameProfile: %v", err)
+	}
+	renamed := false
+	for _, p := range s.GetProfiles() {
+		if p.ID == "prod" && p.Name == "production" {
+			renamed = true
+		}
+	}
+	if !renamed {
+		t.Error("rename should change Name and keep ID")
+	}
+
+	if err := s.SetActiveProfile("prod"); err != nil {
+		t.Fatalf("SetActiveProfile: %v", err)
+	}
+	if s.GetActiveProfileID() != "prod" {
+		t.Errorf("active = %q, want prod", s.GetActiveProfileID())
+	}
+
+	if err := s.SetActiveProfile("nope"); err == nil {
+		t.Error("SetActiveProfile unknown should error")
+	}
+	if err := s.RenameProfile("nope", "x"); err == nil {
+		t.Error("RenameProfile unknown should error")
+	}
+	if err := s.DeleteProfile("nope"); err == nil {
+		t.Error("DeleteProfile unknown should error")
+	}
+
+	// Deleting the active profile auto-switches to the first remaining one.
+	if err := s.DeleteProfile("prod"); err != nil {
+		t.Fatalf("DeleteProfile: %v", err)
+	}
+	if s.GetActiveProfileID() != s.GetProfiles()[0].ID {
+		t.Errorf("after deleting active, active = %q, want first profile %q", s.GetActiveProfileID(), s.GetProfiles()[0].ID)
+	}
+
+	// Delete down to one profile, then deleting it must error.
+	for len(s.GetProfiles()) > 1 {
+		_ = s.DeleteProfile(s.GetProfiles()[0].ID)
+	}
+	if err := s.DeleteProfile(s.GetProfiles()[0].ID); err == nil {
+		t.Error("deleting the only profile should error")
+	}
+}
+
+func TestRulesScopedToActiveProfile(t *testing.T) {
+	s := newEmptyStore(t)
+	_ = s.AddRule(&domain.RoutingRule{IncomingModels: []string{"m1"}, ServerID: "s1", Enabled: true})
+
+	if _, err := s.AddProfile("empty", false); err != nil {
+		t.Fatalf("AddProfile: %v", err)
+	}
+	if err := s.SetActiveProfile("empty"); err != nil {
+		t.Fatalf("SetActiveProfile: %v", err)
+	}
+
+	// m1 lives in the other profile, so it is no longer routable.
+	if _, ok := s.GetRuleByModel("m1"); ok {
+		t.Error("m1 should not be routable from the empty active profile")
+	}
+
+	// New rules land in the active profile.
+	_ = s.AddRule(&domain.RoutingRule{IncomingModels: []string{"m2"}, ServerID: "s1", Enabled: true})
+	if _, ok := s.GetRuleByModel("m2"); !ok {
+		t.Error("m2 should be routable from the active profile")
+	}
+
+	// The original profile still holds m1.
+	for _, p := range s.GetProfiles() {
+		if p.ID == "default" && len(p.Rules) != 1 {
+			t.Errorf("default profile should still have 1 rule, got %d", len(p.Rules))
+		}
 	}
 }
 
@@ -436,11 +649,16 @@ func TestGetConfigDeepCopy(t *testing.T) {
 
 	cfg := s.GetConfig()
 	cfg.Servers["s1"].URL = "http://hacked.com"
-	cfg.Rules[0].ServerID = "hacked"
+	cfg.Profiles[0].Name = "hacked"
+	cfg.Profiles[0].Rules[0].ServerID = "hacked"
 
 	original, _ := s.GetServer("s1")
 	if original.URL == "http://hacked.com" {
 		t.Error("GetConfig should return a deep copy")
+	}
+
+	if s.GetProfiles()[0].Name == "hacked" {
+		t.Error("GetConfig should return a deep copy of profile names")
 	}
 
 	rule, _ := s.GetRuleByModel("m1")

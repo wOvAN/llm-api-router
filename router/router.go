@@ -502,10 +502,10 @@ func retryBackoff(n int) time.Duration {
 
 // listModels returns the list of incoming model names (what clients can request).
 func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
-	cfg := r.store.GetConfig()
+	rules := r.store.GetActiveRules()
 
 	models := make([]map[string]interface{}, 0)
-	for _, rule := range cfg.Rules {
+	for _, rule := range rules {
 		if !rule.Enabled {
 			continue
 		}

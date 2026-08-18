@@ -1,10 +1,19 @@
 package domain
 
+// RuleProfile is a named set of routing rules. Exactly one profile is active
+// at a time; the router routes using the active profile's rules.
+type RuleProfile struct {
+	ID    string         `json:"id"`
+	Name  string         `json:"name"`
+	Rules []*RoutingRule `json:"rules"`
+}
+
 // Config holds the full router configuration.
 type Config struct {
-	Servers  map[string]*Server `json:"servers"`
-	Rules    []*RoutingRule     `json:"rules"`
-	Settings Settings           `json:"settings,omitempty"`
+	Servers         map[string]*Server `json:"servers"`
+	Profiles        []RuleProfile      `json:"profiles"`
+	ActiveProfileID string             `json:"active_profile_id,omitempty"`
+	Settings        Settings           `json:"settings,omitempty"`
 }
 
 // Settings holds global router behavior toggles.

@@ -34,43 +34,50 @@
       "api_types": ["openai"]
     }
   },
-  "rules": [
+  "profiles": [
     {
-      "incoming_models": ["opus", "sonnet"],
-      "target_model": "o3-mini",
-      "server_id": "primary-openai",
-      "num_retries": 2,
-      "context_window": 200000,
-      "fallbacks": [
+      "id": "default",
+      "name": "default",
+      "rules": [
         {
-          "server_id": "fallback",
-          "target_model": "gpt-4o-mini",
-          "priority": 1
-        }
-      ],
-      "enabled": true
-    },
-    {
-      "incoming_models": ["claude-opus"],
-      "target_model": "claude-sonnet-4-6",
-      "server_id": "primary-anthropic",
-      "fallbacks": [
+          "incoming_models": ["opus", "sonnet"],
+          "target_model": "o3-mini",
+          "server_id": "primary-openai",
+          "num_retries": 2,
+          "context_window": 200000,
+          "fallbacks": [
+            {
+              "server_id": "fallback",
+              "target_model": "gpt-4o-mini",
+              "priority": 1
+            }
+          ],
+          "enabled": true
+        },
         {
-          "server_id": "fallback",
-          "priority": 1,
+          "incoming_models": ["claude-opus"],
+          "target_model": "claude-sonnet-4-6",
+          "server_id": "primary-anthropic",
+          "fallbacks": [
+            {
+              "server_id": "fallback",
+              "priority": 1,
+              "enabled": false
+            }
+          ],
+          "enabled": true
+        },
+        {
+          "incoming_models": ["haiku"],
+          "target_model": "claude-haiku-4-5-20251001",
+          "server_id": "primary-anthropic",
+          "fallbacks": [],
           "enabled": false
         }
-      ],
-      "enabled": true
-    },
-    {
-      "incoming_models": ["haiku"],
-      "target_model": "claude-haiku-4-5-20251001",
-      "server_id": "primary-anthropic",
-      "fallbacks": [],
-      "enabled": false
+      ]
     }
   ],
+  "active_profile_id": "default",
   "settings": {
     "always_include_stream_usage": false
   }
