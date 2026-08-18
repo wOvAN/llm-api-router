@@ -89,6 +89,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
       <select id="profile-select" onchange="selectProfile()"></select>
     </label>
     <button onclick="activateProfile()" title="Route traffic through the selected profile">★ Activate</button>
+    <button onclick="renameProfile()">Rename</button>
     <button onclick="createProfile()">+ New Profile</button>
     <button class="danger" onclick="deleteProfile()">Delete Profile</button>
   </div>
@@ -460,6 +461,20 @@ async function activateProfile() {
   const sel = document.getElementById('profile-select');
   const res = await fetch(API + '/profiles/' + encodeURIComponent(sel.value) + '/activate', { method: 'POST' });
   if (!res.ok) { alert('Failed to activate profile: ' + (await res.text())); return; }
+  loadProfiles();
+}
+
+async function renameProfile() {
+  const sel = document.getElementById('profile-select');
+  const current = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text.replace(' (active)', '') : '';
+  const name = prompt('New profile name:', current);
+  if (!name || !name.trim() || name.trim() === current) return;
+  const res = await fetch(API + '/profiles/' + encodeURIComponent(sel.value), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim() })
+  });
+  if (!res.ok) { alert('Failed to rename profile: ' + (await res.text())); return; }
   loadProfiles();
 }
 
