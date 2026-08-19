@@ -68,7 +68,7 @@ func TestKeepAliveWriterWriteResetsIdle(t *testing.T) {
 
 	// Writes every 30ms — well below the 40ms idle — must keep pushing the
 	// heartbeat back.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := k.Write([]byte("data: {\"a\":1}\n\n")); err != nil {
 			t.Fatalf("Write: %v", err)
 		}

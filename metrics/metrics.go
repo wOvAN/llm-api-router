@@ -43,10 +43,7 @@ func (s *Store) Add(m domain.RequestMetric) {
 	if m.NativePredictedMs > 0 {
 		m.DecodeTimeMs = int64(m.NativePredictedMs)
 	} else {
-		m.DecodeTimeMs = m.LatencyMs - m.TTFBMs
-		if m.DecodeTimeMs < 0 {
-			m.DecodeTimeMs = 0
-		}
+		m.DecodeTimeMs = max(m.LatencyMs-m.TTFBMs, 0)
 	}
 
 	// Use native tok/s when available; fall back to wall-clock calculation.

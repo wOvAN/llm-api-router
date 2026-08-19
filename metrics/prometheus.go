@@ -52,8 +52,8 @@ func (s *Store) PrometheusMetrics() string {
 // parseGroupKey splits a summary key into (group, label). Summary keys are
 // either a bare model name or "server:<id>".
 func parseGroupKey(key string) (group, label string) {
-	if strings.HasPrefix(key, "server:") {
-		return "server", strings.TrimPrefix(key, "server:")
+	if after, ok := strings.CutPrefix(key, "server:"); ok {
+		return "server", after
 	}
 	if key != "" {
 		return "model", key

@@ -251,7 +251,7 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	s := newEmptyStore(t)
 	var wg sync.WaitGroup
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -268,19 +268,19 @@ func TestMigrateOldAPIType(t *testing.T) {
 	input := []byte(`{"servers":{"s1":{"api_type":"openai","url":"http://x.com"}}}`)
 	output := migrateLegacy(input)
 
-	var raw map[string]interface{}
+	var raw map[string]any
 	if err := json.Unmarshal(output, &raw); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	servers := raw["servers"].(map[string]interface{})
-	s1 := servers["s1"].(map[string]interface{})
+	servers := raw["servers"].(map[string]any)
+	s1 := servers["s1"].(map[string]any)
 
 	if _, has := s1["api_type"]; has {
 		t.Error("api_type should be removed")
 	}
 
-	apiTypes, ok := s1["api_types"].([]interface{})
+	apiTypes, ok := s1["api_types"].([]any)
 	if !ok {
 		t.Fatal("api_types should be an array")
 	}
@@ -340,7 +340,7 @@ func TestMigrateRulesToProfiles(t *testing.T) {
 	input := []byte(`{"servers":{"s1":{"id":"s1","url":"http://x.com"}},"rules":[{"incoming_models":["m1"],"target_model":"m1","server_id":"s1","enabled":true}]}`)
 	output := migrateLegacy(input)
 
-	var raw map[string]interface{}
+	var raw map[string]any
 	if err := json.Unmarshal(output, &raw); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -350,15 +350,15 @@ func TestMigrateRulesToProfiles(t *testing.T) {
 	if raw["active_profile_id"] != "default" {
 		t.Errorf("active_profile_id = %v, want default", raw["active_profile_id"])
 	}
-	profiles, ok := raw["profiles"].([]interface{})
+	profiles, ok := raw["profiles"].([]any)
 	if !ok || len(profiles) != 1 {
 		t.Fatalf("expected 1 profile, got %v", raw["profiles"])
 	}
-	p := profiles[0].(map[string]interface{})
+	p := profiles[0].(map[string]any)
 	if p["id"] != "default" || p["name"] != "default" {
 		t.Errorf("profile id/name = %v/%v, want default/default", p["id"], p["name"])
 	}
-	if rules, _ := p["rules"].([]interface{}); len(rules) != 1 {
+	if rules, _ := p["rules"].([]any); len(rules) != 1 {
 		t.Fatalf("expected 1 rule in profile, got %v", p["rules"])
 	}
 }

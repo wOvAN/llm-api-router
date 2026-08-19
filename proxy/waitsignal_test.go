@@ -39,7 +39,7 @@ func TestWaitSignalWriterWriteResetsIdle(t *testing.T) {
 	defer ws.Stop()
 
 	// Writes every 50ms — below the 60ms idle — must keep pushing the signal back.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := ws.Write([]byte("data: {\"a\":1}\n\n")); err != nil {
 			t.Fatalf("Write: %v", err)
 		}

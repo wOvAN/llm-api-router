@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -146,8 +147,6 @@ func (t *HealthTracker) GetStatus() map[string]bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	out := make(map[string]bool, len(t.status))
-	for k, v := range t.status {
-		out[k] = v
-	}
+	maps.Copy(out, t.status)
 	return out
 }

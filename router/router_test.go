@@ -29,7 +29,8 @@ func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
 	return New(store, ms, nil, nil, nil), store, ms
 }
 
-func bptr(b bool) *bool { return &b }
+//go:fix inline
+func bptr(b bool) *bool { return new(b) }
 
 func TestOrderedFallbacks(t *testing.T) {
 	rule := func(fbs ...domain.FallbackEntry) *domain.RoutingRule {
@@ -60,8 +61,8 @@ func TestOrderedFallbacks(t *testing.T) {
 		want []string
 	}{
 		{"all disabled", rule(
-			domain.FallbackEntry{ServerID: "a", Enabled: bptr(false)},
-			domain.FallbackEntry{ServerID: "b", Enabled: bptr(false)},
+			domain.FallbackEntry{ServerID: "a", Enabled: new(false)},
+			domain.FallbackEntry{ServerID: "b", Enabled: new(false)},
 		), []string{}},
 		{"priority ascending", rule(
 			domain.FallbackEntry{ServerID: "a", Priority: 2},
@@ -74,7 +75,7 @@ func TestOrderedFallbacks(t *testing.T) {
 			domain.FallbackEntry{ServerID: "c"},
 		), []string{"b", "a", "c"}},
 		{"disabled filtered out", rule(
-			domain.FallbackEntry{ServerID: "a", Enabled: bptr(false)},
+			domain.FallbackEntry{ServerID: "a", Enabled: new(false)},
 			domain.FallbackEntry{ServerID: "b", Priority: 1},
 			domain.FallbackEntry{ServerID: "c"},
 		), []string{"b", "c"}},
@@ -90,7 +91,7 @@ func TestOrderedFallbacks(t *testing.T) {
 			domain.FallbackEntry{ServerID: "d"},
 		), []string{"c", "b", "a", "d"}},
 		{"explicit enabled true kept", rule(
-			domain.FallbackEntry{ServerID: "a", Enabled: bptr(true), Priority: 2},
+			domain.FallbackEntry{ServerID: "a", Enabled: new(true), Priority: 2},
 			domain.FallbackEntry{ServerID: "b", Priority: 1},
 		), []string{"b", "a"}},
 	}
@@ -252,8 +253,8 @@ func TestListModels(t *testing.T) {
 		}
 
 		var result struct {
-			Object string                   `json:"object"`
-			Data   []map[string]interface{} `json:"data"`
+			Object string           `json:"object"`
+			Data   []map[string]any `json:"data"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			t.Fatalf("decode response: %v", err)
@@ -274,7 +275,7 @@ func TestListModels(t *testing.T) {
 		r.Handle(w, req)
 
 		var result struct {
-			Data []map[string]interface{} `json:"data"`
+			Data []map[string]any `json:"data"`
 		}
 		_ = json.NewDecoder(w.Result().Body).Decode(&result)
 		if len(result.Data) != 0 {
@@ -302,11 +303,11 @@ func TestListModels(t *testing.T) {
 		r.Handle(w, req)
 
 		var result struct {
-			Data []map[string]interface{} `json:"data"`
+			Data []map[string]any `json:"data"`
 		}
 		_ = json.NewDecoder(w.Result().Body).Decode(&result)
 
-		byID := map[string]map[string]interface{}{}
+		byID := map[string]map[string]any{}
 		for _, m := range result.Data {
 			byID[m["id"].(string)] = m
 		}
@@ -459,11 +460,11 @@ func TestHandleInjectsStreamUsage(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.Handle(w, req)
 
-	var sent map[string]interface{}
+	var sent map[string]any
 	if err := json.Unmarshal([]byte(receivedBody), &sent); err != nil {
 		t.Fatalf("backend received invalid body %q: %v", receivedBody, err)
 	}
-	so, ok := sent["stream_options"].(map[string]interface{})
+	so, ok := sent["stream_options"].(map[string]any)
 	if !ok {
 		t.Fatalf("stream_options not injected into upstream request: %v", sent)
 	}
@@ -535,7 +536,7 @@ func TestHandleResponsesAPI(t *testing.T) {
 	if gotPath != "/v1/responses" {
 		t.Errorf("backend path = %q, want /v1/responses", gotPath)
 	}
-	var sent map[string]interface{}
+	var sent map[string]any
 	if err := json.Unmarshal([]byte(receivedBody), &sent); err != nil {
 		t.Fatalf("backend received invalid body %q: %v", receivedBody, err)
 	}
@@ -544,7 +545,7 @@ func TestHandleResponsesAPI(t *testing.T) {
 	}
 
 	// Client response: model rewritten back to the original name.
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("client response invalid: %v", err)
 	}
@@ -608,7 +609,7 @@ func TestHandleResponsesAPIStreaming(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.Handle(w, req)
 
-	var sent map[string]interface{}
+	var sent map[string]any
 	if err := json.Unmarshal([]byte(receivedBody), &sent); err != nil {
 		t.Fatalf("backend received invalid body %q: %v", receivedBody, err)
 	}
@@ -888,7 +889,7 @@ func TestFallbackPreservesActualModel(t *testing.T) {
 	}
 
 	respBody, _ := io.ReadAll(w.Result().Body)
-	var resp map[string]interface{}
+	var resp map[string]any
 	_ = json.Unmarshal(respBody, &resp)
 
 	// Response should contain the actual fallback model, not "opus"
@@ -935,7 +936,7 @@ func TestPrimaryAttemptRewritesModel(t *testing.T) {
 	}
 
 	respBody, _ := io.ReadAll(w.Result().Body)
-	var resp map[string]interface{}
+	var resp map[string]any
 	_ = json.Unmarshal(respBody, &resp)
 
 	model, ok := resp["model"].(string)
@@ -982,7 +983,7 @@ func TestNoRewriteWhenModelsMatch(t *testing.T) {
 	}
 
 	respBody, _ := io.ReadAll(w.Result().Body)
-	var resp map[string]interface{}
+	var resp map[string]any
 	_ = json.Unmarshal(respBody, &resp)
 
 	model, ok := resp["model"].(string)

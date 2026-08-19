@@ -72,8 +72,8 @@ func apiTypeFromPath(path string) domain.APIType {
 // and X-Real-IP first (for proxied traffic), then falling back to RemoteAddr.
 func clientIP(req *http.Request) string {
 	if fwd := req.Header.Get("X-Forwarded-For"); fwd != "" {
-		if idx := strings.IndexByte(fwd, ','); idx >= 0 {
-			return strings.TrimSpace(fwd[:idx])
+		if before, _, ok := strings.Cut(fwd, ","); ok {
+			return strings.TrimSpace(before)
 		}
 		return strings.TrimSpace(fwd)
 	}
@@ -105,9 +105,9 @@ func apiEndpointFromPath(path string) string {
 		return "completions"
 	}
 	// Fallback: extract the last path segment after /v1/
-	if idx := strings.Index(path, "/v1/"); idx >= 0 {
-		rest := path[idx+4:]
-		if seg := strings.Split(rest, "/")[0]; seg != "" {
+	if _, after, ok := strings.Cut(path, "/v1/"); ok {
+		rest := after
+		if seg, _, _ := strings.Cut(rest, "/"); seg != "" {
 			return seg
 		}
 	}
@@ -470,13 +470,13 @@ func retryBackoff(n int) time.Duration {
 func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 	rules := r.store.GetActiveRules()
 
-	models := make([]map[string]interface{}, 0)
+	models := make([]map[string]any, 0)
 	for _, rule := range rules {
 		if !rule.Enabled {
 			continue
 		}
 		for _, name := range rule.IncomingModels {
-			m := map[string]interface{}{
+			m := map[string]any{
 				"id":       name,
 				"object":   "model",
 				"created":  time.Now().Unix(),
@@ -494,7 +494,7 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"object": "list",
 		"data":   models,
 	}); err != nil {

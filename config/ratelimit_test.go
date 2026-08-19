@@ -69,7 +69,7 @@ func TestRateLimiterCooldownExpires(t *testing.T) {
 	rl := NewRateLimiter(3, 30*time.Second, 50*time.Millisecond)
 
 	// Trigger cooldown
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rl.RecordFailure("srv-1", 0)
 	}
 
@@ -106,7 +106,7 @@ func TestRateLimiterWindowExpires(t *testing.T) {
 func TestRateLimiterCooldownRemaining(t *testing.T) {
 	rl := NewRateLimiter(3, 30*time.Second, 1*time.Minute)
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rl.RecordFailure("srv-1", 0)
 	}
 
@@ -128,7 +128,7 @@ func TestRateLimiterCooldownRemaining(t *testing.T) {
 func TestRateLimiterClearCooldown(t *testing.T) {
 	rl := NewRateLimiter(3, 30*time.Second, 1*time.Minute)
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rl.RecordFailure("srv-1", 0)
 	}
 
@@ -150,7 +150,7 @@ func TestRateLimiterMultipleServers(t *testing.T) {
 	rl := NewRateLimiter(3, 30*time.Second, 1*time.Minute)
 
 	// Server A exceeds threshold
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rl.RecordFailure("srv-a", 0)
 	}
 
@@ -170,7 +170,7 @@ func TestRateLimiterRepeatedFailuresExtendCooldown(t *testing.T) {
 	rl := NewRateLimiter(3, 30*time.Second, 50*time.Millisecond)
 
 	// Trigger cooldown
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rl.RecordFailure("srv-1", 0)
 	}
 
@@ -178,7 +178,7 @@ func TestRateLimiterRepeatedFailuresExtendCooldown(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// New failures — should trigger cooldown again
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rl.RecordFailure("srv-1", 0)
 	}
 
@@ -228,7 +228,7 @@ func TestRateLimiter4xxUsesLenientThreshold(t *testing.T) {
 	rl := NewRateLimiter(3, 30*time.Second, 1*time.Minute)
 
 	// 3 client-side 4xx failures are NOT enough (lenient threshold = 2*maxFails = 6)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rl.RecordFailure("srv-1", 400)
 	}
 	if rl.ShouldSkip("srv-1") {
@@ -242,7 +242,7 @@ func TestRateLimiter4xxUsesLenientThreshold(t *testing.T) {
 	}
 
 	// Reach the lenient threshold with 4xx failures
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rl.RecordFailure("srv-1", 400)
 	}
 	if !rl.ShouldSkip("srv-1") {

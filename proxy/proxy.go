@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -332,7 +333,7 @@ func (m *metricsWriter) metrics() ProxyMetrics {
 // with escaped characters in model names (e.g., GGUF names with / that may be
 // escaped as \/ by json.Marshal but not matched by byte-level search).
 func RewriteModelInBody(body []byte, newModel string) ([]byte, error) {
-	var obj map[string]interface{}
+	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return nil, fmt.Errorf("unmarshal body: %w", err)
 	}
@@ -776,7 +777,7 @@ func extractSSEContents(data []byte) []string {
 	dataStr := string(data)
 
 	// Split by "data:" prefix (with optional leading whitespace after colon)
-	for _, line := range strings.Split(dataStr, "data:") {
+	for line := range strings.SplitSeq(dataStr, "data:") {
 		line = strings.TrimPrefix(line, " ")
 		if len(line) < 2 {
 			continue
@@ -797,16 +798,16 @@ func extractSSEContents(data []byte) []string {
 		if !strings.HasPrefix(line, "{") {
 			continue
 		}
-		var obj map[string]interface{}
+		var obj map[string]any
 		if err := json.Unmarshal([]byte(line), &obj); err != nil {
 			log.Debugf("extractSSEContents: failed to parse SSE data line: %v", err)
 			continue
 		}
 
 		// OpenAI format: choices[0].delta.content
-		if choices, ok := obj["choices"].([]interface{}); ok && len(choices) > 0 {
-			if choice, ok := choices[0].(map[string]interface{}); ok {
-				if delta, ok := choice["delta"].(map[string]interface{}); ok {
+		if choices, ok := obj["choices"].([]any); ok && len(choices) > 0 {
+			if choice, ok := choices[0].(map[string]any); ok {
+				if delta, ok := choice["delta"].(map[string]any); ok {
 					if content, ok := delta["content"].(string); ok && content != "" {
 						contents = append(contents, content)
 					}
@@ -814,7 +815,7 @@ func extractSSEContents(data []byte) []string {
 			}
 		}
 		// Anthropic format: delta.text
-		if delta, ok := obj["delta"].(map[string]interface{}); ok {
+		if delta, ok := obj["delta"].(map[string]any); ok {
 			if text, ok := delta["text"].(string); ok && text != "" {
 				contents = append(contents, text)
 			}
@@ -845,7 +846,7 @@ func extractModelFromData(data []byte) string {
 
 // extractModelFromJSON extracts the "model" field from a JSON object.
 func extractModelFromJSON(data []byte) string {
-	var obj map[string]interface{}
+	var obj map[string]any
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return ""
 	}
@@ -1063,9 +1064,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 
 	// Copy response headers
 	headers := ld.Header()
-	for k, vv := range upstreamResp.Header {
-		headers[k] = vv
-	}
+	maps.Copy(headers, upstreamResp.Header)
 	// The response body may be rewritten (model names change the byte length),
 	// so drop length/framing headers and let Go compute correct chunked framing.
 	headers.Del("Transfer-Encoding")

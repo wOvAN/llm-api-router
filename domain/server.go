@@ -1,5 +1,7 @@
 package domain
 
+import "slices"
+
 // APIType represents the protocol type of a backend server.
 type APIType string
 
@@ -48,12 +50,7 @@ func (s *Server) GetURLForAPIType(t APIType) string {
 
 // SupportsAPIType checks if the server supports the given API type.
 func (s *Server) SupportsAPIType(t APIType) bool {
-	for _, at := range s.APITypes {
-		if at == t {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.APITypes, t)
 }
 
 // FallbackEntry defines a fallback server with an optional per-server target model.

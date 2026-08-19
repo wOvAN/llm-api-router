@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 
 	"llm-api-router/domain"
@@ -175,10 +176,8 @@ func (s *Store) GetRuleByModel(model string) (*domain.RoutingRule, bool) {
 		if !rule.Enabled {
 			continue
 		}
-		for _, m := range rule.IncomingModels {
-			if m == model {
-				return cloneRule(rule), true
-			}
+		if slices.Contains(rule.IncomingModels, model) {
+			return cloneRule(rule), true
 		}
 	}
 	return nil, false
@@ -511,16 +510,16 @@ func cloneRule(rule *domain.RoutingRule) *domain.RoutingRule {
 // would silently drop). No-op when the input isn't a JSON object or nothing
 // legacy is present.
 func migrateLegacy(data []byte) []byte {
-	var raw map[string]interface{}
+	var raw map[string]any
 	if json.Unmarshal(data, &raw) != nil {
 		return data
 	}
 
 	changed := false
 
-	if servers, ok := raw["servers"].(map[string]interface{}); ok {
+	if servers, ok := raw["servers"].(map[string]any); ok {
 		for _, srvVal := range servers {
-			srv, ok := srvVal.(map[string]interface{})
+			srv, ok := srvVal.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -536,8 +535,8 @@ func migrateLegacy(data []byte) []byte {
 
 	if _, has := raw["profiles"]; !has {
 		if rules, has := raw["rules"]; has {
-			raw["profiles"] = []interface{}{
-				map[string]interface{}{
+			raw["profiles"] = []any{
+				map[string]any{
 					"id":    "default",
 					"name":  "default",
 					"rules": rules,

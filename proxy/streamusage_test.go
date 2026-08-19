@@ -19,11 +19,11 @@ func TestEnsureStreamUsageInjectsIncludeUsage(t *testing.T) {
 		t.Fatal("expected strip=true when injecting for a client that did not request usage")
 	}
 
-	var obj map[string]interface{}
+	var obj map[string]any
 	if err := json.Unmarshal(rewritten, &obj); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	so, ok := obj["stream_options"].(map[string]interface{})
+	so, ok := obj["stream_options"].(map[string]any)
 	if !ok {
 		t.Fatal("stream_options not injected")
 	}
@@ -36,9 +36,9 @@ func TestEnsureStreamUsagePreservesExistingStreamOptions(t *testing.T) {
 	body := []byte(`{"model":"gpt-4","stream":true,"stream_options":{"foo":"bar"}}`)
 	rewritten, _ := EnsureStreamUsage(body, false)
 
-	var obj map[string]interface{}
+	var obj map[string]any
 	_ = json.Unmarshal(rewritten, &obj)
-	so := obj["stream_options"].(map[string]interface{})
+	so := obj["stream_options"].(map[string]any)
 	if so["foo"] != "bar" {
 		t.Errorf("existing stream_options.foo lost: %v", so)
 	}
@@ -75,9 +75,9 @@ func TestEnsureStreamUsage_AlwaysIncludeForwards(t *testing.T) {
 	if strip {
 		t.Error("always_include_stream_usage=true should forward the usage chunk, not strip")
 	}
-	var obj map[string]interface{}
+	var obj map[string]any
 	_ = json.Unmarshal(rewritten, &obj)
-	so := obj["stream_options"].(map[string]interface{})
+	so := obj["stream_options"].(map[string]any)
 	if inc, _ := so["include_usage"].(bool); !inc {
 		t.Error("include_usage should still be injected upstream when always-include is set")
 	}
@@ -215,9 +215,9 @@ func TestEnsureStreamUsageRouterIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewrite after inject: %v", err)
 	}
-	var obj map[string]interface{}
+	var obj map[string]any
 	_ = json.Unmarshal(rewritten, &obj)
-	so, ok := obj["stream_options"].(map[string]interface{})
+	so, ok := obj["stream_options"].(map[string]any)
 	if !ok {
 		t.Fatal("stream_options lost during model rewrite")
 	}

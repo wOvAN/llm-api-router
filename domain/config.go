@@ -13,7 +13,7 @@ type Config struct {
 	Servers         map[string]*Server `json:"servers"`
 	Profiles        []RuleProfile      `json:"profiles"`
 	ActiveProfileID string             `json:"active_profile_id,omitempty"`
-	Settings        Settings           `json:"settings,omitempty"`
+	Settings        Settings           `json:"settings"`
 }
 
 // Settings holds global router behavior toggles.

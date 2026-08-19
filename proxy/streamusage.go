@@ -22,7 +22,7 @@ import (
 // always_include_stream_usage setting); otherwise the injected artifact is
 // hidden while still being captured in metrics.
 func EnsureStreamUsage(body []byte, alwaysInclude bool) ([]byte, bool) {
-	var obj map[string]interface{}
+	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		log.Debugf("EnsureStreamUsage: failed to parse request body: %v", err)
 		return body, false
@@ -33,14 +33,14 @@ func EnsureStreamUsage(body []byte, alwaysInclude bool) ([]byte, bool) {
 		return body, false
 	}
 
-	streamOptions, _ := obj["stream_options"].(map[string]interface{})
+	streamOptions, _ := obj["stream_options"].(map[string]any)
 	if inc, ok := streamOptions["include_usage"].(bool); ok && inc {
 		// Client already asked for usage — leave the request and response untouched.
 		return body, false
 	}
 
 	if streamOptions == nil {
-		streamOptions = map[string]interface{}{}
+		streamOptions = map[string]any{}
 		obj["stream_options"] = streamOptions
 	}
 	streamOptions["include_usage"] = true
@@ -162,7 +162,7 @@ func isUsageArtifact(frame []byte) bool {
 	if len(line) == 0 || bytes.Equal(line, []byte("[DONE]")) {
 		return false
 	}
-	var obj map[string]interface{}
+	var obj map[string]any
 	if err := json.Unmarshal(line, &obj); err != nil {
 		log.Debugf("usageStripper: failed to parse SSE frame: %v", err)
 		return false
@@ -171,7 +171,7 @@ func isUsageArtifact(frame []byte) bool {
 	if !ok {
 		return false
 	}
-	arr, ok := choices.([]interface{})
+	arr, ok := choices.([]any)
 	if !ok {
 		return false
 	}
@@ -179,7 +179,7 @@ func isUsageArtifact(frame []byte) bool {
 		return true
 	}
 	for _, c := range arr {
-		cm, ok := c.(map[string]interface{})
+		cm, ok := c.(map[string]any)
 		if !ok || !choiceIsEmpty(cm) {
 			return false
 		}
@@ -189,7 +189,7 @@ func isUsageArtifact(frame []byte) bool {
 
 // choiceIsEmpty reports whether a single streaming choice carries no payload:
 // it has no finish_reason, no logprobs, and its delta is absent or all-null.
-func choiceIsEmpty(c map[string]interface{}) bool {
+func choiceIsEmpty(c map[string]any) bool {
 	if fr, ok := c["finish_reason"]; ok && fr != nil {
 		return false
 	}
@@ -200,7 +200,7 @@ func choiceIsEmpty(c map[string]interface{}) bool {
 	if !has {
 		return true
 	}
-	dm, ok := delta.(map[string]interface{})
+	dm, ok := delta.(map[string]any)
 	if !ok {
 		return false
 	}
@@ -220,7 +220,7 @@ func choiceIsEmpty(c map[string]interface{}) bool {
 // broken upstream (the router never reorders, splits or duplicates bytes),
 // which pinpoints a buggy backend build or an intermediate proxy.
 func validateSSEFrame(frame []byte, writer string) {
-	for _, line := range bytes.Split(frame, []byte("\n")) {
+	for line := range bytes.SplitSeq(frame, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
@@ -229,7 +229,7 @@ func validateSSEFrame(frame []byte, writer string) {
 		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 			continue
 		}
-		var obj map[string]interface{}
+		var obj map[string]any
 		if err := json.Unmarshal(payload, &obj); err != nil {
 			log.Warnf("%s: malformed SSE data line is not valid JSON: %v; frame: %s",
 				writer, err, truncateBytes(payload, 512))

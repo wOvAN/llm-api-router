@@ -77,7 +77,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
@@ -238,7 +238,7 @@ func (h *Handler) testServer(w http.ResponseWriter, req *http.Request) {
 	elapsed := time.Since(start)
 
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":      false,
 			"message": "connection failed: " + err.Error(),
 		})
@@ -260,7 +260,7 @@ func (h *Handler) testServer(w http.ResponseWriter, req *http.Request) {
 		bodySnippet = string(buf[:n])
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":               resp.StatusCode == http.StatusOK,
 		"status_code":      resp.StatusCode,
 		"elapsed_ms":       elapsed.Milliseconds(),
@@ -337,7 +337,7 @@ func (h *Handler) deleteRule(w http.ResponseWriter, req *http.Request, idxStr st
 // --- Profiles ---
 
 func (h *Handler) listProfiles(w http.ResponseWriter, req *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"profiles":          h.store.GetProfiles(),
 		"active_profile_id": h.store.GetActiveProfileID(),
 	})
@@ -419,7 +419,7 @@ func (h *Handler) reloadConfig(w http.ResponseWriter, req *http.Request) {
 func (h *Handler) getMetrics(w http.ResponseWriter, req *http.Request) {
 	summaries := h.metrics.Summaries()
 	active := h.metrics.ActiveRequests()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"summaries":       summaries,
 		"active_requests": active,
 	})

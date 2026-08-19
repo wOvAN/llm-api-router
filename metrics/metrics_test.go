@@ -126,7 +126,7 @@ func TestAddNoTokens(t *testing.T) {
 func TestRingBuffer(t *testing.T) {
 	s := New(3)
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		s.Add(domain.RequestMetric{
 			Model:    "gpt-4",
 			ServerID: "s1",

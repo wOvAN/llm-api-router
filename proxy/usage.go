@@ -67,7 +67,7 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 		outputTokens int64
 		cachedTokens int64 = -1
 		hasAny       bool
-		timings      map[string]interface{}
+		timings      map[string]any
 	)
 
 	forEachDataLine(body, func(data []byte) bool {
@@ -75,7 +75,7 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 			return false
 		}
 
-		var obj map[string]interface{}
+		var obj map[string]any
 		if err := json.Unmarshal(data, &obj); err != nil {
 			log.Debugf("extractUsage from stream: failed to parse SSE data line: %v", err)
 			return false
@@ -99,7 +99,7 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 			hasAny = true
 		}
 
-		if t, ok := obj["timings"].(map[string]interface{}); ok {
+		if t, ok := obj["timings"].(map[string]any); ok {
 			timings = t
 			hasAny = true
 		}
@@ -115,18 +115,18 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 
 // extractUsageFromJSON parses a non-streaming JSON response.
 func extractUsageFromJSON(body []byte) ProxyMetrics {
-	var obj map[string]interface{}
+	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		log.Debugf("extractUsage from JSON: failed to parse response body: %v", err)
 		return ProxyMetrics{CachedTokens: -1}
 	}
 
-	var usage map[string]interface{}
-	if u, ok := obj["usage"].(map[string]interface{}); ok {
+	var usage map[string]any
+	if u, ok := obj["usage"].(map[string]any); ok {
 		usage = u
 	}
-	var timings map[string]interface{}
-	if t, ok := obj["timings"].(map[string]interface{}); ok {
+	var timings map[string]any
+	if t, ok := obj["timings"].(map[string]any); ok {
 		timings = t
 	}
 
@@ -141,11 +141,11 @@ func extractUsageFromJSON(body []byte) ProxyMetrics {
 }
 
 // getField traverses a dotted JSON path in a map.
-func getField(obj map[string]interface{}, path string) map[string]interface{} {
+func getField(obj map[string]any, path string) map[string]any {
 	parts := strings.Split(path, ".")
-	var current interface{} = obj
+	var current any = obj
 	for _, p := range parts {
-		m, ok := current.(map[string]interface{})
+		m, ok := current.(map[string]any)
 		if !ok {
 			return nil
 		}
@@ -154,7 +154,7 @@ func getField(obj map[string]interface{}, path string) map[string]interface{} {
 	if current == nil {
 		return nil
 	}
-	result, ok := current.(map[string]interface{})
+	result, ok := current.(map[string]any)
 	if !ok {
 		return nil
 	}
@@ -162,7 +162,7 @@ func getField(obj map[string]interface{}, path string) map[string]interface{} {
 }
 
 // extractUsageTokens reads token counts from a usage map.
-func extractUsageTokens(usage map[string]interface{}) (input, output, cached int) {
+func extractUsageTokens(usage map[string]any) (input, output, cached int) {
 	cached = -1
 	if usage == nil {
 		return
@@ -175,12 +175,12 @@ func extractUsageTokens(usage map[string]interface{}) (input, output, cached int
 		cached = intToFloat64(v)
 	}
 	if cached < 0 {
-		if details, ok := usage["input_tokens_details"].(map[string]interface{}); ok {
+		if details, ok := usage["input_tokens_details"].(map[string]any); ok {
 			cached = intToFloat64(details["cached_tokens"])
 		}
 	}
 	if cached < 0 {
-		if details, ok := usage["prompt_tokens_details"].(map[string]interface{}); ok {
+		if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
 			cached = intToFloat64(details["cached_tokens"])
 		}
 	}
@@ -189,7 +189,7 @@ func extractUsageTokens(usage map[string]interface{}) (input, output, cached int
 }
 
 // buildMetricsFromData composes ProxyMetrics from token counts and optional timings.
-func buildMetricsFromData(inputTokens, outputTokens, totalTokens int64, cachedTokens int64, timings map[string]interface{}) ProxyMetrics {
+func buildMetricsFromData(inputTokens, outputTokens, totalTokens int64, cachedTokens int64, timings map[string]any) ProxyMetrics {
 	pm := ProxyMetrics{
 		PromptTokens:     int(inputTokens),
 		CompletionTokens: int(outputTokens),
@@ -239,7 +239,7 @@ func decompressBody(body []byte, encoding string) ([]byte, error) {
 	}
 }
 
-func intToFloat64(v interface{}) int {
+func intToFloat64(v any) int {
 	if v == nil {
 		return 0
 	}
@@ -250,7 +250,7 @@ func intToFloat64(v interface{}) int {
 	return int(f)
 }
 
-func floatToFloat64(v interface{}) float64 {
+func floatToFloat64(v any) float64 {
 	if v == nil {
 		return 0
 	}

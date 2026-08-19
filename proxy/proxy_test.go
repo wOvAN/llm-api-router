@@ -23,7 +23,7 @@ func TestRewriteModelInBody(t *testing.T) {
 			t.Fatalf("RewriteModelInBody: %v", err)
 		}
 
-		var obj map[string]interface{}
+		var obj map[string]any
 		if err := json.Unmarshal(output, &obj); err != nil {
 			t.Fatalf("unmarshal output: %v", err)
 		}
@@ -293,9 +293,9 @@ func TestDecompressBody(t *testing.T) {
 }
 
 func TestGetField(t *testing.T) {
-	obj := map[string]interface{}{
-		"message": map[string]interface{}{
-			"usage": map[string]interface{}{
+	obj := map[string]any{
+		"message": map[string]any{
+			"usage": map[string]any{
 				"input_tokens": float64(5),
 			},
 		},
@@ -317,7 +317,7 @@ func TestGetField(t *testing.T) {
 
 func TestExtractUsageTokens(t *testing.T) {
 	t.Run("OpenAI format", func(t *testing.T) {
-		input, output, cached := extractUsageTokens(map[string]interface{}{
+		input, output, cached := extractUsageTokens(map[string]any{
 			"prompt_tokens":     float64(10),
 			"completion_tokens": float64(20),
 		})
@@ -327,7 +327,7 @@ func TestExtractUsageTokens(t *testing.T) {
 	})
 
 	t.Run("Anthropic format", func(t *testing.T) {
-		input, output, cached := extractUsageTokens(map[string]interface{}{
+		input, output, cached := extractUsageTokens(map[string]any{
 			"input_tokens":  float64(15),
 			"output_tokens": float64(25),
 		})
@@ -353,7 +353,7 @@ func TestBuildMetricsFromData(t *testing.T) {
 	})
 
 	t.Run("with timings overrides", func(t *testing.T) {
-		pm := buildMetricsFromData(10, 20, 30, -1, map[string]interface{}{
+		pm := buildMetricsFromData(10, 20, 30, -1, map[string]any{
 			"prompt_n":             float64(5),
 			"predicted_n":          float64(15),
 			"prompt_ms":            float64(100),
@@ -472,7 +472,7 @@ data: {"model":"target","usage":{"prompt_tokens":5}}
 		data := []byte(`{"model":"target","choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":10,"completion_tokens":20}}`)
 		got, _ := rewriteModelInResponse(data, "target", "opus")
 
-		var obj map[string]interface{}
+		var obj map[string]any
 		if err := json.Unmarshal(got, &obj); err != nil {
 			t.Fatalf("invalid JSON: %v", err)
 		}
@@ -654,7 +654,7 @@ func TestLoopDetectorNoLoop(t *testing.T) {
 	ld := newLoopDetector(recorder, ctx)
 
 	// Send 25 different contents
-	for i := 0; i < 25; i++ {
+	for i := range 25 {
 		sse := fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":\"word-%d\"}}]}\n", i)
 		_, err := ld.Write([]byte(sse))
 		if err != nil {
@@ -674,7 +674,7 @@ func TestLoopDetectorDetectsLoop(t *testing.T) {
 	ld := newLoopDetector(recorder, ctx)
 
 	repeated := "data: {\"choices\":[{\"delta\":{\"content\":\" repeated \"}}]}\n"
-	for i := 0; i < loopDetectionWindow+5; i++ {
+	for range loopDetectionWindow + 5 {
 		_, err := ld.Write([]byte(repeated))
 		if err != nil {
 			// Loop detected — this is expected
@@ -694,7 +694,7 @@ func TestLoopDetectorSendsErrorToClient(t *testing.T) {
 	ld := newLoopDetector(recorder, context.Background())
 
 	repeated := "data: {\"choices\":[{\"delta\":{\"content\":\"echo \"}}]}\n"
-	for i := 0; i < loopDetectionWindow+1; i++ {
+	for range loopDetectionWindow + 1 {
 		if _, err := ld.Write([]byte(repeated)); err != nil {
 			break
 		}
@@ -715,7 +715,7 @@ func TestStreamProxyLoopReturnsMidStreamError(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
 		chunk := "data: {\"choices\":[{\"delta\":{\"content\":\"same \"}}]}\n\n"
-		for i := 0; i < loopDetectionWindow+10; i++ {
+		for range loopDetectionWindow + 10 {
 			if _, err := w.Write([]byte(chunk)); err != nil {
 				return
 			}
@@ -727,8 +727,7 @@ func TestStreamProxyLoopReturnsMidStreamError(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
-	var midErr *MidStreamError
-	if !errors.As(err, &midErr) {
+	if _, ok := errors.AsType[*MidStreamError](err); !ok {
 		t.Fatalf("expected *MidStreamError for detected loop, got: %v", err)
 	}
 	if pm == nil {
@@ -746,7 +745,7 @@ func TestLoopDetectorMixedContent(t *testing.T) {
 	ld := newLoopDetector(recorder, ctx)
 
 	// Send varied content
-	for i := 0; i < loopDetectionWindow+10; i++ {
+	for i := range loopDetectionWindow + 10 {
 		sse := fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":\"word %d \"}}]}\n", i)
 		_, err := ld.Write([]byte(sse))
 		if err != nil {
@@ -768,7 +767,7 @@ func TestLoopDetectorAllRecentIdentical(t *testing.T) {
 	ld.index = loopDetectionWindow
 
 	// Fill with same content
-	for i := 0; i < loopDetectionWindow; i++ {
+	for i := range loopDetectionWindow {
 		ld.recent[i] = "same"
 	}
 	if !ld.allRecentIdentical() {
@@ -855,13 +854,12 @@ func TestMidStreamError(t *testing.T) {
 	pm, err := StreamProxy(req.Context(), primaryServer.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
 
 	// Should get a MidStreamError
-	var midErr *MidStreamError
 	if err == nil {
 		// Hijack may not work on httptest — if no error, skip
 		// This is acceptable because httptest.Server doesn't support real TCP disconnects
 		return
 	}
-	if !errors.As(err, &midErr) {
+	if _, ok := errors.AsType[*MidStreamError](err); !ok {
 		// If not a MidStreamError, it might be a connection error — also acceptable
 		return
 	}
@@ -938,7 +936,7 @@ func TestStreamProxyAnthropicRewrite(t *testing.T) {
 	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify the request has the target model (rewritten by router before StreamProxy)
 		body, _ := io.ReadAll(r.Body)
-		var obj map[string]interface{}
+		var obj map[string]any
 		_ = json.Unmarshal(body, &obj)
 		if model, ok := obj["model"].(string); ok && model != backendModel {
 			t.Errorf("backend received model %q, want %q", model, backendModel)
@@ -967,7 +965,7 @@ func TestStreamProxyAnthropicRewrite(t *testing.T) {
 	}
 
 	// Check the response has the client's model name
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
@@ -1202,7 +1200,7 @@ func TestStreamProxyDrainsUpstreamOnClientGone(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"1\"}}]}\n\n"))
 		w.(http.Flusher).Flush()
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			select {
 			case <-r.Context().Done():
 				// Proxy closed the socket mid-generation: exactly what a
