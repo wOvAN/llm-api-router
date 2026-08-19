@@ -182,4 +182,4 @@ docker compose up -d
 docker compose build --no-cache
 ```
 
-`config.json` must exist as a **file** before the volume mount (Docker creates a directory if the path doesn't exist). Image: golang:1.26-alpine → alpine:3.21, ~15MB final.
+`config.json` must exist as a **file** before the volume mount (Docker creates a directory if the path doesn't exist). Image: golang:1.27-alpine → alpine:3.21, ~15MB final.
