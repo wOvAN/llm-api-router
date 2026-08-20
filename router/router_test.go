@@ -29,9 +29,6 @@ func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
 	return New(store, ms, nil, nil, nil), store, ms
 }
 
-//go:fix inline
-func bptr(b bool) *bool { return new(b) }
-
 func TestOrderedFallbacks(t *testing.T) {
 	rule := func(fbs ...domain.FallbackEntry) *domain.RoutingRule {
 		return &domain.RoutingRule{Fallbacks: fbs}
