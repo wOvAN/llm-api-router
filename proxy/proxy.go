@@ -380,6 +380,7 @@ type modelRewriteWriter struct {
 	oldModel      string
 	newModel      string
 	capturedModel string // backend model name captured before rewriting
+	carry         []byte // tail held back: a model name may straddle a read boundary
 }
 
 func newModelRewriteWriter(mw *metricsWriter, oldModel, newModel string) *modelRewriteWriter {
@@ -390,12 +391,77 @@ func newModelRewriteWriter(mw *metricsWriter, oldModel, newModel string) *modelR
 	}
 }
 
+// holdLen is how many trailing bytes to keep un-forwarded so a `"model":"..."`
+// that straddles two upstream reads is still rewritten.
+// pendingModelHold returns the number of trailing bytes of b that could still
+// complete into a `"model":"<value>"` match once the next read arrives. It is
+// len(b)-k, where k is the last `"model"` key whose value is not a closed
+// string; 0 when every model value is already closed (the common case — a
+// fully-formed frame), in which case nothing is held and no per-chunk latency
+// is added.
+func pendingModelHold(b []byte) int {
+	for {
+		keyIdx := bytes.LastIndex(b, []byte(`"model"`))
+		if keyIdx < 0 {
+			return 0
+		}
+		endOfKey := keyIdx + len(`"model"`)
+		// A longer key like "model_id" is not a model field — ignore and look earlier.
+		if endOfKey < len(b) && IsJSONNameChar(b[endOfKey]) {
+			b = b[:keyIdx]
+			continue
+		}
+		colon := bytes.IndexByte(b[endOfKey:], ':')
+		if colon < 0 {
+			return len(b) - keyIdx // "model" present, value not started
+		}
+		valueStart := endOfKey + colon + 1
+		for valueStart < len(b) && isWhitespace(b[valueStart]) {
+			valueStart++
+		}
+		if valueStart >= len(b) || b[valueStart] != '"' {
+			return len(b) - keyIdx // value not a started string
+		}
+		if FindJSONStringEnd(b, valueStart+1) < 0 {
+			return len(b) - keyIdx // value string open at chunk end
+		}
+		return 0 // last model value is closed; no earlier one can be split
+	}
+}
+
 func (r *modelRewriteWriter) Write(data []byte) (int, error) {
-	rewritten, captured := rewriteModelInResponse(data, r.oldModel, r.newModel)
+	// Prepend the tail held from the previous chunk: a model name split across
+	// a read boundary only matches once both halves are buffered.
+	buf := append(r.carry, data...)
+	r.carry = nil
+	rewritten, captured := rewriteModelInResponse(buf, r.oldModel, r.newModel)
 	if r.capturedModel == "" && captured != "" {
 		r.capturedModel = captured
 	}
-	return r.ResponseWriter.Write(rewritten)
+	hold := pendingModelHold(rewritten)
+	if hold == 0 {
+		return r.ResponseWriter.Write(rewritten)
+	}
+	if hold == len(rewritten) {
+		// The whole chunk is a (partial) model field; hold it for the next read.
+		r.carry = append([]byte(nil), rewritten...)
+		return len(data), nil
+	}
+	// Copy the held tail: `rewritten` may alias the caller's read buffer, which
+	// is reused on the next read, so a slice of it would be clobbered.
+	flush := rewritten[:len(rewritten)-hold]
+	r.carry = append([]byte(nil), rewritten[len(rewritten)-hold:]...)
+	return r.ResponseWriter.Write(flush)
+}
+
+// Finish flushes the held tail at stream end. A trailing partial model value can
+// no longer complete into a match, so forward it verbatim (the relay's own
+// finish then delivers whatever that leaves pending).
+func (r *modelRewriteWriter) Finish() {
+	if len(r.carry) > 0 {
+		_, _ = r.ResponseWriter.Write(r.carry)
+		r.carry = nil
+	}
 }
 
 func (r *modelRewriteWriter) Flush() {
@@ -1175,7 +1241,10 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// Deliver any bytes the relay is still holding (e.g. a trailing frame the
 	// backend closed without a blank-line terminator). Regular flush no longer
 	// pushes pending bytes mid-stream (it must not fragment data lines), so the
-	// relay gets an explicit finish at stream end.
+	// relay gets an explicit finish at stream end. The model rewrite runs
+	// upstream of the relay, so flush its held tail first; the relay then
+	// delivers whatever that leaves pending.
+	mrw.Finish()
 	clientW.finish()
 
 	m := mw.metrics()
