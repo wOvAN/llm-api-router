@@ -597,11 +597,18 @@ func FindJSONStringEnd(data []byte, pos int) int {
 	return -1
 }
 
+// truncateBytes returns at most max bytes of b, suffixed with "..." when b is
+// longer. It never mutates b: a plain append(b[:max], ...) would write the
+// dots into b's own backing array (cap(b) >= len(b) > max), clobbering the
+// live response/relay buffer that callers pass in for logging.
 func truncateBytes(b []byte, max int) []byte {
 	if len(b) <= max {
 		return b
 	}
-	return append(b[:max], byte('.')<<0, byte('.')<<0, byte('.')<<0)
+	out := make([]byte, max+3)
+	copy(out, b[:max])
+	out[max], out[max+1], out[max+2] = '.', '.', '.'
+	return out
 }
 
 // replaceJSONModelValue finds and replaces "model" values matching oldModel.

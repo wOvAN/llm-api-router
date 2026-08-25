@@ -78,6 +78,66 @@ func TestModelRewriteAnyValueSurvivesChunkBoundary(t *testing.T) {
 	}
 }
 
+// TestModelRewriteLogTruncationDoesNotCorruptChunk reproduces a production
+// regression: a coalesced upstream read (>256 bytes) that contains the
+// substring "model" (here as a delta value) but no "model":"<oldModel>" pair
+// triggers the debug-log path, which calls truncateBytes(data, 256). The old
+// truncateBytes did append(b[:256], ...), writing "..." into the live buffer
+// past offset 256 — clobbering an item_id the client then failed to parse.
+// The forwarded bytes must be byte-identical to the upstream bytes.
+func TestModelRewriteLogTruncationDoesNotCorruptChunk(t *testing.T) {
+	oldModel := "unsloth/Qwen3.8-27B-GGUF:Q4_K_XL"
+	newModel := "sonnet"
+
+	itemID := "rs_e9YT5vRymLtc3QokD3rKbzUX1dN1cq5S"
+	frame := func(delta string) string {
+		return "event: response.reasoning_text.delta\n" +
+			"data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"" + delta +
+			"\",\"item_id\":\"" + itemID + "\"}\n\n"
+	}
+	chunk := frame("model") + frame("Rew")
+	if len(chunk) <= 256 {
+		t.Fatalf("test chunk must exceed 256 bytes to hit the truncate path, got %d", len(chunk))
+	}
+	// The second frame's item_id must land at/after offset 256 so a mutating
+	// truncate would visibly corrupt it.
+	if idx := strings.Index(chunk[256:], itemID); idx < 0 {
+		t.Fatalf("item_id is not within chunk[256:]; test premise broken")
+	}
+
+	rec := httptest.NewRecorder()
+	relay := newSSERelay(rec, false)
+	mw := newMetricsWriter(relay, time.Now())
+	mrw := newModelRewriteWriter(mw, oldModel, newModel)
+	if _, err := mrw.Write([]byte(chunk)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	mrw.Finish()
+	relay.finish()
+	got := rec.Body.String()
+	if got != chunk {
+		t.Fatalf("forwarded bytes differ from upstream (log truncation mutated the buffer):\n got: %s\nwant: %s", got, chunk)
+	}
+}
+
+// TestTruncateBytesDoesNotMutateInput is the tight guard on the helper itself:
+// the returned prefix must never overwrite the tail of its input slice.
+func TestTruncateBytesDoesNotMutateInput(t *testing.T) {
+	in := make([]byte, 300)
+	for i := range in {
+		in[i] = 'x'
+	}
+	out := truncateBytes(in, 256)
+	if len(out) != 259 || string(out[:256]) != strings.Repeat("x", 256) || string(out[256:]) != "..." {
+		t.Fatalf("unexpected output: len=%d tail=%q", len(out), out[254:])
+	}
+	for i := 256; i < len(in); i++ {
+		if in[i] != 'x' {
+			t.Fatalf("truncateBytes mutated its input at index %d: %q", i, in[i])
+		}
+	}
+}
+
 // TestStreamProxyRewritesModelSplitAcrossReads is the end-to-end guard: a real
 // StreamProxy with a backend that delivers a frame split inside the model name
 // (as a slow backend + TCP segmentation would). The client must see the
