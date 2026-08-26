@@ -198,8 +198,15 @@ func buildMetricsFromData(inputTokens, outputTokens, totalTokens int64, cachedTo
 	}
 
 	if timings != nil {
-		pm.PromptTokens = intToFloat64(timings["prompt_n"])
-		pm.CompletionTokens = intToFloat64(timings["predicted_n"])
+		// Native counts from llama.cpp's `timings` take precedence, but only
+		// when present: a partial timings object must not zero out the
+		// usage-derived token counts.
+		if n := intToFloat64(timings["prompt_n"]); n > 0 {
+			pm.PromptTokens = n
+		}
+		if n := intToFloat64(timings["predicted_n"]); n > 0 {
+			pm.CompletionTokens = n
+		}
 		pm.PromptPerSec = floatToFloat64(timings["prompt_per_second"])
 		pm.TokensPerSec = floatToFloat64(timings["predicted_per_second"])
 		pm.PromptMs = floatToFloat64(timings["prompt_ms"])

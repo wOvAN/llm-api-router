@@ -122,6 +122,25 @@ func TestExtractUsageFromJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("partial timings keep usage tokens", func(t *testing.T) {
+		// A timings object without prompt_n/predicted_n must not zero out the
+		// token counts parsed from usage.
+		body := []byte(`{"usage":{"prompt_tokens":7,"completion_tokens":5,"total_tokens":12},"timings":{"prompt_per_second":250.5,"predicted_per_second":42.25,"prompt_ms":123.4,"predicted_ms":567.8,"cache_n":4}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptTokens != 7 {
+			t.Errorf("PromptTokens = %d, want 7", pm.PromptTokens)
+		}
+		if pm.CompletionTokens != 5 {
+			t.Errorf("CompletionTokens = %d, want 5", pm.CompletionTokens)
+		}
+		if pm.TotalTokens != 12 {
+			t.Errorf("TotalTokens = %d, want 12", pm.TotalTokens)
+		}
+		if pm.CachedTokens != 4 {
+			t.Errorf("CachedTokens = %d, want 4", pm.CachedTokens)
+		}
+	})
+
 	t.Run("no usage data", func(t *testing.T) {
 		body := []byte(`{"content":"hello"}`)
 		pm := extractUsageFromJSON(body)
@@ -896,7 +915,7 @@ func TestMidStreamErrorType(t *testing.T) {
 func TestSendMidStreamError(t *testing.T) {
 	recorder := &testResponseWriter{header: make(http.Header)}
 	err := fmt.Errorf("connection reset by peer")
-	sendMidStreamError(recorder, err)
+	sendMidStreamError(recorder, err, false)
 
 	// Should have written an error event
 	if len(recorder.buf) == 0 {
@@ -910,11 +929,30 @@ func TestSendMidStreamError(t *testing.T) {
 	}
 }
 
+func TestSendMidStreamErrorAnthropic(t *testing.T) {
+	// Anthropic SDKs drop data: frames without a recognized event: type, so a
+	// /messages stream must get the standard `event: error` frame or the client
+	// sees a silently truncated message.
+	recorder := &testResponseWriter{header: make(http.Header)}
+	sendMidStreamError(recorder, fmt.Errorf("boom"), true)
+
+	got := string(recorder.buf)
+	if !strings.Contains(got, "event: error") {
+		t.Errorf("expected 'event: error' line, got: %q", got)
+	}
+	if !strings.Contains(got, `"type":"error"`) || !strings.Contains(got, `"message":"boom"`) {
+		t.Errorf("expected Anthropic error JSON body, got: %q", got)
+	}
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Errorf("event must end with real newlines, got: %q", got)
+	}
+}
+
 func TestSendMidStreamErrorTerminatesEvent(t *testing.T) {
 	// Regression: the event used a raw string, so "\n\n" was sent literally and
 	// clients never saw the SSE event terminator.
 	recorder := &testResponseWriter{header: make(http.Header)}
-	sendMidStreamError(recorder, fmt.Errorf("boom"))
+	sendMidStreamError(recorder, fmt.Errorf("boom"), false)
 
 	got := string(recorder.buf)
 	if !strings.HasSuffix(got, "\n\n") {

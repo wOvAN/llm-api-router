@@ -1230,8 +1230,8 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 				m.BackendModel = mrw.capturedModel
 				return &m, ctx.Err()
 			}
-			// Send error event to the client
-			sendMidStreamError(ld, readErr)
+			// Send error event to the client (protocol-appropriate frame)
+			sendMidStreamError(ld, readErr, strings.Contains(req.URL.Path, "/messages"))
 			m := mw.metrics()
 			m.BackendModel = mrw.capturedModel
 			return &m, &MidStreamError{Err: readErr, Written: m.ResponseSize}
@@ -1260,14 +1260,25 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 }
 
 // sendMidStreamError appends an error event to the ongoing stream to inform
-// the client that the backend disconnected mid-stream.
-func sendMidStreamError(w http.ResponseWriter, err error) {
-	// Real newlines terminate the SSE event; escapeJSONString keeps the message
-	// valid JSON (quotes, backslashes, control chars).
-	errEvent := fmt.Sprintf(
-		"data: {\"choices\":[{\"finish_reason\":\"error\",\"delta\":{\"content\":\"[error: %s]\"}}]}\n\n",
-		escapeJSONString(err.Error()),
-	)
+// the client that the backend disconnected mid-stream. The frame shape is
+// protocol-specific: OpenAI clients parse bare data: frames, but Anthropic
+// SDKs only dispatch frames carrying a recognized event: type and silently
+// drop everything else — a bare data: frame on a /messages stream would leave
+// the client with a truncated message and no error. So for Anthropic streams
+// the standard `event: error` frame is sent, which the SDK turns into an API
+// error. Real newlines terminate the SSE event; escapeJSONString keeps the
+// message valid JSON (quotes, backslashes, control chars).
+func sendMidStreamError(w http.ResponseWriter, err error, anthropic bool) {
+	var errEvent string
+	if anthropic {
+		errEvent = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"" +
+			string(escapeJSONString(err.Error())) + "\"}}\n\n"
+	} else {
+		errEvent = fmt.Sprintf(
+			"data: {\"choices\":[{\"finish_reason\":\"error\",\"delta\":{\"content\":\"[error: %s]\"}}]}\n\n",
+			escapeJSONString(err.Error()),
+		)
+	}
 	_, writeErr := w.Write([]byte(errEvent))
 	if writeErr != nil {
 		log.Errorf("failed to send mid-stream error event to client: %v", writeErr)
