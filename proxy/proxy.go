@@ -189,19 +189,24 @@ var bufPool = sync.Pool{
 
 // ProxyMetrics holds performance data for a proxied request.
 type ProxyMetrics struct {
-	StatusCode       int
-	ErrorBody        string
-	TTFBMs           int64
-	ResponseSize     int64
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	CachedTokens     int
-	PromptMs         float64
-	PredictedMs      float64
-	PromptPerSec     float64
-	TokensPerSec     float64
-	BackendModel     string // model name returned by the backend (before rewriting)
+	StatusCode          int
+	ErrorBody           string
+	TTFBMs              int64
+	ResponseSize        int64
+	PromptTokens        int
+	CompletionTokens    int
+	TotalTokens         int
+	CachedTokens        int
+	ReasoningTokens     int
+	CacheCreationTokens int
+	DraftTokens         int // llama.cpp speculative decoding: draft_n
+	DraftTokensAccepted int // llama.cpp speculative decoding: draft_n_accepted
+	PromptMs            float64
+	PredictedMs         float64
+	PromptPerSec        float64
+	TokensPerSec        float64
+	QueueMs             float64 // vLLM metrics.queue_time_ms
+	BackendModel        string  // model name returned by the backend (before rewriting)
 }
 
 // RouterHeaders are custom response headers injected by the router

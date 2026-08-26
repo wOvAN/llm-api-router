@@ -103,6 +103,8 @@ func (s *Store) updateSummary(key string, m domain.RequestMetric) {
 	if m.CachedTokens >= 0 {
 		sum.TotalCachedTok += m.CachedTokens
 	}
+	sum.TotalReasoningTok += m.ReasoningTokens
+	sum.TotalCacheCreationTok += m.CacheCreationTokens
 
 	if m.PrefillTokPerSec > 0 {
 		sum.AvgPrefillTokSec = (sum.AvgPrefillTokSec*float64(sum.TotalPromptTok-m.PromptTokens) + m.PrefillTokPerSec*float64(m.PromptTokens)) / float64(sum.TotalPromptTok)

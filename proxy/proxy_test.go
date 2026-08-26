@@ -97,7 +97,7 @@ func TestExtractUsageFromJSON(t *testing.T) {
 	})
 
 	t.Run("llama-server timings", func(t *testing.T) {
-		body := []byte(`{"content":"hello","timings":{"prompt_n":5,"predicted_n":15,"prompt_ms":100.0,"predicted_ms":500.0,"prompt_per_second":50.0,"predicted_per_second":30.0,"cache_n":3}}`)
+		body := []byte(`{"content":"hello","timings":{"prompt_n":5,"predicted_n":15,"prompt_ms":100.0,"predicted_ms":500.0,"prompt_per_second":50.0,"predicted_per_second":30.0,"cache_n":3,"draft_n":10,"draft_n_accepted":7}}`)
 		pm := extractUsageFromJSON(body)
 		if pm.PromptTokens != 5 {
 			t.Errorf("PromptTokens = %d, want 5", pm.PromptTokens)
@@ -119,6 +119,9 @@ func TestExtractUsageFromJSON(t *testing.T) {
 		}
 		if pm.TokensPerSec != 30.0 {
 			t.Errorf("TokensPerSec = %f, want 30.0", pm.TokensPerSec)
+		}
+		if pm.DraftTokens != 10 || pm.DraftTokensAccepted != 7 {
+			t.Errorf("draft = %d/%d, want 10/7", pm.DraftTokens, pm.DraftTokensAccepted)
 		}
 	})
 
@@ -178,6 +181,48 @@ func TestExtractUsageFromJSON(t *testing.T) {
 		pm := extractUsageFromJSON(body)
 		if pm.CachedTokens != 9 {
 			t.Errorf("CachedTokens = %d, want 9", pm.CachedTokens)
+		}
+	})
+
+	t.Run("vLLM metrics object", func(t *testing.T) {
+		body := []byte(`{"model":"m","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30},"metrics":{"time_to_first_token_ms":100.5,"generation_time_ms":500.25,"queue_time_ms":7.5,"mean_itl_ms":25.0,"tokens_per_second":39.0}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptTokens != 10 || pm.CompletionTokens != 20 || pm.TotalTokens != 30 {
+			t.Errorf("tokens = (%d,%d,%d), want (10,20,30)", pm.PromptTokens, pm.CompletionTokens, pm.TotalTokens)
+		}
+		if pm.PromptMs != 100.5 {
+			t.Errorf("PromptMs = %f, want 100.5", pm.PromptMs)
+		}
+		if pm.PredictedMs != 500.25 {
+			t.Errorf("PredictedMs = %f, want 500.25", pm.PredictedMs)
+		}
+		if pm.TokensPerSec != 39.0 {
+			t.Errorf("TokensPerSec = %f, want 39.0", pm.TokensPerSec)
+		}
+		if pm.QueueMs != 7.5 {
+			t.Errorf("QueueMs = %f, want 7.5", pm.QueueMs)
+		}
+	})
+
+	t.Run("vLLM metrics with null fields", func(t *testing.T) {
+		body := []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"metrics":{"time_to_first_token_ms":null,"generation_time_ms":null,"queue_time_ms":null,"mean_itl_ms":null,"tokens_per_second":null}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptTokens != 3 || pm.CompletionTokens != 4 {
+			t.Errorf("tokens = (%d,%d), want (3,4)", pm.PromptTokens, pm.CompletionTokens)
+		}
+		if pm.PromptMs != 0 || pm.PredictedMs != 0 || pm.TokensPerSec != 0 || pm.QueueMs != 0 {
+			t.Errorf("native timings should be zero, got (%f,%f,%f,%f)", pm.PromptMs, pm.PredictedMs, pm.TokensPerSec, pm.QueueMs)
+		}
+		if pm.CachedTokens != -1 {
+			t.Errorf("CachedTokens = %d, want -1", pm.CachedTokens)
+		}
+	})
+
+	t.Run("vLLM reasoning and cache creation", func(t *testing.T) {
+		body := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":30,"total_tokens":40,"prompt_tokens_details":{"cached_tokens":6,"created_cache_tokens":2},"completion_tokens_details":{"reasoning_tokens":12}}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.CachedTokens != 6 || pm.CacheCreationTokens != 2 || pm.ReasoningTokens != 12 {
+			t.Errorf("cached/creation/reasoning = (%d,%d,%d), want (6,2,12)", pm.CachedTokens, pm.CacheCreationTokens, pm.ReasoningTokens)
 		}
 	})
 }
@@ -244,6 +289,26 @@ func TestExtractUsageFromStream(t *testing.T) {
 		}
 		if pm.CompletionTokens != 12 {
 			t.Errorf("CompletionTokens = %d, want 12", pm.CompletionTokens)
+		}
+	})
+
+	t.Run("vLLM streaming metrics on final chunk", func(t *testing.T) {
+		// Intermediate chunks serialize "metrics": null; the real object
+		// arrives only on the final chunk alongside usage.
+		body := []byte(
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"metrics\":null}\n" +
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":10,\"completion_tokens_details\":{\"reasoning_tokens\":3}},\"metrics\":{\"time_to_first_token_ms\":12.0,\"generation_time_ms\":100.0,\"queue_time_ms\":2.5,\"mean_itl_ms\":10.0,\"tokens_per_second\":9.5}}\n" +
+				"data: [DONE]\n",
+		)
+		pm := extractUsageFromStream(body)
+		if pm.PromptTokens != 5 || pm.CompletionTokens != 10 {
+			t.Errorf("tokens = (%d,%d), want (5,10)", pm.PromptTokens, pm.CompletionTokens)
+		}
+		if pm.PromptMs != 12.0 || pm.PredictedMs != 100.0 || pm.TokensPerSec != 9.5 || pm.QueueMs != 2.5 {
+			t.Errorf("native timings = (%f,%f,%f,%f)", pm.PromptMs, pm.PredictedMs, pm.TokensPerSec, pm.QueueMs)
+		}
+		if pm.ReasoningTokens != 3 {
+			t.Errorf("ReasoningTokens = %d, want 3", pm.ReasoningTokens)
 		}
 	})
 
@@ -336,43 +401,72 @@ func TestGetField(t *testing.T) {
 
 func TestExtractUsageTokens(t *testing.T) {
 	t.Run("OpenAI format", func(t *testing.T) {
-		input, output, cached := extractUsageTokens(map[string]any{
+		uc := extractUsageTokens(map[string]any{
 			"prompt_tokens":     float64(10),
 			"completion_tokens": float64(20),
 		})
-		if input != 10 || output != 20 || cached != -1 {
-			t.Errorf("got (%d,%d,%d), want (10,20,-1)", input, output, cached)
+		if uc.input != 10 || uc.output != 20 || uc.cached != -1 {
+			t.Errorf("got (%d,%d,%d), want (10,20,-1)", uc.input, uc.output, uc.cached)
 		}
 	})
 
 	t.Run("Anthropic format", func(t *testing.T) {
-		input, output, cached := extractUsageTokens(map[string]any{
+		uc := extractUsageTokens(map[string]any{
 			"input_tokens":  float64(15),
 			"output_tokens": float64(25),
 		})
-		if input != 15 || output != 25 || cached != -1 {
-			t.Errorf("got (%d,%d,%d), want (15,25,-1)", input, output, cached)
+		if uc.input != 15 || uc.output != 25 || uc.cached != -1 {
+			t.Errorf("got (%d,%d,%d), want (15,25,-1)", uc.input, uc.output, uc.cached)
 		}
 	})
 
 	t.Run("nil usage", func(t *testing.T) {
-		input, output, cached := extractUsageTokens(nil)
-		if input != 0 || output != 0 || cached != -1 {
-			t.Errorf("got (%d,%d,%d), want (0,0,-1)", input, output, cached)
+		uc := extractUsageTokens(nil)
+		if uc.input != 0 || uc.output != 0 || uc.cached != -1 {
+			t.Errorf("got (%d,%d,%d), want (0,0,-1)", uc.input, uc.output, uc.cached)
+		}
+	})
+
+	t.Run("vLLM cache creation and reasoning", func(t *testing.T) {
+		uc := extractUsageTokens(map[string]any{
+			"prompt_tokens":     float64(10),
+			"completion_tokens": float64(30),
+			"prompt_tokens_details": map[string]any{
+				"cached_tokens":        float64(6),
+				"created_cache_tokens": float64(2),
+			},
+			"completion_tokens_details": map[string]any{
+				"reasoning_tokens": float64(12),
+			},
+		})
+		if uc.cached != 6 || uc.cacheCreation != 2 || uc.reasoning != 12 {
+			t.Errorf("got cached/creation/reasoning (%d,%d,%d), want (6,2,12)", uc.cached, uc.cacheCreation, uc.reasoning)
+		}
+	})
+
+	t.Run("Anthropic cache_creation_input_tokens", func(t *testing.T) {
+		uc := extractUsageTokens(map[string]any{
+			"input_tokens":                float64(5),
+			"output_tokens":               float64(8),
+			"cache_read_input_tokens":     float64(9),
+			"cache_creation_input_tokens": float64(4),
+		})
+		if uc.cached != 9 || uc.cacheCreation != 4 {
+			t.Errorf("got cached/creation (%d,%d), want (9,4)", uc.cached, uc.cacheCreation)
 		}
 	})
 }
 
 func TestBuildMetricsFromData(t *testing.T) {
 	t.Run("without timings", func(t *testing.T) {
-		pm := buildMetricsFromData(10, 20, 30, 5, nil)
+		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: 5}, 30, nil, nil)
 		if pm.PromptTokens != 10 || pm.CompletionTokens != 20 || pm.TotalTokens != 30 || pm.CachedTokens != 5 {
 			t.Errorf("got tokens (%d,%d,%d,%d)", pm.PromptTokens, pm.CompletionTokens, pm.TotalTokens, pm.CachedTokens)
 		}
 	})
 
 	t.Run("with timings overrides", func(t *testing.T) {
-		pm := buildMetricsFromData(10, 20, 30, -1, map[string]any{
+		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: -1}, 30, map[string]any{
 			"prompt_n":             float64(5),
 			"predicted_n":          float64(15),
 			"prompt_ms":            float64(100),
@@ -380,7 +474,9 @@ func TestBuildMetricsFromData(t *testing.T) {
 			"prompt_per_second":    float64(50),
 			"predicted_per_second": float64(30),
 			"cache_n":              float64(3),
-		})
+			"draft_n":              float64(10),
+			"draft_n_accepted":     float64(7),
+		}, nil)
 		if pm.PromptTokens != 5 {
 			t.Errorf("PromptTokens = %d, want 5", pm.PromptTokens)
 		}
@@ -392,6 +488,34 @@ func TestBuildMetricsFromData(t *testing.T) {
 		}
 		if pm.PromptMs != 100.0 {
 			t.Errorf("PromptMs = %f, want 100.0", pm.PromptMs)
+		}
+		if pm.DraftTokens != 10 || pm.DraftTokensAccepted != 7 {
+			t.Errorf("draft = %d/%d, want 10/7", pm.DraftTokens, pm.DraftTokensAccepted)
+		}
+	})
+
+	t.Run("with vLLM metrics", func(t *testing.T) {
+		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: -1}, 30, nil, map[string]any{
+			"time_to_first_token_ms": float64(100.5),
+			"generation_time_ms":     float64(500.25),
+			"queue_time_ms":          float64(7.5),
+			"mean_itl_ms":            float64(25.0),
+			"tokens_per_second":      float64(39.0),
+		})
+		if pm.PromptTokens != 10 || pm.CompletionTokens != 20 {
+			t.Errorf("tokens = (%d,%d), want (10,20)", pm.PromptTokens, pm.CompletionTokens)
+		}
+		if pm.PromptMs != 100.5 {
+			t.Errorf("PromptMs = %f, want 100.5", pm.PromptMs)
+		}
+		if pm.PredictedMs != 500.25 {
+			t.Errorf("PredictedMs = %f, want 500.25", pm.PredictedMs)
+		}
+		if pm.TokensPerSec != 39.0 {
+			t.Errorf("TokensPerSec = %f, want 39.0", pm.TokensPerSec)
+		}
+		if pm.QueueMs != 7.5 {
+			t.Errorf("QueueMs = %f, want 7.5", pm.QueueMs)
 		}
 	})
 }

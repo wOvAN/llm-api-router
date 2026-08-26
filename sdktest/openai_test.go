@@ -15,7 +15,8 @@ import (
 )
 
 // llama.cpp/vllm responses carry provider-specific extra fields (llama.cpp
-// native `timings`, vLLM `served_model`) that official SDKs must tolerate.
+// native `timings`, vLLM `served_model` and `metrics`) that official SDKs
+// must tolerate.
 const openAIChatJSON = `{
 	"id": "chatcmpl-fake-1",
 	"object": "chat.completion",
@@ -26,7 +27,8 @@ const openAIChatJSON = `{
 	],
 	"usage": {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12},
 	"timings": {"prompt_n": 7, "predicted_n": 5, "prompt_per_second": 250.5, "predicted_per_second": 42.25, "prompt_ms": 123.4, "predicted_ms": 567.8, "cache_n": 4},
-	"served_model": "served-by-vllm"
+	"served_model": "served-by-vllm",
+	"metrics": {"time_to_first_token_ms": 12.5, "generation_time_ms": 100.25, "queue_time_ms": 2.0, "mean_itl_ms": 25.0, "tokens_per_second": 48.0}
 }`
 
 func oaChunk(delta, finishReason string) string {
