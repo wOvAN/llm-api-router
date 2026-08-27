@@ -113,9 +113,14 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <button onclick="loadMetrics()">↻ Refresh</button>
     <button onclick="resetMetrics()" class="danger">Reset</button>
   </div>
-  <h2>Summary by Model / Server</h2>
+  <h2>Summary by Server</h2>
   <table>
-    <thead><tr><th>Group</th><th>Requests</th><th>OK</th><th>Errors</th><th>Fallbacks</th><th>Avg Latency</th><th>Min/Max</th><th>Prefill tok/s</th><th>Decode tok/s</th><th>P Tok</th><th>C Tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Bytes</th></tr></thead>
+    <thead><tr><th>Server</th><th>Requests</th><th>OK</th><th>Errors</th><th>Fallbacks</th><th>Avg Latency</th><th>Min/Max</th><th>Prefill tok/s</th><th>Decode tok/s</th><th>P Tok</th><th>C Tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Bytes</th></tr></thead>
+    <tbody id="server-metrics-body"></tbody>
+  </table>
+  <h2 style="margin-top:20px;">Summary by Model</h2>
+  <table>
+    <thead><tr><th>Model</th><th>Requests</th><th>OK</th><th>Errors</th><th>Fallbacks</th><th>Avg Latency</th><th>Min/Max</th><th>Prefill tok/s</th><th>Decode tok/s</th><th>P Tok</th><th>C Tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Bytes</th></tr></thead>
     <tbody id="metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Summary by Target Model / Server</h2>
@@ -956,7 +961,9 @@ async function loadMetrics() {
       : '<tr><td colspan="15" class="empty">No metrics yet</td></tr>';
   };
   const entries = Object.entries(summaries);
-  renderSummaries('metrics-body', entries.filter(([key]) => !key.startsWith('target:')), (key) => key);
+  renderSummaries('server-metrics-body', entries.filter(([key]) => key.startsWith('server:')),
+    (key) => key.slice(7));
+  renderSummaries('metrics-body', entries.filter(([key]) => !key.startsWith('server:') && !key.startsWith('target:')), (key) => key);
   // target keys are "target:<server>:<model>" — server first, so the split
   // stays unambiguous even for model names containing ':' (qwen3:32b)
   renderSummaries('target-metrics-body', entries.filter(([key]) => key.startsWith('target:')),
