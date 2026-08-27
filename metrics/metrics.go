@@ -67,6 +67,12 @@ func (s *Store) Add(m domain.RequestMetric) {
 
 	s.updateSummary(m.Model, m)
 	s.updateSummary("server:"+m.ServerID, m)
+	// Empty target (pass-through rule) means the target is the incoming model.
+	target := m.TargetModel
+	if target == "" {
+		target = m.Model
+	}
+	s.updateSummary("target:"+target, m)
 }
 
 func (s *Store) updateSummary(key string, m domain.RequestMetric) {

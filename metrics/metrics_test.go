@@ -201,6 +201,22 @@ func TestSummariesFallbackCount(t *testing.T) {
 	}
 }
 
+func TestSummariesTargetModel(t *testing.T) {
+	s := New(100)
+	s.Add(domain.RequestMetric{Model: "gpt-4", TargetModel: "gpt-4o", ServerID: "s1", StatusCode: 200})
+	// Empty target (pass-through rule) falls back to the incoming model.
+	s.Add(domain.RequestMetric{Model: "gpt-4", ServerID: "s1", StatusCode: 200})
+
+	summaries := s.Summaries()
+
+	if sum := summaries["target:gpt-4o"]; sum.TotalRequests != 1 {
+		t.Errorf("target:gpt-4o TotalRequests = %d, want 1", sum.TotalRequests)
+	}
+	if sum := summaries["target:gpt-4"]; sum.TotalRequests != 1 {
+		t.Errorf("target:gpt-4 TotalRequests = %d, want 1", sum.TotalRequests)
+	}
+}
+
 func TestSummariesNegativeCachedTokens(t *testing.T) {
 	s := New(100)
 	s.Add(domain.RequestMetric{Model: "gpt-4", ServerID: "s1", StatusCode: 200, CachedTokens: -1})

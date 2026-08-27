@@ -118,6 +118,11 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <thead><tr><th>Group</th><th>Requests</th><th>OK</th><th>Errors</th><th>Fallbacks</th><th>Avg Latency</th><th>Min/Max</th><th>Prefill tok/s</th><th>Decode tok/s</th><th>P Tok</th><th>C Tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Bytes</th></tr></thead>
     <tbody id="metrics-body"></tbody>
   </table>
+  <h2 style="margin-top:20px;">Summary by Target Model</h2>
+  <table>
+    <thead><tr><th>Target Model</th><th>Requests</th><th>OK</th><th>Errors</th><th>Fallbacks</th><th>Avg Latency</th><th>Min/Max</th><th>Prefill tok/s</th><th>Decode tok/s</th><th>P Tok</th><th>C Tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Bytes</th></tr></thead>
+    <tbody id="target-metrics-body"></tbody>
+  </table>
   <h2 style="margin-top:20px;">Recent Requests</h2>
   <table>
     <thead><tr><th>Time</th><th>Model</th><th>Target</th><th>Server</th><th>API</th><th>Status</th><th>Latency</th><th>Prefill</th><th>Decode</th><th>P tok/s</th><th>D tok/s</th><th>P tok</th><th>D tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Size</th><th>Fallback</th><th>Client</th></tr></thead>
@@ -906,6 +911,36 @@ document.getElementById('rule-target-inp').addEventListener('focusout', function
 });
 
 // --- Metrics ---
+function summaryRow(key, s) {
+  const avgLat = s.avg_latency_ms ? s.avg_latency_ms.toFixed(0) + 'ms' : '-';
+  const minMax = (s.min_latency_ms || s.max_latency_ms) ? s.min_latency_ms + 'ms / ' + s.max_latency_ms + 'ms' : '-';
+  const prefill = s.avg_prefill_tok_per_sec ? s.avg_prefill_tok_per_sec.toFixed(1) : '-';
+  const decode = s.avg_decode_tok_per_sec ? s.avg_decode_tok_per_sec.toFixed(1) : '-';
+  const promptTok = s.total_prompt_tokens || '-';
+  const completeTok = s.total_completion_tokens || '-';
+  const cachedTok = s.total_cached_tokens >= 0 ? s.total_cached_tokens : '-';
+  const reasoningTok = s.total_reasoning_tokens || '-';
+  const cacheNewTok = s.total_cache_creation_tokens || '-';
+  const bytes = s.total_bytes ? formatBytes(s.total_bytes) : '-';
+  return `<tr>
+    <td><strong>${esc(key)}</strong></td>
+    <td>${s.total_requests}</td>
+    <td style="color:#3fb950">${s.success_count}</td>
+    <td style="color:#f85149">${s.error_count}</td>
+    <td>${s.fallback_count}</td>
+    <td>${avgLat}</td>
+    <td>${minMax}</td>
+    <td>${prefill}</td>
+    <td>${decode}</td>
+    <td>${promptTok}</td>
+    <td>${completeTok}</td>
+    <td>${cachedTok}</td>
+    <td>${reasoningTok}</td>
+    <td>${cacheNewTok}</td>
+    <td>${bytes}</td>
+  </tr>`;
+}
+
 async function loadMetrics() {
   // Load summaries
   const res = await fetch(API + '/metrics');
@@ -914,37 +949,15 @@ async function loadMetrics() {
   const active = data.active_requests || 0;
   const activeEl = document.getElementById('active-requests');
   if (activeEl) activeEl.textContent = 'Active: ' + active;
-  const tbody = document.getElementById('metrics-body');
-  if (!Object.keys(summaries).length) { tbody.innerHTML = '<tr><td colspan="15" class="empty">No metrics yet</td></tr>'; }
-  tbody.innerHTML = Object.entries(summaries).map(([key, s]) => {
-    const avgLat = s.avg_latency_ms ? s.avg_latency_ms.toFixed(0) + 'ms' : '-';
-    const minMax = (s.min_latency_ms || s.max_latency_ms) ? s.min_latency_ms + 'ms / ' + s.max_latency_ms + 'ms' : '-';
-    const prefill = s.avg_prefill_tok_per_sec ? s.avg_prefill_tok_per_sec.toFixed(1) : '-';
-    const decode = s.avg_decode_tok_per_sec ? s.avg_decode_tok_per_sec.toFixed(1) : '-';
-    const promptTok = s.total_prompt_tokens || '-';
-    const completeTok = s.total_completion_tokens || '-';
-    const cachedTok = s.total_cached_tokens >= 0 ? s.total_cached_tokens : '-';
-    const reasoningTok = s.total_reasoning_tokens || '-';
-    const cacheNewTok = s.total_cache_creation_tokens || '-';
-    const bytes = s.total_bytes ? formatBytes(s.total_bytes) : '-';
-    return `<tr>
-      <td><strong>${esc(key)}</strong></td>
-      <td>${s.total_requests}</td>
-      <td style="color:#3fb950">${s.success_count}</td>
-      <td style="color:#f85149">${s.error_count}</td>
-      <td>${s.fallback_count}</td>
-      <td>${avgLat}</td>
-      <td>${minMax}</td>
-      <td>${prefill}</td>
-      <td>${decode}</td>
-      <td>${promptTok}</td>
-      <td>${completeTok}</td>
-      <td>${cachedTok}</td>
-      <td>${reasoningTok}</td>
-      <td>${cacheNewTok}</td>
-      <td>${bytes}</td>
-    </tr>`;
-  }).join('');
+  const renderSummaries = (tbodyId, entries, prefix) => {
+    const tbody = document.getElementById(tbodyId);
+    tbody.innerHTML = entries.length
+      ? entries.map(([key, s]) => summaryRow(prefix ? key.slice(prefix.length) : key, s)).join('')
+      : '<tr><td colspan="15" class="empty">No metrics yet</td></tr>';
+  };
+  const entries = Object.entries(summaries);
+  renderSummaries('metrics-body', entries.filter(([key]) => !key.startsWith('target:')), '');
+  renderSummaries('target-metrics-body', entries.filter(([key]) => key.startsWith('target:')), 'target:');
 
   // Load recent requests
   const res2 = await fetch(API + '/metrics/recent');
