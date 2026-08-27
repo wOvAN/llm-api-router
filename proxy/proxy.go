@@ -401,14 +401,17 @@ func newModelRewriteWriter(mw *metricsWriter, oldModel, newModel string) *modelR
 // pendingModelHold returns the number of trailing bytes of b that could still
 // complete into a `"model":"<value>"` match once the next read arrives. It is
 // len(b)-k, where k is the last `"model"` key whose value is not a closed
-// string; 0 when every model value is already closed (the common case — a
-// fully-formed frame), in which case nothing is held and no per-chunk latency
-// is added.
+// string; when every model value is already closed it degrades to the longest
+// trailing partial key (a lone quote up to `"model` — a key split across the
+// boundary), which is at most 6 bytes; 0 for the common case (a fully-formed
+// frame with no split key), in which case nothing is held and no per-chunk
+// latency is added.
 func pendingModelHold(b []byte) int {
+	orig := b
 	for {
 		keyIdx := bytes.LastIndex(b, []byte(`"model"`))
 		if keyIdx < 0 {
-			return 0
+			break
 		}
 		endOfKey := keyIdx + len(`"model"`)
 		// A longer key like "model_id" is not a model field — ignore and look earlier.
@@ -430,8 +433,20 @@ func pendingModelHold(b []byte) int {
 		if FindJSONStringEnd(b, valueStart+1) < 0 {
 			return len(b) - keyIdx // value string open at chunk end
 		}
-		return 0 // last model value is closed; no earlier one can be split
+		break // last model value is closed; no earlier one can be split
 	}
+	// No open model value: the "model" key itself may straddle the boundary.
+	// A trailing partial key (a lone quote up to `"model`) would be forwarded
+	// now and the completed key would never match in the next buffer — its
+	// opening quote is already on the wire — leaving the value un-rewritten.
+	// Checked on orig: the loop's b may be truncated past a bogus key.
+	const modelKey = `"model"`
+	for l := len(modelKey) - 1; l >= 1; l-- {
+		if bytes.HasSuffix(orig, []byte(modelKey[:l])) {
+			return l
+		}
+	}
+	return 0
 }
 
 func (r *modelRewriteWriter) Write(data []byte) (int, error) {
@@ -506,25 +521,28 @@ func rewriteModelInResponse(data []byte, oldModel, newModel string) ([]byte, str
 // replaceAnyModelValue replaces any "model":"X" with "model":"newModel".
 // Used when oldModel == newModel but the backend returns its actual model name.
 // Returns the rewritten data and the first captured backend model name.
+// `scan` walks forward looking for keys; `start` marks the unappended tail and
+// only advances at a real match, so skipped keys never drop bytes.
 func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 	key := []byte(`"model"`)
 	var result []byte
 	var captured string
 	start := 0
+	scan := 0
 	escaped := escapeJSONString(newModel)
 	replacements := 0
 
 	for {
-		keyIdx := bytes.Index(data[start:], key)
+		keyIdx := bytes.Index(data[scan:], key)
 		if keyIdx < 0 {
 			break
 		}
-		absKeyIdx := start + keyIdx
+		absKeyIdx := scan + keyIdx
 		endOfKey := absKeyIdx + len(key)
 
 		// Skip if it's a longer key like "model_id"
 		if endOfKey < len(data) && IsJSONNameChar(data[endOfKey]) {
-			start = endOfKey
+			scan = endOfKey
 			continue
 		}
 
@@ -540,7 +558,7 @@ func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 			valueStart++
 		}
 		if valueStart >= len(data) || data[valueStart] != '"' {
-			start = valueStart
+			scan = valueStart
 			continue
 		}
 
@@ -548,7 +566,7 @@ func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 		strStart := valueStart + 1
 		strEnd := FindJSONStringEnd(data, strStart)
 		if strEnd < 0 {
-			start = valueStart
+			scan = valueStart
 			continue
 		}
 		// strEnd points to the closing quote
@@ -556,7 +574,7 @@ func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 
 		// Skip if already the target model
 		if bytes.Equal(currentValue, escaped) {
-			start = strEnd + 1
+			scan = strEnd + 1
 			continue
 		}
 
@@ -574,6 +592,7 @@ func replaceAnyModelValue(data []byte, newModel string) ([]byte, string) {
 		result = append(result, escaped...)
 		result = append(result, '"')
 		start = strEnd + 1
+		scan = start
 		replacements++
 	}
 
@@ -617,23 +636,27 @@ func truncateBytes(b []byte, max int) []byte {
 }
 
 // replaceJSONModelValue finds and replaces "model" values matching oldModel.
+// Two cursors: `scan` walks forward looking for keys, `start` marks the
+// unappended tail — it only advances at a real match, so skipped (non-matching
+// or boundary-truncated) keys can never drop the bytes between matches.
 func replaceJSONModelValue(data []byte, oldModel, newModel string) ([]byte, int) {
 	key := []byte(`"model"`)
 	replacements := 0
 	var result []byte
 	start := 0
+	scan := 0
 
 	for {
-		keyIdx := bytes.Index(data[start:], key)
+		keyIdx := bytes.Index(data[scan:], key)
 		if keyIdx < 0 {
 			break
 		}
-		absKeyIdx := start + keyIdx
+		absKeyIdx := scan + keyIdx
 		endOfKey := absKeyIdx + len(key)
 
 		// Verify it's the exact key
 		if endOfKey < len(data) && IsJSONNameChar(data[endOfKey]) {
-			start = endOfKey
+			scan = endOfKey
 			continue
 		}
 
@@ -649,7 +672,7 @@ func replaceJSONModelValue(data []byte, oldModel, newModel string) ([]byte, int)
 			valueStart++
 		}
 		if valueStart >= len(data) || data[valueStart] != '"' {
-			start = valueStart
+			scan = valueStart
 			continue
 		}
 
@@ -662,7 +685,7 @@ func replaceJSONModelValue(data []byte, oldModel, newModel string) ([]byte, int)
 			break
 		}
 		if !bytes.Equal(data[valueStart:valueStart+len(pattern)], pattern) {
-			start = valueStart + 1
+			scan = valueStart + 1
 			continue
 		}
 
@@ -675,6 +698,7 @@ func replaceJSONModelValue(data []byte, oldModel, newModel string) ([]byte, int)
 		result = append(result, escapeJSONString(newModel)...)
 		result = append(result, '"')
 		start = valueStart + len(pattern)
+		scan = start
 		replacements++
 	}
 
