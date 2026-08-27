@@ -115,17 +115,17 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   </div>
   <h2>Summary by Server</h2>
   <table>
-    <thead><tr><th>Server</th><th>Requests</th><th>OK</th><th>Errors</th><th>Fallbacks</th><th>Avg Latency</th><th>Min/Max</th><th>Prefill tok/s</th><th>Decode tok/s</th><th>P Tok</th><th>C Tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-server" data-col="name">Server</th><th class="sortable" data-table="sum-server" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-server" data-col="success_count">OK</th><th class="sortable" data-table="sum-server" data-col="error_count">Errors</th><th class="sortable" data-table="sum-server" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-server" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-server" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-server" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-server" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-server" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-server" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-server" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-server" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-server" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-server" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="server-metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Summary by Model</h2>
   <table>
-    <thead><tr><th>Model</th><th>Requests</th><th>OK</th><th>Errors</th><th>Fallbacks</th><th>Avg Latency</th><th>Min/Max</th><th>Prefill tok/s</th><th>Decode tok/s</th><th>P Tok</th><th>C Tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-model" data-col="name">Model</th><th class="sortable" data-table="sum-model" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-model" data-col="success_count">OK</th><th class="sortable" data-table="sum-model" data-col="error_count">Errors</th><th class="sortable" data-table="sum-model" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-model" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-model" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-model" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-model" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-model" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-model" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-model" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-model" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-model" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-model" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Summary by Target Model / Server</h2>
   <table>
-    <thead><tr><th>Target Model / Server</th><th>Requests</th><th>OK</th><th>Errors</th><th>Fallbacks</th><th>Avg Latency</th><th>Min/Max</th><th>Prefill tok/s</th><th>Decode tok/s</th><th>P Tok</th><th>C Tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-target" data-col="name">Target Model / Server</th><th class="sortable" data-table="sum-target" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-target" data-col="success_count">OK</th><th class="sortable" data-table="sum-target" data-col="error_count">Errors</th><th class="sortable" data-table="sum-target" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-target" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-target" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-target" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-target" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-target" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-target" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-target" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-target" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-target" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-target" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="target-metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Recent Requests</h2>
@@ -217,7 +217,7 @@ function getCookie(name) {
 }
 
 // --- Sort State ---
-const sortState = { servers: {}, rules: {} };
+const sortState = { servers: {}, rules: {}, 'sum-server': {}, 'sum-model': {}, 'sum-target': {} };
 function sortKey(table, col) { return 'sort_' + table + '_' + col; }
 function loadSort(table, col) {
   const dir = getCookie(sortKey(table, col));
@@ -267,7 +267,8 @@ function sortData(data, col, dir) {
     else if (col === 'incoming_models') { va = (a.incoming_models || []).join(','); vb = (b.incoming_models || []).join(','); }
     else if (col === 'target_model') { va = a.target_model; vb = b.target_model; }
     else if (col === 'server_id') { va = a.server_id; vb = b.server_id; }
-    else return 0;
+    else if (col === 'min_max') { va = a.min_latency_ms; vb = b.min_latency_ms; }
+    else { va = a[col]; vb = b[col]; } // summary rows: flat summary JSON fields
     return sortCompare(va, vb) * (dir === 'desc' ? -1 : 1);
   });
 }
@@ -852,9 +853,13 @@ function getServersFromDropdown() {
 // --- Init ---
 // Restore sort state from cookies
 function restoreSortState() {
+  const summaryCols = ['name', 'total_requests', 'success_count', 'error_count', 'fallback_count', 'avg_latency_ms', 'min_max', 'avg_prefill_tok_per_sec', 'avg_decode_tok_per_sec', 'total_prompt_tokens', 'total_completion_tokens', 'total_cached_tokens', 'total_reasoning_tokens', 'total_cache_creation_tokens', 'total_bytes'];
   const tables = {
     servers: ['id', 'name', 'url', 'api_types'],
     rules: ['idx', 'enabled', 'incoming_models', 'target_model', 'server_id'],
+    'sum-server': summaryCols,
+    'sum-model': summaryCols,
+    'sum-target': summaryCols,
   };
   for (const [table, cols] of Object.entries(tables)) {
     for (const col of cols) {
@@ -894,6 +899,7 @@ document.addEventListener('click', function(e) {
   th.parentElement.querySelectorAll('th.sortable').forEach(h => h.classList.remove('asc', 'desc'));
   th.classList.add(sortState[table][col]);
   if (table === 'servers') loadServers();
+  else if (table.startsWith('sum-')) loadMetrics();
   else loadRules();
 });
 
@@ -954,19 +960,23 @@ async function loadMetrics() {
   const active = data.active_requests || 0;
   const activeEl = document.getElementById('active-requests');
   if (activeEl) activeEl.textContent = 'Active: ' + active;
-  const renderSummaries = (tbodyId, rows, label) => {
+  const renderSummaries = (tbodyId, table, rows, label) => {
+    let data = rows.map(([key, s]) => ({ name: label(key), ...s }));
+    for (const [col, dir] of Object.entries(sortState[table])) {
+      data = sortData(data, col, dir);
+    }
     const tbody = document.getElementById(tbodyId);
-    tbody.innerHTML = rows.length
-      ? rows.map(([key, s]) => summaryRow(label(key), s)).join('')
+    tbody.innerHTML = data.length
+      ? data.map(r => summaryRow(r.name, r)).join('')
       : '<tr><td colspan="15" class="empty">No metrics yet</td></tr>';
   };
   const entries = Object.entries(summaries);
-  renderSummaries('server-metrics-body', entries.filter(([key]) => key.startsWith('server:')),
+  renderSummaries('server-metrics-body', 'sum-server', entries.filter(([key]) => key.startsWith('server:')),
     (key) => key.slice(7));
-  renderSummaries('metrics-body', entries.filter(([key]) => !key.startsWith('server:') && !key.startsWith('target:')), (key) => key);
+  renderSummaries('metrics-body', 'sum-model', entries.filter(([key]) => !key.startsWith('server:') && !key.startsWith('target:')), (key) => key);
   // target keys are "target:<server>:<model>" — server first, so the split
   // stays unambiguous even for model names containing ':' (qwen3:32b)
-  renderSummaries('target-metrics-body', entries.filter(([key]) => key.startsWith('target:')),
+  renderSummaries('target-metrics-body', 'sum-target', entries.filter(([key]) => key.startsWith('target:')),
     (key) => {
       key = key.slice(7);
       const i = key.indexOf(':');
