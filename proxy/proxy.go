@@ -47,6 +47,39 @@ var upstreamTransport = &http.Transport{
 // upstreamClient is the shared HTTP client for all upstream requests.
 var upstreamClient = &http.Client{Transport: upstreamTransport}
 
+// proxyTransports caches one transport per proxy URL ("" = direct), so
+// connections to a proxy are pooled and reused across requests. Building a
+// transport per request would reopen a TCP+TLS connection to the proxy every time.
+var proxyTransports sync.Map // proxy URL -> *http.Transport
+
+// TransportFor returns the transport for requests that go through proxyURL
+// ("" = direct connection). The proxy URL may omit the scheme (http assumed)
+// and embed credentials (http://user:pass@host:port). Transport is per proxy,
+// not per server: servers sharing a proxy share its connection pool.
+func TransportFor(proxyURL string) (http.RoundTripper, error) {
+	if proxyURL == "" {
+		return upstreamTransport, nil
+	}
+	raw := proxyURL
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("invalid proxy URL %q", proxyURL)
+	}
+	// Cached per normalized URL, so proxies differing only in spelling share
+	// one connection pool.
+	if cached, ok := proxyTransports.Load(u.String()); ok {
+		return cached.(*http.Transport), nil
+	}
+	tr := upstreamTransport.Clone()
+	tr.Proxy = http.ProxyURL(u)
+	// Benign race: concurrent misses may build equivalent transports, last store wins.
+	proxyTransports.Store(u.String(), tr)
+	return tr, nil
+}
+
 // KeepAliveIdle is the upstream-silence threshold after which StreamProxy
 // injects a heartbeat frame into an SSE client stream. Long inference pauses
 // (backend thinking between tokens, batched serving) otherwise trip client-side
@@ -227,6 +260,9 @@ type RouterHeaders struct {
 	// heartbeat interval. A per-request X-Router-KeepAlive header still
 	// overrides it; zero falls back to the global proxy.KeepAliveIdle.
 	KeepAliveIdle time.Duration
+	// Proxy is the server's HTTP proxy URL for the protocol of this attempt
+	// ("" = direct connection). Not a client-visible header.
+	Proxy string
 }
 
 // SetRouterHeaders sets eager headers (server info) on the given ResponseWriter.
@@ -1010,7 +1046,8 @@ func looksLikeStreamFrameBody(body []byte) bool {
 // If originalModel is non-empty and differs from targetModel, the "model" field
 // in the response is rewritten from targetModel back to originalModel so the
 // client sees its own model name.
-// If rh is non-nil, X-Router-* headers are injected into the response.
+// If rh is non-nil, X-Router-* headers are injected into the response and
+// rh.Proxy (when set) routes the upstream request through that HTTP proxy.
 // If strip is true, injected stream-usage artifacts (empty-choice SSE
 // frames appended by upstreams that received stream_options.include_usage) are
 // filtered from the client stream while still being captured in metrics.
@@ -1131,8 +1168,22 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	proxyReq.GetBody = nil
 	proxyReq.RequestURI = "" // Must be empty for client requests (Clone preserves the server-side value)
 
-	// Execute the upstream request (shared client with connection pooling)
-	upstreamResp, err := upstreamClient.Do(proxyReq)
+	// Execute the upstream request (shared client with connection pooling, or a
+	// per-proxy client when the server configures one for this protocol).
+	client := upstreamClient
+	if rh != nil && rh.Proxy != "" {
+		transport, transportErr := TransportFor(rh.Proxy)
+		if transportErr != nil {
+			return nil, transportErr
+		}
+		client = &http.Client{Transport: transport}
+		// Through a proxy, net/http builds the absolute-form request line from
+		// req.Host when it is set — and it is set here, inherited from the
+		// client's Host header by req.Clone. Left alone, the proxy would be
+		// asked for the client's host instead of the configured backend.
+		proxyReq.Host = ""
+	}
+	upstreamResp, err := client.Do(proxyReq)
 	if err != nil {
 		// Pre-response error — no headers written to client yet.
 		// Fallback is possible.

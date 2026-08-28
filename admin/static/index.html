@@ -145,6 +145,9 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <label><span>URL (базовый для всех протоколов)</span><input id="server-url" type="text" placeholder="e.g. api.openai.com/v1"></label>
     <label><span>OpenAI URL (опционально, если отличается)</span><input id="server-openai-url" type="text" placeholder="оставьте пустым если = базовому"></label>
     <label><span>Anthropic URL (опционально)</span><input id="server-anthropic-url" type="text" placeholder="оставьте пустым если = базовому"></label>
+    <label><span>Proxy (базовый, напр. http://127.0.0.1:3128)</span><input id="server-proxy" type="text" placeholder="пусто = без прокси"></label>
+    <label><span>OpenAI Proxy (опционально)</span><input id="server-openai-proxy" type="text" placeholder="оставьте пустым если = базовому"></label>
+    <label><span>Anthropic Proxy (опционально)</span><input id="server-anthropic-proxy" type="text" placeholder="оставьте пустым если = базовому"></label>
     <label><span>API Types (поддерживаемые протоколы)</span>
       <label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;"><input type="checkbox" id="server-api-type-openai" checked style="width:auto;"> OpenAI</label>
       <label style="display:inline-flex;align-items:center;gap:4px;"><input type="checkbox" id="server-api-type-anthropic" checked style="width:auto;"> Anthropic</label>
@@ -339,6 +342,9 @@ function openServerModal(id) {
   document.getElementById('server-api-type-anthropic').checked = false;
   document.getElementById('server-openai-url').value = '';
   document.getElementById('server-anthropic-url').value = '';
+  document.getElementById('server-proxy').value = '';
+  document.getElementById('server-openai-proxy').value = '';
+  document.getElementById('server-anthropic-proxy').value = '';
   document.getElementById('server-api-key').value = '';
   document.getElementById('server-id').disabled = !!id;
   document.getElementById('server-modal').classList.add('open');
@@ -353,6 +359,9 @@ async function testServerConnection() {
     url: document.getElementById('server-url').value,
     openai_url: document.getElementById('server-openai-url').value,
     anthropic_url: document.getElementById('server-anthropic-url').value,
+    proxy: document.getElementById('server-proxy').value,
+    openai_proxy: document.getElementById('server-openai-proxy').value,
+    anthropic_proxy: document.getElementById('server-anthropic-proxy').value,
     api_types: getServerAPITypes(),
     api_key: document.getElementById('server-api-key').value,
   };
@@ -393,6 +402,9 @@ async function saveServer() {
     url: document.getElementById('server-url').value,
     openai_url: document.getElementById('server-openai-url').value,
     anthropic_url: document.getElementById('server-anthropic-url').value,
+    proxy: document.getElementById('server-proxy').value,
+    openai_proxy: document.getElementById('server-openai-proxy').value,
+    anthropic_proxy: document.getElementById('server-anthropic-proxy').value,
     api_types: getServerAPITypes(),
     api_key: document.getElementById('server-api-key').value,
     cooldown_time: parseInt(document.getElementById('server-cooldown').value, 10) || 0,
@@ -424,6 +436,9 @@ async function editServer(id) {
   document.getElementById('server-api-type-anthropic').checked = (s.api_types || []).includes('anthropic');
   document.getElementById('server-openai-url').value = s.openai_url || '';
   document.getElementById('server-anthropic-url').value = s.anthropic_url || '';
+  document.getElementById('server-proxy').value = s.proxy || '';
+  document.getElementById('server-openai-proxy').value = s.openai_proxy || '';
+  document.getElementById('server-anthropic-proxy').value = s.anthropic_proxy || '';
   document.getElementById('server-api-key').value = s.api_key;
   document.getElementById('server-cooldown').value = s.cooldown_time || 0;
   document.getElementById('server-tpm').value = s.tpm_limit || 0;

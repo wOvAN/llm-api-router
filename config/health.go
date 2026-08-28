@@ -10,6 +10,7 @@ import (
 
 	"llm-api-router/domain"
 	"llm-api-router/pkg/log"
+	"llm-api-router/proxy"
 )
 
 // HealthTracker tracks server health status with a background checker.
@@ -103,11 +104,18 @@ func (t *HealthTracker) checkServer(srv *domain.Server) bool {
 		log.Debugf("[health] %s: failed to create probe request: %v", srv.Name, err)
 		return false
 	}
+	// Probe through the server's configured proxy (same one real OpenAI traffic
+	// uses) — a server only reachable via proxy must not be marked unhealthy.
+	transport, err := proxy.TransportFor(srv.GetProxyForAPIType(domain.APITypeOpenAI))
+	if err != nil {
+		log.Warnf("[health] %s: %v", srv.Name, err)
+		return false
+	}
 	if srv.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+srv.APIKey)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Transport: transport}).Do(req)
 	if err != nil {
 		log.Debugf("[health] %s: probe failed: %v", srv.Name, err)
 		return false

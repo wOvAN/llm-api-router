@@ -193,15 +193,9 @@ func (s *Store) AddServer(srv *domain.Server) error {
 	}
 	apis := make([]domain.APIType, len(srv.APITypes))
 	copy(apis, srv.APITypes)
-	s.config.Servers[srv.ID] = &domain.Server{
-		ID:           srv.ID,
-		Name:         srv.Name,
-		URL:          srv.URL,
-		OpenAIURL:    srv.OpenAIURL,
-		AnthropicURL: srv.AnthropicURL,
-		APIKey:       srv.APIKey,
-		APITypes:     apis,
-	}
+	added := *srv
+	added.APITypes = apis
+	s.config.Servers[srv.ID] = &added
 	return s.save()
 }
 
@@ -215,15 +209,10 @@ func (s *Store) UpdateServer(id string, srv *domain.Server) error {
 	}
 	apis := make([]domain.APIType, len(srv.APITypes))
 	copy(apis, srv.APITypes)
-	s.config.Servers[id] = &domain.Server{
-		ID:           id,
-		Name:         srv.Name,
-		URL:          srv.URL,
-		OpenAIURL:    srv.OpenAIURL,
-		AnthropicURL: srv.AnthropicURL,
-		APIKey:       srv.APIKey,
-		APITypes:     apis,
-	}
+	updated := *srv
+	updated.ID = id
+	updated.APITypes = apis
+	s.config.Servers[id] = &updated
 	return s.save()
 }
 

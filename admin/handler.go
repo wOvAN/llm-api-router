@@ -13,7 +13,18 @@ import (
 	"llm-api-router/domain"
 	"llm-api-router/metrics"
 	"llm-api-router/pkg/log"
+	"llm-api-router/proxy"
 )
+
+// probeClient returns the client used to reach a server's /v1/models probe,
+// routed through the proxy configured for the server's OpenAI protocol.
+func probeClient(srv *domain.Server) (*http.Client, error) {
+	transport, err := proxy.TransportFor(srv.GetProxyForAPIType(domain.APITypeOpenAI))
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Transport: transport, Timeout: 10 * time.Second}, nil
+}
 
 // Handler serves the admin API for managing servers and routing rules.
 type Handler struct {
@@ -169,7 +180,11 @@ func (h *Handler) getServerModels(w http.ResponseWriter, req *http.Request, id s
 		proxyReq.Header.Set("Authorization", "Bearer "+srv.APIKey)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client, err := probeClient(srv)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "failed to reach server: "+err.Error())
@@ -232,7 +247,14 @@ func (h *Handler) testServer(w http.ResponseWriter, req *http.Request) {
 		testReq.Header.Set("Authorization", "Bearer "+srv.APIKey)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client, err := probeClient(&srv)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      false,
+			"message": err.Error(),
+		})
+		return
+	}
 	start := time.Now()
 	resp, err := client.Do(testReq)
 	elapsed := time.Since(start)

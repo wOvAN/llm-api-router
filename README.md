@@ -103,6 +103,7 @@ The config is stored in `config.json` (path configurable via `CONFIG_FILE`). You
 - Legacy top-level `rules` arrays auto-migrate to a single `default` profile on load (the file is rewritten in the new shape on the next save)
 - `api_types` accepts `"openai"` and/or `"anthropic"` per server; legacy `api_type` (string) is auto-migrated to array on load
 - Each server can specify `openai_url` / `anthropic_url` overrides; falls back to base `url`
+- Each server can route through an HTTP proxy: `proxy` (all protocols) with `openai_proxy` / `anthropic_proxy` per-protocol overrides (empty = direct connection; `http`/`https` proxies only)
 - Base URL paths are deduplicated (e.g. `api.openai.com/v1` + `/v1/chat/completions` → `api.openai.com/v1/chat/completions`)
 - Rules are matched by first match on `incoming_models`; disabled rules (`"enabled": false`) are silently skipped
 - Fallback `target_model` empty → inherits the rule's primary `TargetModel`

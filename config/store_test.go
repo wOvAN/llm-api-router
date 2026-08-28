@@ -693,3 +693,25 @@ func newEmptyStore(t *testing.T) *Store {
 	}
 	return s
 }
+
+func TestServerGetProxyForAPIType(t *testing.T) {
+	tests := []struct {
+		name    string
+		server  domain.Server
+		apiType domain.APIType
+		want    string
+	}{
+		{name: "no proxy means direct", server: domain.Server{}, apiType: domain.APITypeOpenAI, want: ""},
+		{name: "base proxy applies to both", server: domain.Server{Proxy: "http://base:3128"}, apiType: domain.APITypeAnthropic, want: "http://base:3128"},
+		{name: "openai override", server: domain.Server{Proxy: "http://base:3128", OpenAIProxy: "http://oai:3128"}, apiType: domain.APITypeOpenAI, want: "http://oai:3128"},
+		{name: "anthropic override", server: domain.Server{Proxy: "http://base:3128", AnthropicProxy: "http://ant:3128"}, apiType: domain.APITypeAnthropic, want: "http://ant:3128"},
+		{name: "unrelated override falls back to base", server: domain.Server{Proxy: "http://base:3128", OpenAIProxy: "http://oai:3128"}, apiType: domain.APITypeAnthropic, want: "http://base:3128"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.server.GetProxyForAPIType(tt.apiType); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

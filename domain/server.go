@@ -12,13 +12,18 @@ const (
 
 // Server defines an LLM inference backend.
 type Server struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	URL          string    `json:"url"`
-	OpenAIURL    string    `json:"openai_url,omitempty"`
-	AnthropicURL string    `json:"anthropic_url,omitempty"`
-	APIKey       string    `json:"api_key"`
-	APITypes     []APIType `json:"api_types"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	OpenAIURL    string `json:"openai_url,omitempty"`
+	AnthropicURL string `json:"anthropic_url,omitempty"`
+	// Proxy is the HTTP/HTTPS proxy used to reach this server ("" = direct).
+	// OpenAIProxy/AnthropicProxy override it per protocol.
+	Proxy          string    `json:"proxy,omitempty"`
+	OpenAIProxy    string    `json:"openai_proxy,omitempty"`
+	AnthropicProxy string    `json:"anthropic_proxy,omitempty"`
+	APIKey         string    `json:"api_key"`
+	APITypes       []APIType `json:"api_types"`
 	// CooldownTime overrides the rate-limiter cooldown duration for this server
 	// (seconds). 0 = use the global default.
 	CooldownTime int64 `json:"cooldown_time,omitempty"`
@@ -46,6 +51,22 @@ func (s *Server) GetURLForAPIType(t APIType) string {
 		}
 	}
 	return s.URL
+}
+
+// GetProxyForAPIType returns the HTTP proxy to use for the given API type:
+// the protocol-specific override if set, else the base proxy, else "" (direct).
+func (s *Server) GetProxyForAPIType(t APIType) string {
+	switch t {
+	case APITypeOpenAI:
+		if s.OpenAIProxy != "" {
+			return s.OpenAIProxy
+		}
+	case APITypeAnthropic:
+		if s.AnthropicProxy != "" {
+			return s.AnthropicProxy
+		}
+	}
+	return s.Proxy
 }
 
 // SupportsAPIType checks if the server supports the given API type.

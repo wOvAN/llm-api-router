@@ -4,6 +4,7 @@
       "id": "primary-openai",
       "name": "Primary OpenAI",
       "url": "api.openai.com/v1",
+      "proxy": "http://corp-proxy.example.com:3128",
       "api_key": "sk-proj-...",
       "api_types": ["openai"]
     },
@@ -20,6 +21,7 @@
       "url": "localhost:8080",
       "openai_url": "localhost:8080/v1",
       "anthropic_url": "localhost:8080/anthropic/v1",
+      "anthropic_proxy": "http://127.0.0.1:8118",
       "api_key": "",
       "api_types": ["openai", "anthropic"],
       "cooldown_time": 120,
