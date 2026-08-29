@@ -2,8 +2,11 @@ package proxy
 
 import (
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -94,5 +97,126 @@ func TestStreamProxyInvalidProxyURLFailsBeforeHeaders(t *testing.T) {
 	}
 	if w.Body.Len() != 0 {
 		t.Errorf("client must see no bytes on pre-response failure, got %q", w.Body.String())
+	}
+}
+
+// newSocks5Server returns a minimal no-auth SOCKS5 server that tunnels
+// CONNECT requests to their target. Enough to prove the transport really
+// routes through SOCKS, not just accepts the scheme.
+func newSocks5Server(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				readFull := func(b []byte) bool {
+					_, err := io.ReadFull(c, b)
+					return err == nil
+				}
+				greet := make([]byte, 2)
+				if !readFull(greet) || greet[0] != 0x05 {
+					return
+				}
+				if greet[1] > 0 {
+					methods := make([]byte, greet[1])
+					if !readFull(methods) {
+						return
+					}
+				}
+				if _, err := c.Write([]byte{0x05, 0x00}); err != nil {
+					return
+				}
+				hdr := make([]byte, 4)
+				if !readFull(hdr) {
+					return
+				}
+				var host string
+				var portB []byte
+				switch hdr[3] {
+				case 0x01: // IPv4: 4-byte IP + 2-byte port in one read
+					b := make([]byte, 6)
+					if !readFull(b) {
+						return
+					}
+					host = net.IP(b[:4]).String()
+					portB = b[4:6]
+				case 0x03: // domain: 1-byte length + domain + 2-byte port
+					lenB := make([]byte, 1)
+					if !readFull(lenB) {
+						return
+					}
+					hostB := make([]byte, lenB[0])
+					if !readFull(hostB) {
+						return
+					}
+					host = string(hostB)
+					portB = make([]byte, 2)
+					if !readFull(portB) {
+						return
+					}
+				case 0x04: // IPv6: 16-byte IP + 2-byte port
+					b := make([]byte, 16)
+					if !readFull(b) {
+						return
+					}
+					host = net.IP(b).String()
+					portB = make([]byte, 2)
+					if !readFull(portB) {
+						return
+					}
+				default:
+					return
+				}
+				if _, err := c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+					return
+				}
+				target, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(int(portB[0])<<8|int(portB[1]))))
+				if err != nil {
+					return
+				}
+				defer func() { _ = target.Close() }()
+				go func() { _, _ = io.Copy(target, c) }()
+				_, _ = io.Copy(c, target)
+			}(c)
+		}
+	}()
+	return l.Addr().String()
+}
+
+func TestStreamProxyUsesSocks5Proxy(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"cmpl-1","model":"m"}`))
+	}))
+	defer origin.Close()
+
+	socksAddr := newSocks5Server(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	pm, err := StreamProxy(context.Background(), origin.URL, "", req, w,
+		"m", "m", &RouterHeaders{ServerID: "s1", Proxy: "socks5://" + socksAddr}, false, nil)
+	if err != nil {
+		t.Fatalf("StreamProxy via socks5: %v", err)
+	}
+	if pm.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", pm.StatusCode)
+	}
+}
+
+func TestTransportForRejectsUnknownScheme(t *testing.T) {
+	if _, err := TransportFor("ftp://proxy.test:2121"); err == nil {
+		t.Error("expected error for unsupported proxy scheme")
 	}
 }

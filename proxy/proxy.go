@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	xproxy "golang.org/x/net/proxy"
+
 	"llm-api-router/pkg/log"
 )
 
@@ -54,8 +56,10 @@ var proxyTransports sync.Map // proxy URL -> *http.Transport
 
 // TransportFor returns the transport for requests that go through proxyURL
 // ("" = direct connection). The proxy URL may omit the scheme (http assumed)
-// and embed credentials (http://user:pass@host:port). Transport is per proxy,
-// not per server: servers sharing a proxy share its connection pool.
+// and embed credentials (http://user:pass@host:port). Supported schemes:
+// http, https, socks5, socks5h, socks4, socks4a (the latter via
+// golang.org/x/net/proxy). Transport is per proxy, not per server: servers
+// sharing a proxy share its connection pool.
 func TransportFor(proxyURL string) (http.RoundTripper, error) {
 	if proxyURL == "" {
 		return upstreamTransport, nil
@@ -74,7 +78,26 @@ func TransportFor(proxyURL string) (http.RoundTripper, error) {
 		return cached.(*http.Transport), nil
 	}
 	tr := upstreamTransport.Clone()
-	tr.Proxy = http.ProxyURL(u)
+	switch u.Scheme {
+	case "http", "https":
+		tr.Proxy = http.ProxyURL(u)
+	default: // socks5, socks5h, socks4, socks4a
+		dialer, err := xproxy.FromURL(u, xproxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("invalid proxy URL %q: %w", proxyURL, err)
+		}
+		// Route every dial (plain and TLS) through the SOCKS tunnel; the
+		// transport performs the TLS handshake itself over the returned conn.
+		tr.Proxy = nil
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if dc, ok := dialer.(interface {
+				DialContext(context.Context, string, string) (net.Conn, error)
+			}); ok {
+				return dc.DialContext(ctx, network, addr)
+			}
+			return dialer.Dial(network, addr)
+		}
+	}
 	// Benign race: concurrent misses may build equivalent transports, last store wins.
 	proxyTransports.Store(u.String(), tr)
 	return tr, nil

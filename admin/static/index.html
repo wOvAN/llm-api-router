@@ -45,6 +45,9 @@ button.copy-icon { padding: 1px 6px; font-size: 0.7rem; margin-left: 4px; border
 .modal input, .modal select { width: 100%; padding: 6px 10px; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; border-radius: 4px; font-size: 0.85rem; }
 .modal input:focus, .modal select:focus { outline: none; border-color: #58a6ff; }
 .modal .btn-row { margin-top: 16px; justify-content: flex-end; }
+.modal .group-title { margin: 18px 0 10px; padding-top: 14px; border-top: 1px solid #30363d; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #58a6ff; }
+.modal .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.modal .field-row.three { grid-template-columns: 1fr 1fr 1fr; }
 
 .tag { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-right: 4px; }
 .tag-openai { background: #1a3a1a; color: #3fb950; }
@@ -142,20 +145,37 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <input type="hidden" id="server-edit-id">
     <label><span>ID</span><input id="server-id" type="text" placeholder="e.g. primary-openai"></label>
     <label><span>Name</span><input id="server-name" type="text" placeholder="e.g. Primary OpenAI"></label>
-    <label><span>URL (базовый для всех протоколов)</span><input id="server-url" type="text" placeholder="e.g. api.openai.com/v1"></label>
-    <label><span>OpenAI URL (опционально, если отличается)</span><input id="server-openai-url" type="text" placeholder="оставьте пустым если = базовому"></label>
-    <label><span>Anthropic URL (опционально)</span><input id="server-anthropic-url" type="text" placeholder="оставьте пустым если = базовому"></label>
-    <label><span>Proxy (базовый, напр. http://127.0.0.1:3128)</span><input id="server-proxy" type="text" placeholder="пусто = без прокси"></label>
-    <label><span>OpenAI Proxy (опционально)</span><input id="server-openai-proxy" type="text" placeholder="оставьте пустым если = базовому"></label>
-    <label><span>Anthropic Proxy (опционально)</span><input id="server-anthropic-proxy" type="text" placeholder="оставьте пустым если = базовому"></label>
     <label><span>API Types (поддерживаемые протоколы)</span>
       <label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;"><input type="checkbox" id="server-api-type-openai" checked style="width:auto;"> OpenAI</label>
       <label style="display:inline-flex;align-items:center;gap:4px;"><input type="checkbox" id="server-api-type-anthropic" checked style="width:auto;"> Anthropic</label>
     </label>
     <label><span>API Key</span><input id="server-api-key" type="password" class="api-key-input" placeholder="sk-..."></label>
-    <label><span>Cooldown Time (сек, 0 = глобальный 5 мин)</span><input id="server-cooldown" type="number" min="0" step="1" value="0"></label>
-    <label><span>TPM Limit (токенов/мин, 0 = без лимита)</span><input id="server-tpm" type="number" min="0" step="1" value="0"></label>
-    <label><span>RPM Limit (запросов/мин, 0 = без лимита)</span><input id="server-rpm" type="number" min="0" step="1" value="0"></label>
+
+    <div class="group-title">Общие (базовые для всех протоколов)</div>
+    <div class="field-row">
+      <label><span>URL</span><input id="server-url" type="text" placeholder="e.g. api.openai.com/v1"></label>
+      <label><span>Proxy (напр. http://127.0.0.1:3128)</span><input id="server-proxy" type="text" placeholder="пусто = без прокси"></label>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="server-proxy-enabled" checked style="width:auto;"> Proxy enabled (снять = прямое соединение, URL прокси игнорируются)</label>
+
+    <div class="group-title">OpenAI</div>
+    <div class="field-row">
+      <label><span>URL (если отличается от базового)</span><input id="server-openai-url" type="text" placeholder="пусто = базовый"></label>
+      <label><span>Proxy (если отличается от базового)</span><input id="server-openai-proxy" type="text" placeholder="пусто = базовый"></label>
+    </div>
+
+    <div class="group-title">Anthropic</div>
+    <div class="field-row">
+      <label><span>URL (если отличается от базового)</span><input id="server-anthropic-url" type="text" placeholder="пусто = базовый"></label>
+      <label><span>Proxy (если отличается от базового)</span><input id="server-anthropic-proxy" type="text" placeholder="пусто = базовый"></label>
+    </div>
+
+    <div class="group-title">Лимиты</div>
+    <div class="field-row three">
+      <label><span>Cooldown Time (сек, 0 = глобальный 5 мин)</span><input id="server-cooldown" type="number" min="0" step="1" value="0"></label>
+      <label><span>TPM Limit (токенов/мин, 0 = без лимита)</span><input id="server-tpm" type="number" min="0" step="1" value="0"></label>
+      <label><span>RPM Limit (запросов/мин, 0 = без лимита)</span><input id="server-rpm" type="number" min="0" step="1" value="0"></label>
+    </div>
     <div id="server-test-result" style="margin-bottom:12px;font-size:0.8rem;display:none;"></div>
     <div class="btn-row">
       <button onclick="closeServerModal()">Cancel</button>
@@ -345,6 +365,7 @@ function openServerModal(id) {
   document.getElementById('server-proxy').value = '';
   document.getElementById('server-openai-proxy').value = '';
   document.getElementById('server-anthropic-proxy').value = '';
+  document.getElementById('server-proxy-enabled').checked = true;
   document.getElementById('server-api-key').value = '';
   document.getElementById('server-id').disabled = !!id;
   document.getElementById('server-modal').classList.add('open');
@@ -362,6 +383,7 @@ async function testServerConnection() {
     proxy: document.getElementById('server-proxy').value,
     openai_proxy: document.getElementById('server-openai-proxy').value,
     anthropic_proxy: document.getElementById('server-anthropic-proxy').value,
+    proxy_enabled: document.getElementById('server-proxy-enabled').checked,
     api_types: getServerAPITypes(),
     api_key: document.getElementById('server-api-key').value,
   };
@@ -405,6 +427,7 @@ async function saveServer() {
     proxy: document.getElementById('server-proxy').value,
     openai_proxy: document.getElementById('server-openai-proxy').value,
     anthropic_proxy: document.getElementById('server-anthropic-proxy').value,
+    proxy_enabled: document.getElementById('server-proxy-enabled').checked,
     api_types: getServerAPITypes(),
     api_key: document.getElementById('server-api-key').value,
     cooldown_time: parseInt(document.getElementById('server-cooldown').value, 10) || 0,
@@ -439,6 +462,7 @@ async function editServer(id) {
   document.getElementById('server-proxy').value = s.proxy || '';
   document.getElementById('server-openai-proxy').value = s.openai_proxy || '';
   document.getElementById('server-anthropic-proxy').value = s.anthropic_proxy || '';
+  document.getElementById('server-proxy-enabled').checked = s.proxy_enabled !== false;
   document.getElementById('server-api-key').value = s.api_key;
   document.getElementById('server-cooldown').value = s.cooldown_time || 0;
   document.getElementById('server-tpm').value = s.tpm_limit || 0;

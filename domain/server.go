@@ -19,11 +19,15 @@ type Server struct {
 	AnthropicURL string `json:"anthropic_url,omitempty"`
 	// Proxy is the HTTP/HTTPS proxy used to reach this server ("" = direct).
 	// OpenAIProxy/AnthropicProxy override it per protocol.
-	Proxy          string    `json:"proxy,omitempty"`
-	OpenAIProxy    string    `json:"openai_proxy,omitempty"`
-	AnthropicProxy string    `json:"anthropic_proxy,omitempty"`
-	APIKey         string    `json:"api_key"`
-	APITypes       []APIType `json:"api_types"`
+	Proxy          string `json:"proxy,omitempty"`
+	OpenAIProxy    string `json:"openai_proxy,omitempty"`
+	AnthropicProxy string `json:"anthropic_proxy,omitempty"`
+	// ProxyEnabled toggles proxy usage. nil = enabled (default, preserving
+	// configs that predate the field); explicit false forces a direct
+	// connection even when a proxy URL is set.
+	ProxyEnabled *bool     `json:"proxy_enabled,omitempty"`
+	APIKey       string    `json:"api_key"`
+	APITypes     []APIType `json:"api_types"`
 	// CooldownTime overrides the rate-limiter cooldown duration for this server
 	// (seconds). 0 = use the global default.
 	CooldownTime int64 `json:"cooldown_time,omitempty"`
@@ -55,7 +59,12 @@ func (s *Server) GetURLForAPIType(t APIType) string {
 
 // GetProxyForAPIType returns the HTTP proxy to use for the given API type:
 // the protocol-specific override if set, else the base proxy, else "" (direct).
+// A disabled proxy (ProxyEnabled explicitly false) always returns "" even when
+// a proxy URL is set.
 func (s *Server) GetProxyForAPIType(t APIType) string {
+	if s.ProxyEnabled != nil && !*s.ProxyEnabled {
+		return ""
+	}
 	switch t {
 	case APITypeOpenAI:
 		if s.OpenAIProxy != "" {

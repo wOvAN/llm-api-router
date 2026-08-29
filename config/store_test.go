@@ -706,6 +706,8 @@ func TestServerGetProxyForAPIType(t *testing.T) {
 		{name: "openai override", server: domain.Server{Proxy: "http://base:3128", OpenAIProxy: "http://oai:3128"}, apiType: domain.APITypeOpenAI, want: "http://oai:3128"},
 		{name: "anthropic override", server: domain.Server{Proxy: "http://base:3128", AnthropicProxy: "http://ant:3128"}, apiType: domain.APITypeAnthropic, want: "http://ant:3128"},
 		{name: "unrelated override falls back to base", server: domain.Server{Proxy: "http://base:3128", OpenAIProxy: "http://oai:3128"}, apiType: domain.APITypeAnthropic, want: "http://base:3128"},
+		{name: "disabled proxy means direct", server: domain.Server{Proxy: "http://base:3128", OpenAIProxy: "http://oai:3128", ProxyEnabled: boolPtr(false)}, apiType: domain.APITypeOpenAI, want: ""},
+		{name: "explicitly enabled proxy works", server: domain.Server{Proxy: "http://base:3128", ProxyEnabled: boolPtr(true)}, apiType: domain.APITypeOpenAI, want: "http://base:3128"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -715,3 +717,5 @@ func TestServerGetProxyForAPIType(t *testing.T) {
 		})
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }
