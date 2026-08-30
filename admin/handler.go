@@ -19,7 +19,7 @@ import (
 // probeClient returns the client used to reach a server's /v1/models probe,
 // routed through the proxy configured for the server's OpenAI protocol.
 func probeClient(srv *domain.Server) (*http.Client, error) {
-	transport, err := proxy.TransportFor(srv.GetProxyForAPIType(domain.APITypeOpenAI))
+	transport, err := proxy.TransportFor(srv.ProxyURL())
 	if err != nil {
 		return nil, err
 	}

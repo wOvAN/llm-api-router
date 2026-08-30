@@ -694,24 +694,20 @@ func newEmptyStore(t *testing.T) *Store {
 	return s
 }
 
-func TestServerGetProxyForAPIType(t *testing.T) {
+func TestServerProxyURL(t *testing.T) {
 	tests := []struct {
-		name    string
-		server  domain.Server
-		apiType domain.APIType
-		want    string
+		name   string
+		server domain.Server
+		want   string
 	}{
-		{name: "no proxy means direct", server: domain.Server{}, apiType: domain.APITypeOpenAI, want: ""},
-		{name: "base proxy applies to both", server: domain.Server{Proxy: "http://base:3128"}, apiType: domain.APITypeAnthropic, want: "http://base:3128"},
-		{name: "openai override", server: domain.Server{Proxy: "http://base:3128", OpenAIProxy: "http://oai:3128"}, apiType: domain.APITypeOpenAI, want: "http://oai:3128"},
-		{name: "anthropic override", server: domain.Server{Proxy: "http://base:3128", AnthropicProxy: "http://ant:3128"}, apiType: domain.APITypeAnthropic, want: "http://ant:3128"},
-		{name: "unrelated override falls back to base", server: domain.Server{Proxy: "http://base:3128", OpenAIProxy: "http://oai:3128"}, apiType: domain.APITypeAnthropic, want: "http://base:3128"},
-		{name: "disabled proxy means direct", server: domain.Server{Proxy: "http://base:3128", OpenAIProxy: "http://oai:3128", ProxyEnabled: boolPtr(false)}, apiType: domain.APITypeOpenAI, want: ""},
-		{name: "explicitly enabled proxy works", server: domain.Server{Proxy: "http://base:3128", ProxyEnabled: boolPtr(true)}, apiType: domain.APITypeOpenAI, want: "http://base:3128"},
+		{name: "no proxy means direct", server: domain.Server{}, want: ""},
+		{name: "proxy returned", server: domain.Server{Proxy: "http://base:3128"}, want: "http://base:3128"},
+		{name: "disabled proxy means direct", server: domain.Server{Proxy: "http://base:3128", ProxyEnabled: boolPtr(false)}, want: ""},
+		{name: "explicitly enabled proxy works", server: domain.Server{Proxy: "http://base:3128", ProxyEnabled: boolPtr(true)}, want: "http://base:3128"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.server.GetProxyForAPIType(tt.apiType); got != tt.want {
+			if got := tt.server.ProxyURL(); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})

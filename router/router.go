@@ -296,7 +296,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			Attempts:       fmt.Sprintf("%d/%d", i+1, len(attempts)),
 			FallbackErrors: attemptErrors,
 			KeepAliveIdle:  srvKeepAlive,
-			Proxy:          srv.GetProxyForAPIType(apiType),
+			Proxy:          srv.ProxyURL(),
 		}
 
 		// Retry-before-fallback: on transport (pre-response) errors retry the

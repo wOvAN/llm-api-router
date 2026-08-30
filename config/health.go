@@ -106,7 +106,7 @@ func (t *HealthTracker) checkServer(srv *domain.Server) bool {
 	}
 	// Probe through the server's configured proxy (same one real OpenAI traffic
 	// uses) — a server only reachable via proxy must not be marked unhealthy.
-	transport, err := proxy.TransportFor(srv.GetProxyForAPIType(domain.APITypeOpenAI))
+	transport, err := proxy.TransportFor(srv.ProxyURL())
 	if err != nil {
 		log.Warnf("[health] %s: %v", srv.Name, err)
 		return false
