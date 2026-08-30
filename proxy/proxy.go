@@ -283,8 +283,7 @@ type RouterHeaders struct {
 	// heartbeat interval. A per-request X-Router-KeepAlive header still
 	// overrides it; zero falls back to the global proxy.KeepAliveIdle.
 	KeepAliveIdle time.Duration
-	// Proxy is the server's HTTP proxy URL for the protocol of this attempt
-	// ("" = direct connection). Not a client-visible header.
+	// Proxy is the server's proxy URL ("" = direct connection). Not a client-visible header.
 	Proxy string
 }
 
