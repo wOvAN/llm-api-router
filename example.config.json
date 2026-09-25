@@ -5,6 +5,7 @@
       "name": "Primary OpenAI",
       "url": "api.openai.com/v1",
       "proxy": "http://corp-proxy.example.com:3128",
+      "proxy_enabled": true,
       "api_key": "sk-proj-...",
       "api_types": ["openai"]
     },

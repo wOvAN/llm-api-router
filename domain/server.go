@@ -19,9 +19,9 @@ type Server struct {
 	AnthropicURL string `json:"anthropic_url,omitempty"`
 	// Proxy is the HTTP/HTTPS/SOCKS proxy used to reach this server ("" = direct).
 	Proxy string `json:"proxy,omitempty"`
-	// ProxyEnabled toggles proxy usage. nil = enabled (default, preserving
-	// configs that predate the field); explicit false forces a direct
-	// connection even when a proxy URL is set.
+	// ProxyEnabled toggles proxy usage. nil = disabled (default); explicit
+	// true enables the proxy, so a proxy URL alone never routes traffic
+	// through it.
 	ProxyEnabled *bool     `json:"proxy_enabled,omitempty"`
 	APIKey       string    `json:"api_key"`
 	APITypes     []APIType `json:"api_types"`
@@ -55,10 +55,10 @@ func (s *Server) GetURLForAPIType(t APIType) string {
 }
 
 // ProxyURL returns the HTTP proxy to use for this server ("" = direct).
-// A disabled proxy (ProxyEnabled explicitly false) returns "" even when a
-// proxy URL is set.
+// The proxy is used only when explicitly enabled (ProxyEnabled true);
+// otherwise the proxy URL is ignored.
 func (s *Server) ProxyURL() string {
-	if s.ProxyEnabled != nil && !*s.ProxyEnabled {
+	if s.ProxyEnabled == nil || !*s.ProxyEnabled {
 		return ""
 	}
 	return s.Proxy

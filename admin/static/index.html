@@ -156,7 +156,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
       <label><span>URL</span><input id="server-url" type="text" placeholder="e.g. api.openai.com/v1"></label>
       <label><span>Proxy (напр. http://127.0.0.1:3128)</span><input id="server-proxy" type="text" placeholder="пусто = без прокси"></label>
     </div>
-    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="server-proxy-enabled" checked style="width:auto;"> Proxy enabled (снять = прямое соединение, URL прокси игнорируются)</label>
+    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="server-proxy-enabled" style="width:auto;"> Proxy enabled (по умолчанию выключено = прямое соединение, URL прокси игнорируются)</label>
 
     <div class="group-title">OpenAI</div>
     <label><span>URL (если отличается от базового)</span><input id="server-openai-url" type="text" placeholder="пусто = базовый"></label>
@@ -187,7 +187,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <label><span>Incoming Models (через запятую)</span><input id="rule-incoming" type="text" placeholder="e.g. opus,sonnet,claude-opus"></label>
     <label><span>Primary Server</span><select id="rule-server" onchange="fetchServerModels()"></select></label>
     <label><span>Context Window (токенов, 0 = неизвестно)</span><input id="rule-context-window" type="number" min="0" step="1" value="0"></label>
-    <label><span>Target Model</span>
+    <label><span>Target Model <button type="button" onclick="fetchServerModels()" title="Обновить список моделей с сервера" style="padding:0 6px;">↻</button></span>
       <div id="rule-target-wrap" style="margin-top:4px;">
         <select id="rule-target-sel" style="width:100%;"><option value="">(выберите модель)</option></select>
         <input id="rule-target-inp" type="text" placeholder="или введите вручную..." style="width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;">
@@ -357,7 +357,7 @@ function openServerModal(id) {
   document.getElementById('server-openai-url').value = '';
   document.getElementById('server-anthropic-url').value = '';
   document.getElementById('server-proxy').value = '';
-  document.getElementById('server-proxy-enabled').checked = true;
+  document.getElementById('server-proxy-enabled').checked = false;
   document.getElementById('server-api-key').value = '';
   document.getElementById('server-id').disabled = !!id;
   document.getElementById('server-modal').classList.add('open');
@@ -448,7 +448,7 @@ async function editServer(id) {
   document.getElementById('server-openai-url').value = s.openai_url || '';
   document.getElementById('server-anthropic-url').value = s.anthropic_url || '';
   document.getElementById('server-proxy').value = s.proxy || '';
-  document.getElementById('server-proxy-enabled').checked = s.proxy_enabled !== false;
+  document.getElementById('server-proxy-enabled').checked = s.proxy_enabled === true;
   document.getElementById('server-api-key').value = s.api_key;
   document.getElementById('server-cooldown').value = s.cooldown_time || 0;
   document.getElementById('server-tpm').value = s.tpm_limit || 0;
@@ -587,6 +587,10 @@ async function populateServerDropdown() {
 async function fetchServerModels() {
   const serverId = document.getElementById('rule-server').value;
   const sel = document.getElementById('rule-target-sel');
+  const inp = document.getElementById('rule-target-inp');
+  // Remember the current choice so a manual refresh doesn't lose it.
+  const manualMode = inp.style.display !== 'none';
+  const prev = manualMode ? '' : sel.value;
   if (!serverId) { sel.innerHTML = '<option value="">(no server)</option>'; return; }
   sel.innerHTML = '<option value="">(loading...)</option>';
   try {
@@ -600,6 +604,12 @@ async function fetchServerModels() {
     sel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>'
       + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded" style="color:#3fb950">● ${esc(m.id)}</option>`).join('')
       + others.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
+    // Restore the previous selection if it's still in the refreshed list.
+    if (prev && prev !== '__type__') {
+      for (const opt of sel.options) {
+        if (opt.value === prev) { sel.value = prev; inp.value = prev; break; }
+      }
+    }
   } catch {
     sel.innerHTML = '<option value="">(error)</option>';
   }
@@ -617,6 +627,7 @@ async function openRuleModal() {
   document.getElementById('rule-enabled').checked = true;
   document.getElementById('rule-context-window').value = 0;
   document.getElementById('fallbacks-container').innerHTML = '';
+  await fetchServerModels();
   document.getElementById('rule-modal').classList.add('open');
 }
 
@@ -776,6 +787,30 @@ async function addFallbackRow(serverId, targetModel, priority, enabled) {
     modelSel.style.display = 'none';
     modelInp.style.display = 'block';
   }
+  const refreshBtn = document.createElement('button');
+  refreshBtn.textContent = '↻';
+  refreshBtn.title = 'Обновить список моделей';
+  refreshBtn.style.cssText = 'margin-top:2px;';
+  refreshBtn.onclick = async () => {
+    const cur = modelInp.style.display !== 'none' ? modelInp.value.trim()
+      : (modelSel.value && modelSel.value !== '__type__' ? modelSel.value : '');
+    await sel.onchange();
+    if (cur) {
+      let found = false;
+      for (const opt of modelSel.options) {
+        if (opt.value === cur) { found = true; break; }
+      }
+      if (found) {
+        modelSel.value = cur;
+        modelSel.style.display = 'block';
+        modelInp.style.display = 'none';
+      } else {
+        modelSel.style.display = 'none';
+        modelInp.style.display = 'block';
+      }
+      modelInp.value = cur;
+    }
+  };
   const btn = document.createElement('button');
   btn.textContent = '✕';
   btn.className = 'danger';
@@ -818,10 +853,11 @@ async function addFallbackRow(serverId, targetModel, priority, enabled) {
   row.appendChild(modelWrap);
   row.appendChild(priorityInp);
   row.appendChild(enabledChk);
+  row.appendChild(refreshBtn);
   row.appendChild(btn);
   container.appendChild(row);
-  // Fetch models if server is pre-selected
-  if (serverId) {
+  // Fetch models for the selected server (a new row defaults to the first one)
+  if (sel.value) {
     await sel.onchange();
     // Restore manual input if the target model is not in the fetched list
     if (targetModel) {

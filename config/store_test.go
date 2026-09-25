@@ -701,7 +701,7 @@ func TestServerProxyURL(t *testing.T) {
 		want   string
 	}{
 		{name: "no proxy means direct", server: domain.Server{}, want: ""},
-		{name: "proxy returned", server: domain.Server{Proxy: "http://base:3128"}, want: "http://base:3128"},
+		{name: "proxy without flag means direct", server: domain.Server{Proxy: "http://base:3128"}, want: ""},
 		{name: "disabled proxy means direct", server: domain.Server{Proxy: "http://base:3128", ProxyEnabled: boolPtr(false)}, want: ""},
 		{name: "explicitly enabled proxy works", server: domain.Server{Proxy: "http://base:3128", ProxyEnabled: boolPtr(true)}, want: "http://base:3128"},
 	}
