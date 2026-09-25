@@ -122,7 +122,9 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 		return ProxyMetrics{CachedTokens: -1}
 	}
 
-	return buildMetricsFromData(uc, 0, timings, vllmMetrics)
+	// SGLang never emits meta_info in stream chunks (return_meta_info requires
+	// stream=false), so the stream path has no native timing source.
+	return buildMetricsFromData(uc, 0, timings, vllmMetrics, nil)
 }
 
 // extractUsageFromJSON parses a non-streaming JSON response.
@@ -145,15 +147,16 @@ func extractUsageFromJSON(body []byte) ProxyMetrics {
 	if m, ok := obj["metrics"].(map[string]any); ok {
 		vllmMetrics = m
 	}
+	sglangMeta := sglangMetaInfo(obj)
 
-	if usage == nil && timings == nil && vllmMetrics == nil {
+	if usage == nil && timings == nil && vllmMetrics == nil && sglangMeta == nil {
 		return ProxyMetrics{CachedTokens: -1}
 	}
 
 	uc := extractUsageTokens(usage)
 	total := intToFloat64(usage["total_tokens"])
 
-	return buildMetricsFromData(uc, int64(total), timings, vllmMetrics)
+	return buildMetricsFromData(uc, int64(total), timings, vllmMetrics, sglangMeta)
 }
 
 // getField traverses a dotted JSON path in a map.
@@ -175,6 +178,24 @@ func getField(obj map[string]any, path string) map[string]any {
 		return nil
 	}
 	return result
+}
+
+// sglangMetaInfo returns SGLang's per-choice meta_info object from a
+// non-streaming OpenAI chat response (choices[0].meta_info), or nil if absent.
+// SGLang only includes the timing fields there when the client sends
+// return_meta_info=true and the server runs with --enable-metrics; it is never
+// present in stream chunks.
+func sglangMetaInfo(obj map[string]any) map[string]any {
+	choices, ok := obj["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		return nil
+	}
+	choice, ok := choices[0].(map[string]any)
+	if !ok {
+		return nil
+	}
+	meta, _ := choice["meta_info"].(map[string]any)
+	return meta
 }
 
 // usageCounts holds token counts extracted from a usage object.
@@ -223,11 +244,12 @@ func extractUsageTokens(usage map[string]any) usageCounts {
 }
 
 // buildMetricsFromData composes ProxyMetrics from token counts and optional
-// backend-native timing objects: llama.cpp's top-level `timings` and vLLM's
-// top-level `metrics` (requires --enable-per-request-metrics on the server).
-// A backend emits at most one of the two, so the timings block wins when both
+// backend-native timing objects: llama.cpp's top-level `timings`, vLLM's
+// top-level `metrics` (requires --enable-per-request-metrics), and SGLang's
+// `choices[0].meta_info` (requires return_meta_info + --enable-metrics). A
+// backend emits at most one of the three, so the timings block wins when both
 // are present.
-func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetrics map[string]any) ProxyMetrics {
+func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetrics, sglangMeta map[string]any) ProxyMetrics {
 	pm := ProxyMetrics{
 		PromptTokens:        uc.input,
 		CompletionTokens:    uc.output,
@@ -251,6 +273,43 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetric
 			pm.TokensPerSec = tps
 		}
 		pm.QueueMs = floatToFloat64(vllmMetrics["queue_time_ms"])
+		// Speculative decoding draft counts (n==1 only; null for n>1), mapped
+		// like llama.cpp's draft_n / draft_n_accepted.
+		if spec, ok := vllmMetrics["speculative_decoding"].(map[string]any); ok {
+			if n := intToFloat64(spec["num_draft_tokens"]); n > 0 {
+				pm.DraftTokens = n
+			}
+			if n := intToFloat64(spec["num_accepted_draft_tokens"]); n > 0 {
+				pm.DraftTokensAccepted = n
+			}
+		}
+	}
+
+	// SGLang `meta_info`: first_token_latency is TTFT/prefill, decode_throughput
+	// is the backend's decode tok/s, queue_time is the scheduler queue wait — all
+	// in seconds, so scale to ms where the field is ms-based.
+	if sglangMeta != nil {
+		if s := floatToFloat64(sglangMeta["first_token_latency"]); s > 0 {
+			pm.PromptMs = s * 1000
+		}
+		if tps := floatToFloat64(sglangMeta["decode_throughput"]); tps > 0 {
+			pm.TokensPerSec = tps
+		}
+		if s := floatToFloat64(sglangMeta["queue_time"]); s > 0 {
+			pm.QueueMs = s * 1000
+		}
+		// SGLang reports cached tokens in meta_info (not the standard usage
+		// object); only fill it when the usage-derived value is absent.
+		if cv := intToFloat64(sglangMeta["cached_tokens"]); cv >= 0 && pm.CachedTokens < 0 {
+			pm.CachedTokens = cv
+		}
+		// Speculative decoding: proposed vs. accepted draft token counts.
+		if n := intToFloat64(sglangMeta["spec_num_proposed_drafts"]); n > 0 {
+			pm.DraftTokens = n
+		}
+		if n := intToFloat64(sglangMeta["spec_num_correct_drafts"]); n > 0 {
+			pm.DraftTokensAccepted = n
+		}
 	}
 
 	if timings != nil {
