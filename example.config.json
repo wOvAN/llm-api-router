@@ -75,6 +75,13 @@
           "server_id": "primary-anthropic",
           "fallbacks": [],
           "enabled": false
+        },
+        {
+          "incoming_models": ["systemone"],
+          "target_model": "laya",
+          "server_id": "local-llama",
+          "fallbacks": [],
+          "enabled": true
         }
       ]
     }

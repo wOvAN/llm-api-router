@@ -359,6 +359,74 @@ func TestHandleMissingModel(t *testing.T) {
 	}
 }
 
+// TestHandleSystemone verifies that a llama.cpp /v1/systemone request (no
+// "model" field in the body) is routed by endpoint name via a rule whose
+// incoming model is "systemone", and that the response model is rewritten back.
+func TestHandleSystemone(t *testing.T) {
+	var receivedBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		receivedBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"laya","answers":{"angry":{"type":"noul","noul":0.63}},"usage":{"input_tokens":10,"output_tokens":0}}`))
+	}))
+	defer backend.Close()
+
+	r, store, ms := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "s1",
+		Name:     "decision-server",
+		URL:      backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"systemone"},
+		TargetModel:    "laya",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	body := strings.NewReader(`{"state":"charged twice","questions":{"angry":{"type":"noul","instructions":"angry?"}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/systemone", body)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200: %s", w.Result().StatusCode, w.Body.String())
+	}
+
+	// The upstream body keeps state/questions (the injected "model" field is
+	// ignored by llama.cpp's systemone handler).
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(receivedBody), &sent); err != nil {
+		t.Fatalf("backend received invalid body %q: %v", receivedBody, err)
+	}
+	if sent["state"] != "charged twice" {
+		t.Errorf("state not forwarded: %v", sent)
+	}
+	if _, ok := sent["questions"]; !ok {
+		t.Errorf("questions not forwarded: %v", sent)
+	}
+
+	// Response model rewritten back to the incoming name.
+	resp := w.Body.String()
+	if !strings.Contains(resp, `"model":"systemone"`) {
+		t.Errorf("response model not rewritten to systemone: %s", resp)
+	}
+	if !strings.Contains(resp, `"noul":0.63`) {
+		t.Errorf("answers missing from response: %s", resp)
+	}
+
+	// Usage (input_tokens/output_tokens) captured in metrics.
+	recent := ms.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("expected 1 recorded request, got %d", len(recent))
+	}
+	if recent[0].PromptTokens != 10 {
+		t.Errorf("prompt tokens = %v, want 10", recent[0].PromptTokens)
+	}
+}
+
 func TestHandleNoRoutingRule(t *testing.T) {
 	r, _, _ := newTestRouter(t)
 	body := strings.NewReader(`{"model":"unknown-model","messages":[]}`)

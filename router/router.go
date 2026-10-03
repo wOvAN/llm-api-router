@@ -143,9 +143,15 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 	model, err := extractModel(body)
 	if err != nil {
-		log.Errorf("[%s] invalid request body: %v", req.URL.Path, err)
-		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
-		return
+		// llama.cpp's /v1/systemone (TypeSafe decision API) has no "model"
+		// field in the body — route by endpoint name.
+		if req.URL.Path == "/v1/systemone" {
+			model = "systemone"
+		} else {
+			log.Errorf("[%s] invalid request body: %v", req.URL.Path, err)
+			http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Track active requests for metrics display.
