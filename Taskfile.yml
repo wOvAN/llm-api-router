@@ -28,6 +28,11 @@ tasks:
     cmds:
       - go fmt ./...
 
+  fix:
+    desc: Fix all Go source files
+    cmds:
+      - go fix ./...
+
   lint:
     desc: Run golangci-lint
     cmds:

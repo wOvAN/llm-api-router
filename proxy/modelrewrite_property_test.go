@@ -52,7 +52,7 @@ func TestModelRewriteChainByteExactAcrossAllSplits(t *testing.T) {
 
 	// Random multi-splits (bounded carry across several reads).
 	rnd := rand.New(rand.NewSource(1))
-	for trial := 0; trial < 200; trial++ {
+	for trial := range 200 {
 		var parts []string
 		for i := 0; i < len(stream); {
 			n := 1 + rnd.Intn(40)
