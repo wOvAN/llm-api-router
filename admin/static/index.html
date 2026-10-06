@@ -961,23 +961,10 @@ async function addFallbackRow(serverId, targetModel, priority, enabled) {
   btn.onclick = () => row.remove();
   // Fetch models when server changes
   sel.onchange = async () => {
-    const sid = sel.value;
-    if (!sid) { modelSel.innerHTML = '<option value="">(no server)</option>'; return; }
-    modelSel.innerHTML = '<option value="">(loading...)</option>';
     modelSel.style.display = 'block';
     modelInp.style.display = 'none';
     modelInp.value = '';
-    try {
-      const res = await fetch(API + '/servers/' + encodeURIComponent(sid) + '/models');
-      if (!res.ok) { modelSel.innerHTML = '<option value="">(failed)</option>'; return; }
-      const raw = await res.json();
-      const models = raw.map(m => typeof m === 'string' ? {id: m, loaded: false} : m);
-      const loaded = models.filter(m => m.loaded).sort((a,b) => a.id.localeCompare(b.id));
-      const others = models.filter(m => !m.loaded).sort((a,b) => a.id.localeCompare(b.id));
-      modelSel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>'
-        + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded" style="color:#3fb950">● ${esc(m.id)}</option>`).join('')
-        + others.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
-    } catch { modelSel.innerHTML = '<option value="">(error)</option>'; }
+    await fillModelSelect(sel.value, modelSel, modelInp, '(выберите модель)');
   };
   const priorityInp = document.createElement('input');
   priorityInp.type = 'number';
@@ -1055,8 +1042,6 @@ function getServersFromDropdown() {
 }
 
 // --- Jev candidates ---
-// ponytail: plain text model input, no per-server model fetch like fallback rows —
-// the jev pool is a handful of hand-picked models.
 function addJevRow(serverId, targetModel, description, tier, enabled, contextWindow) {
   const servers = getServersFromDropdown();
   const row = document.createElement('div');
@@ -1067,12 +1052,55 @@ function addJevRow(serverId, targetModel, description, tier, enabled, contextWin
   sel.className = 'jev-server';
   sel.style.cssText = 'flex:1 1 180px;min-width:150px;';
   sel.innerHTML = servers.map(s => `<option value="${esc(s.id)}" ${s.id === serverId ? 'selected' : ''}>${esc(s.name)} (${esc(s.id)})</option>`).join('');
+  // Target model: select fed from the server's /models + manual input (empty = server id).
+  const modelWrap = document.createElement('div');
+  modelWrap.style.cssText = 'flex:1 1 140px;min-width:120px;';
+  const modelSel = document.createElement('select');
+  modelSel.className = 'jev-model-sel';
+  modelSel.style.cssText = 'width:100%;' + inpStyle;
+  modelSel.innerHTML = '<option value="">(server id)</option>';
   const modelInp = document.createElement('input');
   modelInp.type = 'text';
   modelInp.className = 'jev-model';
   modelInp.placeholder = 'target model (пусто = server id)';
   modelInp.value = targetModel;
-  modelInp.style.cssText = 'flex:1 1 140px;min-width:120px;' + inpStyle;
+  modelInp.style.cssText = 'width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;';
+  modelWrap.appendChild(modelSel);
+  modelWrap.appendChild(modelInp);
+  modelSel.addEventListener('change', () => {
+    if (modelSel.value === '__type__') {
+      modelSel.style.display = 'none';
+      modelInp.style.display = 'block';
+      modelInp.focus();
+    } else if (modelSel.value) {
+      modelInp.value = modelSel.value;
+    }
+  });
+  modelInp.addEventListener('focusout', () => {
+    if (!modelInp.value) {
+      modelSel.style.display = 'block';
+      modelInp.style.display = 'none';
+    }
+  });
+  // If targetModel is set, show it in the input (before the list finishes loading).
+  if (targetModel) {
+    modelSel.style.display = 'none';
+    modelInp.style.display = 'block';
+  }
+  const refreshBtn = document.createElement('button');
+  refreshBtn.textContent = '↻';
+  refreshBtn.title = 'Обновить список моделей';
+  refreshBtn.style.cssText = 'margin-top:2px;';
+  // Fetch models when the candidate server changes; keep a target model that is
+  // not in the fetched list in the manual input.
+  sel.onchange = async () => {
+    modelSel.style.display = 'block';
+    modelInp.style.display = 'none';
+    modelInp.value = '';
+    await fillModelSelect(sel.value, modelSel, modelInp, '(server id)');
+    if (targetModel) writeModelPair(modelSel, modelInp, targetModel);
+  };
+  refreshBtn.onclick = () => sel.onchange();
   const descInp = document.createElement('input');
   descInp.type = 'text';
   descInp.className = 'jev-desc';
@@ -1107,13 +1135,16 @@ function addJevRow(serverId, targetModel, description, tier, enabled, contextWin
   btn.style.cssText = 'margin-top:2px;';
   btn.onclick = () => row.remove();
   row.appendChild(sel);
-  row.appendChild(modelInp);
+  row.appendChild(modelWrap);
+  row.appendChild(refreshBtn);
   row.appendChild(descInp);
   row.appendChild(tierInp);
   row.appendChild(cwInp);
   row.appendChild(enabledChk);
   row.appendChild(btn);
   document.getElementById('jev-candidates').appendChild(row);
+  // Populate the model list for the preselected server (a new row defaults to the first).
+  if (sel.value) sel.onchange();
 }
 
 function getJevCandidates() {
@@ -1123,7 +1154,7 @@ function getJevCandidates() {
     if (!serverSel.value) return;
     const c = {
       server_id: serverSel.value,
-      target_model: row.querySelector('.jev-model').value.trim(),
+      target_model: readModelPair(row.querySelector('.jev-model-sel'), row.querySelector('.jev-model')),
       description: row.querySelector('.jev-desc').value.trim(),
       tier: parseInt(row.querySelector('.jev-tier').value, 10) || 0,
     };
