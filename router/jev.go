@@ -108,7 +108,9 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 
 	choice := -1
 	switch {
-	case req.Header.Get("X-Router-Jev") == "off":
+	case req.Header.Get("X-Router-Jev") == "off", strings.Contains(req.URL.Path, "count_tokens"):
+		// count_tokens is a metadata call (Claude Code fires bursts of it):
+		// no generation happens, a decision would only add latency and tokens.
 		out.Reason = "off"
 	default:
 		key := ""

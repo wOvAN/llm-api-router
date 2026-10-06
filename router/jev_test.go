@@ -489,6 +489,22 @@ func TestJevRequestImagesCap(t *testing.T) {
 	}
 }
 
+func TestJevAttemptsCountTokensSkipsDecision(t *testing.T) {
+	r, store, _ := jevTestRouter(t)
+	calls := 0
+	decision := jevDecision(t, `{"answers":{"model":{"type":"choice","choice":"opus","confidence":0.9}}}`, &calls)
+	addJevServers(t, store, decision.URL)
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(string(body)))
+	attempts, out := r.jevAttempts(req, jevRule(decision.URL, 0.3, 1), body, "auto")
+	if out.Reason != "off" || calls != 0 {
+		t.Errorf("reason = %q calls = %d, want off with no decision call", out.Reason, calls)
+	}
+	if len(attempts) == 0 || attempts[0].server.ID != "s1" {
+		t.Errorf("attempts = %v, want the default tier first", attemptIDs(attempts))
+	}
+}
+
 func TestListModelsJevPoolContext(t *testing.T) {
 	r, store, _ := jevTestRouter(t)
 	_ = store.AddRule(&domain.RoutingRule{
