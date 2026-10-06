@@ -198,8 +198,13 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
       </div>
     </label>
     <div id="jev-fields" style="display:none;">
-      <label><span>Jev Decision Server (llama.cpp с decision-моделью)</span><select id="jev-server"></select></label>
-      <label><span>Decision Model (пусто = бэкенд решает)</span><input id="jev-model" type="text" placeholder="e.g. laya"></label>
+      <label><span>Jev Decision Server (llama.cpp с decision-моделью)</span><select id="jev-server" onchange="fetchJevModels()"></select></label>
+      <label><span>Decision Model (пусто = бэкенд решает) <button type="button" onclick="fetchJevModels()" title="Обновить список моделей с сервера" style="padding:0 6px;">↻</button></span>
+        <div style="margin-top:4px;">
+          <select id="jev-model-sel" style="width:100%;" onchange="jevModelSelChange()"><option value="">(бэкенд решает)</option></select>
+          <input id="jev-model-inp" type="text" placeholder="или введите вручную..." style="width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;">
+        </div>
+      </label>
       <div style="display:flex;gap:8px;">
         <label style="flex:1"><span>Min Confidence (0 = 0.3)</span><input id="jev-min-conf" type="number" min="0" max="1" step="0.05" value="0"></label>
         <label style="flex:1"><span>Default Tier</span><input id="jev-default-tier" type="number" min="0" step="1" value="0" title="Tier кандидата по умолчанию: при низком confidence не ниже его"></label>
@@ -618,10 +623,10 @@ async function populateServerDropdown() {
   document.getElementById('jev-server').innerHTML = opts;
 }
 
-async function fetchServerModels() {
-  const serverId = document.getElementById('rule-server').value;
-  const sel = document.getElementById('rule-target-sel');
-  const inp = document.getElementById('rule-target-inp');
+// Fill a model <select> from a server's /models (loaded first), with a
+// manual-entry escape hatch; shared by the rule target model and the jev
+// decision model.
+async function fillModelSelect(serverId, sel, inp, placeholder) {
   // Remember the current choice so a manual refresh doesn't lose it.
   const manualMode = inp.style.display !== 'none';
   const prev = manualMode ? '' : sel.value;
@@ -635,7 +640,7 @@ async function fetchServerModels() {
     const models = raw.map(m => typeof m === 'string' ? {id: m, loaded: false} : m);
     const loaded = models.filter(m => m.loaded).sort((a,b) => a.id.localeCompare(b.id));
     const others = models.filter(m => !m.loaded).sort((a,b) => a.id.localeCompare(b.id));
-    sel.innerHTML = '<option value="">(выберите модель)</option><option value="__type__">✏️ введите вручную</option>'
+    sel.innerHTML = `<option value="">${placeholder}</option><option value="__type__">✏️ введите вручную</option>`
       + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded" style="color:#3fb950">● ${esc(m.id)}</option>`).join('')
       + others.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
     // Restore the previous selection if it's still in the refreshed list.
@@ -647,6 +652,51 @@ async function fetchServerModels() {
   } catch {
     sel.innerHTML = '<option value="">(error)</option>';
   }
+}
+
+async function fetchServerModels() {
+  await fillModelSelect(document.getElementById('rule-server').value,
+    document.getElementById('rule-target-sel'), document.getElementById('rule-target-inp'),
+    '(выберите модель)');
+}
+
+async function fetchJevModels() {
+  await fillModelSelect(document.getElementById('jev-server').value,
+    document.getElementById('jev-model-sel'), document.getElementById('jev-model-inp'),
+    '(бэкенд решает)');
+}
+
+function jevModelSelChange() {
+  const sel = document.getElementById('jev-model-sel');
+  const inp = document.getElementById('jev-model-inp');
+  if (sel.value === '__type__') {
+    sel.style.display = 'none';
+    inp.style.display = 'block';
+    inp.focus();
+  } else if (sel.value) {
+    inp.value = sel.value;
+  }
+}
+
+// Read a select/input model pair (manual input wins when visible).
+function readModelPair(sel, inp) {
+  return inp.style.display !== 'none' ? inp.value.trim() : (sel.value === '__type__' ? '' : sel.value);
+}
+
+// Show value in the pair: in the select when the server offers it, else manual.
+function writeModelPair(sel, inp, value) {
+  for (const opt of sel.options) {
+    if (opt.value === value) {
+      sel.value = value;
+      sel.style.display = 'block';
+      inp.style.display = 'none';
+      inp.value = value;
+      return;
+    }
+  }
+  sel.style.display = 'none';
+  inp.style.display = 'block';
+  inp.value = value;
 }
 
 async function openRuleModal() {
@@ -669,7 +719,12 @@ async function openRuleModal() {
 function resetJevFields() {
   document.getElementById('rule-router').value = '';
   document.getElementById('jev-server').value = '';
-  document.getElementById('jev-model').value = '';
+  const jmSel = document.getElementById('jev-model-sel');
+  const jmInp = document.getElementById('jev-model-inp');
+  jmSel.innerHTML = '<option value="">(бэкенд решает)</option>';
+  jmSel.style.display = 'block';
+  jmInp.value = '';
+  jmInp.style.display = 'none';
   document.getElementById('jev-min-conf').value = 0;
   document.getElementById('jev-default-tier').value = 0;
   document.getElementById('jev-cache-ttl').value = 0;
@@ -706,7 +761,7 @@ async function saveRule() {
     data.router = 'jev';
     data.jev = {
       server_id: document.getElementById('jev-server').value,
-      model: document.getElementById('jev-model').value.trim(),
+      model: readModelPair(document.getElementById('jev-model-sel'), document.getElementById('jev-model-inp')),
       question: document.getElementById('jev-question').value.trim(),
       candidates: getJevCandidates(),
       min_confidence: parseFloat(document.getElementById('jev-min-conf').value, 10) || 0,
@@ -770,7 +825,8 @@ async function editRule(idx) {
   if (r.router === 'jev' && r.jev) {
     document.getElementById('rule-router').value = 'jev';
     document.getElementById('jev-server').value = r.jev.server_id || '';
-    document.getElementById('jev-model').value = r.jev.model || '';
+    await fetchJevModels();
+    writeModelPair(document.getElementById('jev-model-sel'), document.getElementById('jev-model-inp'), r.jev.model || '');
     document.getElementById('jev-min-conf').value = r.jev.min_confidence || 0;
     document.getElementById('jev-default-tier').value = r.jev.default_tier || 0;
     document.getElementById('jev-cache-ttl').value = r.jev.cache_ttl || 0;
