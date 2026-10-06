@@ -101,6 +101,10 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 	}
 	text, contextTokens := jevRequestText(body)
 	text = jevTruncate(text, j.StateMaxChars)
+	var images []string
+	if j.Images {
+		images = jevRequestImages(body)
+	}
 
 	choice := -1
 	switch {
@@ -109,7 +113,7 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 	default:
 		key := ""
 		if j.CacheTTL > 0 {
-			key = jevCacheKey(j.Model, question, ids, text)
+			key = jevCacheKey(j.Model, question, ids, text, images)
 			if cached, ok := r.jevCacheGet(key); ok {
 				cached.LatencyMs, cached.InputTokens, cached.OutputTokens = 0, 0, 0
 				if cached.Reason == "blocked" {
@@ -149,7 +153,7 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 		}
 		start := time.Now()
 		resp, err := proxy.AskJev(req.Context(), srv.GetURLForAPIType(domain.APITypeOpenAI), srv.APIKey,
-			j.Model, jevState(text, contextTokens, requested, ids), questions, srv.ProxyURL(), timeout)
+			j.Model, jevState(text, contextTokens, requested, ids), images, questions, srv.ProxyURL(), timeout)
 		out.LatencyMs = time.Since(start).Milliseconds()
 		if err != nil {
 			log.Warnf("jev decision for %q failed (%s): %v", requested, srv.Name, err)
@@ -347,11 +351,11 @@ type jevCacheEntry struct {
 	expires time.Time
 }
 
-// jevCacheKey identifies a decision: same decision model, question, pool and
-// request text → same answer.
-func jevCacheKey(model, question string, ids []string, text string) string {
+// jevCacheKey identifies a decision: same decision model, question, pool,
+// request text and images → same answer.
+func jevCacheKey(model, question string, ids []string, text string, images []string) string {
 	h := sha256.New()
-	for _, s := range []string{model, question, strings.Join(ids, ","), text} {
+	for _, s := range []string{model, question, strings.Join(ids, ","), text, strings.Join(images, "\x00")} {
 		h.Write([]byte(s))
 		h.Write([]byte{0})
 	}
@@ -462,6 +466,67 @@ func jevContentText(raw json.RawMessage) string {
 		}
 	}
 	return b.String()
+}
+
+// jevMaxImages is llama.cpp's DECISION_MAX_IMAGES for /v1/systemone.
+const jevMaxImages = 8
+
+// jevRequestImages collects the last user turn's images as data URLs — OpenAI
+// image_url parts and Anthropic base64 sources. Remote http(s) image URLs are
+// skipped (the decision endpoint accepts data URLs only).
+func jevRequestImages(body []byte) []string {
+	var req struct {
+		Messages json.RawMessage `json:"messages"`
+	}
+	if json.Unmarshal(body, &req) != nil || len(req.Messages) == 0 {
+		return nil
+	}
+	var msgs []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(req.Messages, &msgs) != nil {
+		return nil
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "user" {
+			continue
+		}
+		var blocks []struct {
+			Type     string `json:"type"`
+			ImageURL struct {
+				URL string `json:"url"`
+			} `json:"image_url"`
+			Source struct {
+				Type      string `json:"type"`
+				MediaType string `json:"media_type"`
+				Data      string `json:"data"`
+			} `json:"source"`
+		}
+		if json.Unmarshal(msgs[i].Content, &blocks) != nil {
+			return nil
+		}
+		var out []string
+		for _, b := range blocks {
+			url := ""
+			switch b.Type {
+			case "image_url":
+				url = b.ImageURL.URL
+			case "image":
+				if b.Source.Type == "base64" && b.Source.Data != "" {
+					url = "data:" + b.Source.MediaType + ";base64," + b.Source.Data
+				}
+			}
+			if strings.HasPrefix(url, "data:image/") {
+				out = append(out, url)
+			}
+			if len(out) >= jevMaxImages {
+				break
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // jevStripReminders drops injected harness context (<system-reminder> blocks)

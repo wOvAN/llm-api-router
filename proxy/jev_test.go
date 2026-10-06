@@ -33,7 +33,7 @@ func TestAskJev(t *testing.T) {
 		"model": {Type: "choice", Instructions: "pick one", Criteria: map[string]any{"haiku": "cheap"}},
 	}
 	resp, err := AskJev(context.Background(), srv.URL+"/v1", "secret", "laya",
-		map[string]any{"request": "hi"}, questions, "", time.Second)
+		map[string]any{"request": "hi"}, []string{"data:image/png;base64,AAA"}, questions, "", time.Second)
 	if err != nil {
 		t.Fatalf("AskJev: %v", err)
 	}
@@ -52,6 +52,10 @@ func TestAskJev(t *testing.T) {
 	}
 	if _, ok := gotBody["state"]; !ok {
 		t.Errorf("body has no state: %v", gotBody)
+	}
+	imgs, _ := gotBody["images"].([]any)
+	if len(imgs) != 1 || imgs[0] != "data:image/png;base64,AAA" {
+		t.Errorf("body images = %v, want the data URL", gotBody["images"])
 	}
 	qs, _ := gotBody["questions"].(map[string]any)
 	q, _ := qs["model"].(map[string]any)
@@ -89,7 +93,7 @@ func TestAskJevConfidenceFromProbabilities(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := AskJev(context.Background(), srv.URL, "", "", nil,
+	resp, err := AskJev(context.Background(), srv.URL, "", "", nil, nil,
 		map[string]JevQuestion{"model": {Type: "choice"}}, "", time.Second)
 	if err != nil {
 		t.Fatalf("AskJev: %v", err)
@@ -106,7 +110,7 @@ func TestAskJevEndpointError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := AskJev(context.Background(), srv.URL, "", "", nil,
+	_, err := AskJev(context.Background(), srv.URL, "", "", nil, nil,
 		map[string]JevQuestion{"model": {Type: "choice"}}, "", time.Second)
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("err = %v, want a 404 endpoint error", err)

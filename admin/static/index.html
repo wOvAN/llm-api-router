@@ -212,6 +212,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
       <div style="display:flex;gap:8px;">
         <label style="flex:1"><span>Cache TTL (сек, 0 = выкл)</span><input id="jev-cache-ttl" type="number" min="0" step="1" value="0" title="Кэш решений для одинаковых запросов"></label>
         <label style="flex:1;display:flex;align-items:center;gap:8px;"><input type="checkbox" id="jev-security" style="width:auto;"><span>Security gate (400 при harmful ≥ 0.95)</span></label>
+        <label style="flex:1;display:flex;align-items:center;gap:8px;"><input type="checkbox" id="jev-images" style="width:auto;"><span>Images в решение (vision decision, дорого)</span></label>
       </div>
       <label><span>Jev Question (пусто = дефолтный промпт)</span><textarea id="jev-question" rows="2" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;padding:4px 8px;"></textarea></label>
       <label>
@@ -730,6 +731,7 @@ function resetJevFields() {
   document.getElementById('jev-default-tier').value = 0;
   document.getElementById('jev-cache-ttl').value = 0;
   document.getElementById('jev-security').checked = false;
+  document.getElementById('jev-images').checked = false;
   document.getElementById('jev-question').value = '';
   document.getElementById('jev-candidates').innerHTML = '';
   toggleJevFields();
@@ -769,6 +771,7 @@ async function saveRule() {
       default_tier: parseInt(document.getElementById('jev-default-tier').value, 10) || 0,
       cache_ttl: parseInt(document.getElementById('jev-cache-ttl').value, 10) || 0,
       security: document.getElementById('jev-security').checked,
+      images: document.getElementById('jev-images').checked,
     };
     data.server_id = '';
     data.fallbacks = [];
@@ -832,6 +835,7 @@ async function editRule(idx) {
     document.getElementById('jev-default-tier').value = r.jev.default_tier || 0;
     document.getElementById('jev-cache-ttl').value = r.jev.cache_ttl || 0;
     document.getElementById('jev-security').checked = r.jev.security === true;
+    document.getElementById('jev-images').checked = r.jev.images === true;
     document.getElementById('jev-question').value = r.jev.question || '';
     for (const c of (r.jev.candidates || [])) {
       addJevRow(c.server_id, c.target_model || '', c.description || '', c.tier || 0, c.enabled !== false, c.context_window || 0);

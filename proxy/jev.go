@@ -49,25 +49,31 @@ const jevMaxResponse = 1 << 20
 
 // AskJev posts a System One decision request to baseURL (a server base URL, the
 // /v1/systemone path is appended with the same dedup the proxy uses) and parses
-// the answers. proxyURL is the decision server's own proxy, timeout bounds the
-// whole exchange, ctx cancels it (client disconnect included).
-func AskJev(ctx context.Context, baseURL, apiKey, model string, state any, questions map[string]JevQuestion, proxyURL string, timeout time.Duration) (*JevResponse, error) {
+// the answers. images (data URLs, llama.cpp accepts max 8) are optional vision
+// input for decision models that support it. proxyURL is the decision server's
+// own proxy, timeout bounds the whole exchange, ctx cancels it (client disconnect
+// included).
+func AskJev(ctx context.Context, baseURL, apiKey, model string, state any, images []string, questions map[string]JevQuestion, proxyURL string, timeout time.Duration) (*JevResponse, error) {
 	endpoint := strings.TrimRight(baseURL, "/")
 	if !strings.HasSuffix(endpoint, "/v1") {
 		endpoint += "/v1"
 	}
 	endpoint += "/systemone"
 
-	payload, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"state":     state,
 		"model":     model,
 		"questions": questions,
-	})
+	}
+	if len(images) > 0 {
+		payload["images"] = images
+	}
+	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode jev request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
 	if err != nil {
 		return nil, fmt.Errorf("build jev request: %w", err)
 	}

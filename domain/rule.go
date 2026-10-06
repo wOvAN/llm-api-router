@@ -69,6 +69,11 @@ type JevRouter struct {
 	// CacheTTL caches the decision for identical requests (same decision model,
 	// question, pool, request text) for this many seconds; 0 = off.
 	CacheTTL int `json:"cache_ttl,omitempty"`
+	// Images forwards the last user turn's images (data URLs, max 8) to the
+	// decision model, so a vision decision model (Clef/OpenJev) can judge them.
+	// Off by default: image tokens make every decision expensive and non-vision
+	// decision backends reject them.
+	Images bool `json:"images,omitempty"`
 }
 
 // JevCandidate is one model the decision model may pick. Tier orders the pool

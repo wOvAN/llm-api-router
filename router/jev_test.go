@@ -430,6 +430,65 @@ func TestJevAttemptsContextNoDowngrade(t *testing.T) {
 	}
 }
 
+func TestJevAttemptsImages(t *testing.T) {
+	var gotImages []any
+	decision := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(b, &body)
+		gotImages, _ = body["images"].([]any)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"model":{"type":"choice","choice":"opus","confidence":0.9}}}`))
+	}))
+	t.Cleanup(decision.Close)
+	r, store, _ := jevTestRouter(t)
+	addJevServers(t, store, decision.URL)
+	rule := jevRule(decision.URL, 0.3, 1)
+	rule.Jev.Images = true
+
+	// OpenAI image_url (data URL kept, http URL skipped) + Anthropic base64 source.
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"what is in these images?"},` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}},` +
+		`{"type":"image_url","image_url":{"url":"https://x/y.png"}},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"BBB"}}` +
+		`]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	if _, out := r.jevAttempts(req, rule, body, "auto"); out.Reason != "jev" {
+		t.Fatalf("reason = %q, want jev", out.Reason)
+	}
+	want := []string{"data:image/png;base64,AAA", "data:image/jpeg;base64,BBB"}
+	if len(gotImages) != len(want) {
+		t.Fatalf("decision images = %v, want %v", gotImages, want)
+	}
+	for i, v := range want {
+		if gotImages[i] != v {
+			t.Errorf("image %d = %v, want %v", i, gotImages[i], v)
+		}
+	}
+
+	// Off by default: the same body sends no images.
+	gotImages = nil
+	rule.Jev.Images = false
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	r.jevAttempts(req, rule, body, "auto")
+	if len(gotImages) != 0 {
+		t.Errorf("images = %v with Images off, want none", gotImages)
+	}
+}
+
+func TestJevRequestImagesCap(t *testing.T) {
+	var parts []string
+	for i := 0; i < 10; i++ {
+		parts = append(parts, fmt.Sprintf(`{"type":"image_url","image_url":{"url":"data:image/png;base64,%d"}}`, i))
+	}
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":[` + strings.Join(parts, ",") + `]}]}`)
+	imgs := jevRequestImages(body)
+	if len(imgs) != jevMaxImages {
+		t.Errorf("images = %d, want the cap %d", len(imgs), jevMaxImages)
+	}
+}
+
 func TestListModelsJevPoolContext(t *testing.T) {
 	r, store, _ := jevTestRouter(t)
 	_ = store.AddRule(&domain.RoutingRule{
