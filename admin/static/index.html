@@ -218,6 +218,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
         <span>Jev Candidates (пул: tier 0 = слабее/дешевле)</span>
         <div id="jev-candidates"></div>
         <button type="button" onclick="addJevRow()" style="margin-top:4px;">+ Add Candidate</button>
+        <button type="button" onclick="applyJevPreset()" style="margin-top:4px;" title="Заполнить пул проверенным шаблоном haiku/sonnet/opus (tier 0/1/2, Default Tier = 1); сервер и target model выберите сами">Preset: haiku/sonnet/opus</button>
       </label>
     </div>
     <label id="label-rule-fallbacks">
@@ -1145,6 +1146,20 @@ function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabl
   document.getElementById('jev-candidates').appendChild(row);
   // Populate the model list for the preselected server (a new row defaults to the first).
   if (sel.value) sel.onchange();
+}
+
+// Tested 3-tier template from docs/jev-router-guide.md: tier 0 = fast/cheap,
+// tier 1 = everyday (default), tier 2 = strongest reasoning. Servers/target
+// models are left for the user to pick.
+function applyJevPreset() {
+  const preset = [
+    {tier: 0, description: 'fast and cheap; simple questions, rephrasing, formatting, short edits, one obvious command, factual lookups'},
+    {tier: 1, description: 'everyday engineering; implement a specified feature, tests, summaries, refactors with a clear shape, understood local bugs'},
+    {tier: 2, description: 'strongest reasoning; unknown-cause debugging, cross-module design, security, auth, concurrency, migrations, unusually large tasks'},
+  ];
+  document.getElementById('jev-candidates').innerHTML = '';
+  preset.forEach(p => addJevRow('', '', p.description, p.tier));
+  document.getElementById('jev-default-tier').value = 1;
 }
 
 function getJevCandidates() {
