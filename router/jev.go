@@ -108,9 +108,13 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 
 	choice := -1
 	switch {
-	case req.Header.Get("X-Router-Jev") == "off", strings.Contains(req.URL.Path, "count_tokens"):
-		// count_tokens is a metadata call (Claude Code fires bursts of it):
-		// no generation happens, a decision would only add latency and tokens.
+	case req.Header.Get("X-Router-Jev") == "off",
+		strings.Contains(req.URL.Path, "count_tokens"),
+		text == "":
+		// Bypass the decision: explicit header; count_tokens is a metadata
+		// call (Claude Code fires bursts of it); an empty request text means
+		// an auxiliary call (tool_result-only turns) — the reference Jev
+		// plugin skips the decision on all of these.
 		out.Reason = "off"
 	default:
 		key := ""
@@ -438,8 +442,13 @@ func jevRequestText(body []byte) (string, int) {
 		if t := jevContentText(msgs[i].Content); t != "" {
 			return jevStripReminders(t), tokens
 		}
+		// The last user turn carries no text (tool_result-only — the agent
+		// loops of Claude Code and friends): an auxiliary call, the reference
+		// Jev plugin skips the decision on these. Dumping the raw messages
+		// JSON instead is huge noise that overflows the decision model's batch.
+		return "", tokens
 	}
-	return jevStripReminders(string(raw)), tokens
+	return "", tokens
 }
 
 // jevContentText flattens message content: a plain string, or text blocks.

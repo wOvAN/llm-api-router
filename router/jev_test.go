@@ -140,8 +140,8 @@ func TestJevAttemptsDecisionUnavailable(t *testing.T) {
 	addJevServers(t, store, decision.URL)
 	decision.Close() // endpoint dead → no usable answer
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto"}`))
-	attempts, out := r.jevAttempts(req, jevRule(decision.URL, 0.3, 1), []byte(`{"model":"auto"}`), "auto")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`))
+	attempts, out := r.jevAttempts(req, jevRule(decision.URL, 0.3, 1), []byte(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`), "auto")
 
 	if len(attempts) != 4 || attempts[0].server.ID != "s1" {
 		t.Errorf("attempts = %v, want the pool with the default tier first", attemptIDs(attempts))
@@ -157,8 +157,8 @@ func TestJevAttemptsEmptyPool(t *testing.T) {
 	for i := range rule.Jev.Candidates {
 		rule.Jev.Candidates[i].Enabled = new(false)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto"}`))
-	attempts, out := r.jevAttempts(req, rule, []byte(`{"model":"auto"}`), "auto")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`))
+	attempts, out := r.jevAttempts(req, rule, []byte(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`), "auto")
 	if len(attempts) != 0 || out.Reason != "no-pool" {
 		t.Errorf("attempts = %v reason = %q, want empty pool", attemptIDs(attempts), out.Reason)
 	}
@@ -288,6 +288,19 @@ func TestJevState(t *testing.T) {
 	if text = jevTruncate(text, 5); !utf8.ValidString(text) {
 		t.Errorf("truncated request is not valid UTF-8: %q", text)
 	}
+
+	// A tool_result-only last turn (agent loop) is an auxiliary call: no text,
+	// never the raw messages JSON.
+	text, tokens = jevRequestText([]byte(`{"model":"auto","messages":[` +
+		`{"role":"user","content":"real question"},` +
+		`{"role":"assistant","content":"working"},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"` + strings.Repeat("x", 4000) + `"}]}]}`))
+	if text != "" {
+		t.Errorf("tool_result-only turn request = %q..., want empty", text[:min(60, len(text))])
+	}
+	if tokens <= 0 {
+		t.Errorf("context_tokens = %v, want a positive estimate", tokens)
+	}
 }
 
 func TestJevAttemptsSecurity(t *testing.T) {
@@ -310,8 +323,8 @@ func TestJevAttemptsSecurity(t *testing.T) {
 			rule := jevRule(decision.URL, 0.3, 1)
 			rule.Jev.Security = true
 
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto"}`))
-			attempts, out := r.jevAttempts(req, rule, []byte(`{"model":"auto"}`), "auto")
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`))
+			attempts, out := r.jevAttempts(req, rule, []byte(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`), "auto")
 			if out.Reason != tt.wantReason {
 				t.Errorf("reason = %q, want %q", out.Reason, tt.wantReason)
 			}
@@ -346,7 +359,7 @@ func TestHandleJevSecurityBlock(t *testing.T) {
 			Candidates: []domain.JevCandidate{{ServerID: "strong", TargetModel: "sonnet", Tier: 0}}},
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`))
 	w := httptest.NewRecorder()
 	r.Handle(w, req)
 
@@ -370,8 +383,8 @@ func TestJevAttemptsScores(t *testing.T) {
 		`"tool_complexity":{"type":"score","score":2}}}`, &calls)
 	addJevServers(t, store, decision.URL)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto"}`))
-	_, out := r.jevAttempts(req, jevRule(decision.URL, 0.3, 1), []byte(`{"model":"auto"}`), "auto")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`))
+	_, out := r.jevAttempts(req, jevRule(decision.URL, 0.3, 1), []byte(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`), "auto")
 	if out.Scores != "task 5, reasoning 7, tools 2" {
 		t.Errorf("scores = %q", out.Scores)
 	}
@@ -502,6 +515,14 @@ func TestJevAttemptsCountTokensSkipsDecision(t *testing.T) {
 	}
 	if len(attempts) == 0 || attempts[0].server.ID != "s1" {
 		t.Errorf("attempts = %v, want the default tier first", attemptIDs(attempts))
+	}
+
+	// A tool_result-only last turn (agent loop) is an auxiliary call too.
+	body = []byte(`{"model":"auto","messages":[{"role":"user","content":[{"type":"tool_result","content":"output"}]}]}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(body)))
+	_, out = r.jevAttempts(req, jevRule(decision.URL, 0.3, 1), body, "auto")
+	if out.Reason != "off" || calls != 0 {
+		t.Errorf("tool_result turn: reason = %q calls = %d, want off with no decision call", out.Reason, calls)
 	}
 }
 
