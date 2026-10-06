@@ -435,6 +435,8 @@ func jevRequestText(body []byte) (string, int) {
 		}
 		return jevStripReminders(string(raw)), tokens
 	}
+	// Last user turn with text — agent loops end on tool_result-only turns,
+	// the conversation's task lives in an earlier user turn.
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role != "user" {
 			continue
@@ -442,12 +444,9 @@ func jevRequestText(body []byte) (string, int) {
 		if t := jevContentText(msgs[i].Content); t != "" {
 			return jevStripReminders(t), tokens
 		}
-		// The last user turn carries no text (tool_result-only — the agent
-		// loops of Claude Code and friends): an auxiliary call, the reference
-		// Jev plugin skips the decision on these. Dumping the raw messages
-		// JSON instead is huge noise that overflows the decision model's batch.
-		return "", tokens
 	}
+	// No user text anywhere: auxiliary call, nothing to judge (the reference
+	// Jev plugin skips the decision on these).
 	return "", tokens
 }
 

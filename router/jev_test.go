@@ -289,17 +289,23 @@ func TestJevState(t *testing.T) {
 		t.Errorf("truncated request is not valid UTF-8: %q", text)
 	}
 
-	// A tool_result-only last turn (agent loop) is an auxiliary call: no text,
-	// never the raw messages JSON.
+	// A tool_result-only last turn (agent loop) falls back to the last user
+	// turn that has text — never the raw messages JSON.
 	text, tokens = jevRequestText([]byte(`{"model":"auto","messages":[` +
 		`{"role":"user","content":"real question"},` +
 		`{"role":"assistant","content":"working"},` +
 		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"` + strings.Repeat("x", 4000) + `"}]}]}`))
-	if text != "" {
-		t.Errorf("tool_result-only turn request = %q..., want empty", text[:min(60, len(text))])
+	if text != "real question" {
+		t.Errorf("tool_result-only turn request = %q, want the earlier user text", text[:min(60, len(text))])
 	}
 	if tokens <= 0 {
 		t.Errorf("context_tokens = %v, want a positive estimate", tokens)
+	}
+
+	// No user text anywhere: empty (auxiliary call).
+	text, _ = jevRequestText([]byte(`{"model":"auto","messages":[{"role":"user","content":[{"type":"tool_result","content":"out"}]}]}`))
+	if text != "" {
+		t.Errorf("text = %q, want empty", text)
 	}
 }
 
