@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"llm-api-router/config"
@@ -26,11 +27,20 @@ type Router struct {
 	health    *config.HealthTracker
 	rateLimit *config.RateLimiter
 	quota     *config.QuotaTracker
+	jevMu     sync.Mutex               // guards jevCache
+	jevCache  map[string]jevCacheEntry // jev decision cache (opt-in per rule)
 }
 
 // New creates a new Router.
 func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter, quota *config.QuotaTracker) *Router {
-	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit, quota: quota}
+	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit, quota: quota,
+		jevCache: map[string]jevCacheEntry{}}
+}
+
+// serverAttempt is one proxy target: a backend server plus the model to send it.
+type serverAttempt struct {
+	server      *domain.Server
+	targetModel string
 }
 
 // orderedFallbacks returns the rule's enabled fallbacks in attempt order:
@@ -166,32 +176,59 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	}
 
 	primaryServer, ok := r.store.GetServer(rule.ServerID)
-	if !ok {
+	if !ok && !rule.IsJev() {
 		log.Errorf("[%s] server %q not found for model %q", req.URL.Path, rule.ServerID, model)
 		http.Error(w, fmt.Sprintf("server %q not found", rule.ServerID), http.StatusInternalServerError)
 		return
 	}
 
-	type serverAttempt struct {
-		server      *domain.Server
-		targetModel string
-	}
-	attempts := []serverAttempt{{server: primaryServer, targetModel: rule.TargetModel}}
-	for _, fb := range orderedFallbacks(rule) {
-		if srv, ok := r.store.GetServer(fb.ServerID); ok {
-			tm := fb.TargetModel
-			if tm == "" {
-				tm = rule.TargetModel
+	var jev *jevOutcome
+	var attempts []serverAttempt
+	requestStart := time.Now()
+	apiType := apiTypeFromPath(req.URL.Path)
+	if rule.IsJev() {
+		// The decision model picks the pool entry; the rest of the pool stays
+		// behind it as the fallback chain.
+		list, outcome := r.jevAttempts(req, rule, body, model)
+		jev = &outcome
+		attempts = list
+	} else {
+		attempts = []serverAttempt{{server: primaryServer, targetModel: rule.TargetModel}}
+		for _, fb := range orderedFallbacks(rule) {
+			if srv, ok := r.store.GetServer(fb.ServerID); ok {
+				tm := fb.TargetModel
+				if tm == "" {
+					tm = rule.TargetModel
+				}
+				attempts = append(attempts, serverAttempt{server: srv, targetModel: tm})
 			}
-			attempts = append(attempts, serverAttempt{server: srv, targetModel: tm})
 		}
 	}
+	if jev != nil && jev.Reason == "blocked" {
+		// Opt-in Noul security gate: the decision model rated the request as
+		// near-certain harm intent. Nothing was forwarded upstream.
+		r.record(req, requestStart, model, "", "", proxy.ProxyMetrics{}, http.StatusBadRequest, "blocked by jev security gate", false, apiType, jev)
+		log.Warnf("[%s] model=%q — jev security gate blocked the request", req.URL.Path, model)
+		http.Error(w, "request blocked by security gate", http.StatusBadRequest)
+		return
+	}
+	if len(attempts) == 0 {
+		log.Errorf("[%s] model=%q — rule has no usable backend (jev pool empty or servers missing)", req.URL.Path, model)
+		http.Error(w, "routing rule has no usable backend", http.StatusInternalServerError)
+		return
+	}
+	if jev != nil {
+		// Observability: what the decision model answered, so a client (and the
+		// metrics table) can see why a request landed on a given model.
+		w.Header().Set("X-Router-Jev-Choice", jev.Choice)
+		w.Header().Set("X-Router-Jev-Confidence", strconv.FormatFloat(jev.Confidence, 'g', 3, 64))
+		w.Header().Set("X-Router-Jev-Ms", strconv.FormatInt(jev.LatencyMs, 10))
+		w.Header().Set("X-Router-Jev-Reason", jev.Reason)
+	}
 
-	requestStart := time.Now()
 	// Inject stream_options.include_usage for OpenAI streaming chat completions so
 	// backends report token usage even when the client didn't opt in. stripStream
 	// hides the injected usage chunk from the client (unless configured otherwise).
-	apiType := apiTypeFromPath(req.URL.Path)
 	stripStream := false
 	if apiType == domain.APITypeOpenAI && strings.Contains(req.URL.Path, "/chat/completions") {
 		alwaysInclude := r.store.GetSettings().AlwaysIncludeStreamUsage
@@ -275,7 +312,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		// On fallback, preserve the actual model used (don't rewrite back to
 		// the original) so the client knows which model actually responded.
 		responseModel := model
-		if wasFallback {
+		if wasFallback || jev != nil {
 			responseModel = targetModel
 		}
 		// Log the response rewrite parameters
@@ -356,7 +393,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 						req.URL.Path, model, targetModel, srv.Name, pm.StatusCode, http.StatusText(pm.StatusCode), pm.ErrorBody)
 				}
 
-				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType)
+				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType, jev)
 				return
 			}
 
@@ -383,7 +420,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				log.Errorf("[%s] model=%q — mid-stream error on %s (attempt %d/%d): %v",
 					req.URL.Path, model, srv.Name, i+1, len(attempts), err)
 				// Record whatever metrics we have
-				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType)
+				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType, jev)
 				return
 			}
 
@@ -419,15 +456,16 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	if lastErr != nil {
 		errorBody = lastErr.Error()
 	}
-	r.record(req, requestStart, model, rule.TargetModel, primaryServer.ID, proxy.ProxyMetrics{}, http.StatusBadGateway, errorBody, len(attempts) > 1, apiType)
+	r.record(req, requestStart, model, attempts[0].targetModel, attempts[0].server.ID, proxy.ProxyMetrics{}, http.StatusBadGateway, errorBody, len(attempts) > 1, apiType, jev)
 
 	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)
 	http.Error(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
 }
 
 // record stores a request metric; pm fields feed the usage/timing columns.
-func (r *Router) record(req *http.Request, requestStart time.Time, model, targetModel, serverID string, pm proxy.ProxyMetrics, statusCode int, errorBody string, wasFallback bool, apiType domain.APIType) {
-	r.metrics.Add(domain.RequestMetric{
+// jev is the auto-routing decision (nil on static rules).
+func (r *Router) record(req *http.Request, requestStart time.Time, model, targetModel, serverID string, pm proxy.ProxyMetrics, statusCode int, errorBody string, wasFallback bool, apiType domain.APIType, jev *jevOutcome) {
+	m := domain.RequestMetric{
 		Timestamp:             requestStart,
 		Model:                 model,
 		TargetModel:           targetModel,
@@ -455,7 +493,17 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 		APIType:               apiType,
 		APIEndpoint:           apiEndpointFromPath(req.URL.Path),
 		ClientIP:              clientIP(req),
-	})
+	}
+	if jev != nil {
+		m.JevChoice = jev.Choice
+		m.JevConfidence = jev.Confidence
+		m.JevLatencyMs = jev.LatencyMs
+		m.JevModel = jev.Model
+		m.JevReason = jev.Reason
+		m.JevTokens = jev.InputTokens + jev.OutputTokens
+		m.JevScores = jev.Scores
+	}
+	r.metrics.Add(m)
 }
 
 // defaultNumRetries is the effective num_retries for rules that don't set one:
@@ -498,8 +546,28 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 			}
 			// Clients (Claude Code etc.) read context_window to size prompts.
 			// Omitted entirely when unknown (malformed/0 → absent, per LiteLLM).
-			if rule.ContextWindow > 0 {
-				m["context_window"] = rule.ContextWindow
+			// A jev rule without its own value reports the pool minimum.
+			cw := rule.ContextWindow
+			if rule.IsJev() && cw == 0 {
+				for _, c := range rule.Jev.EnabledCandidates() {
+					if c.ContextWindow > 0 && (cw == 0 || c.ContextWindow < cw) {
+						cw = c.ContextWindow
+					}
+				}
+			}
+			if cw > 0 {
+				m["context_window"] = cw
+			}
+			// A jev rule has no single target: advertise the pool it picks from.
+			if rule.IsJev() {
+				m["router"] = domain.RouterJev
+				pool := make([]string, 0, len(rule.Jev.Candidates))
+				for _, c := range rule.Jev.EnabledCandidates() {
+					if c.TargetModel != "" {
+						pool = append(pool, c.TargetModel)
+					}
+				}
+				m["models"] = pool
 			}
 			models = append(models, m)
 		}

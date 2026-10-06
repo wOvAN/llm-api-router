@@ -36,6 +36,17 @@ type RequestMetric struct {
 	NativePromptTokPerSec float64 `json:"native_prefill_tok_per_sec"`
 	NativeDecodeTokPerSec float64 `json:"native_decode_tok_per_sec"`
 	NativeQueueMs         float64 `json:"native_queue_ms"`
+
+	// Jev auto-routing decision (empty/zero on static rules): the chosen
+	// candidate, its confidence, how long the decision took, the decision model,
+	// why that candidate won, and tokens the decision itself cost.
+	JevChoice     string  `json:"jev_choice,omitempty"`
+	JevConfidence float64 `json:"jev_confidence,omitempty"`
+	JevLatencyMs  int64   `json:"jev_latency_ms,omitempty"`
+	JevModel      string  `json:"jev_model,omitempty"`
+	JevReason     string  `json:"jev_reason,omitempty"`
+	JevTokens     int     `json:"jev_tokens,omitempty"`
+	JevScores     string  `json:"jev_scores,omitempty"`
 }
 
 // Summary aggregates metrics for a group (by model, server, etc.).

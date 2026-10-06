@@ -82,6 +82,41 @@
           "server_id": "local-llama",
           "fallbacks": [],
           "enabled": true
+        },
+        {
+          "incoming_models": ["auto"],
+          "router": "jev",
+          "jev": {
+            "server_id": "local-llama",
+            "model": "laya",
+            "min_confidence": 0.3,
+            "default_tier": 1,
+            "timeout_ms": 1500,
+            "cache_ttl": 60,
+            "security": true,
+            "candidates": [
+              {
+                "server_id": "local-llama",
+                "target_model": "claude-haiku-4-5-20251001",
+                "description": "small and fast; simple questions, formatting, short edits",
+                "tier": 0,
+                "context_window": 200000
+              },
+              {
+                "server_id": "fallback",
+                "target_model": "gpt-4o-mini",
+                "description": "mid tier; everyday coding, summaries",
+                "tier": 1
+              },
+              {
+                "server_id": "primary-openai",
+                "target_model": "o3-mini",
+                "description": "strong reasoning; multi-file refactors, tricky bugs",
+                "tier": 2
+              }
+            ]
+          },
+          "enabled": true
         }
       ]
     }

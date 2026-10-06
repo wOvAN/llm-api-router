@@ -133,7 +133,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   </table>
   <h2 style="margin-top:20px;">Recent Requests</h2>
   <table>
-    <thead><tr><th>Time</th><th>Model</th><th>Target</th><th>Server</th><th>API</th><th>Status</th><th>Latency</th><th>Prefill</th><th>Decode</th><th>P tok/s</th><th>D tok/s</th><th>P tok</th><th>D tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Size</th><th>Fallback</th><th>Client</th></tr></thead>
+    <thead><tr><th>Time</th><th>Model</th><th>Target</th><th>Server</th><th>API</th><th>Status</th><th>Latency</th><th>Prefill</th><th>Decode</th><th>P tok/s</th><th>D tok/s</th><th>P tok</th><th>D tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Size</th><th>Fallback</th><th>Jev</th><th>Client</th></tr></thead>
     <tbody id="recent-body"></tbody>
   </table>
 </div>
@@ -185,15 +185,37 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <h3 id="rule-modal-title">Add Routing Rule</h3>
     <input type="hidden" id="rule-edit-idx">
     <label><span>Incoming Models (через запятую)</span><input id="rule-incoming" type="text" placeholder="e.g. opus,sonnet,claude-opus"></label>
-    <label><span>Primary Server</span><select id="rule-server" onchange="fetchServerModels()"></select></label>
+    <label><span>Router</span><select id="rule-router" onchange="toggleJevFields()">
+      <option value="">Static (primary + fallbacks)</option>
+      <option value="jev">Jev (decision-модель выбирает модель за запрос)</option>
+    </select></label>
+    <label id="label-rule-server"><span>Primary Server</span><select id="rule-server" onchange="fetchServerModels()"></select></label>
     <label><span>Context Window (токенов, 0 = неизвестно)</span><input id="rule-context-window" type="number" min="0" step="1" value="0"></label>
-    <label><span>Target Model <button type="button" onclick="fetchServerModels()" title="Обновить список моделей с сервера" style="padding:0 6px;">↻</button></span>
+    <label id="label-rule-target"><span>Target Model <button type="button" onclick="fetchServerModels()" title="Обновить список моделей с сервера" style="padding:0 6px;">↻</button></span>
       <div id="rule-target-wrap" style="margin-top:4px;">
         <select id="rule-target-sel" style="width:100%;"><option value="">(выберите модель)</option></select>
         <input id="rule-target-inp" type="text" placeholder="или введите вручную..." style="width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;">
       </div>
     </label>
-    <label>
+    <div id="jev-fields" style="display:none;">
+      <label><span>Jev Decision Server (llama.cpp с decision-моделью)</span><select id="jev-server"></select></label>
+      <label><span>Decision Model (пусто = бэкенд решает)</span><input id="jev-model" type="text" placeholder="e.g. laya"></label>
+      <div style="display:flex;gap:8px;">
+        <label style="flex:1"><span>Min Confidence (0 = 0.3)</span><input id="jev-min-conf" type="number" min="0" max="1" step="0.05" value="0"></label>
+        <label style="flex:1"><span>Default Tier</span><input id="jev-default-tier" type="number" min="0" step="1" value="0" title="Tier кандидата по умолчанию: при низком confidence не ниже его"></label>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <label style="flex:1"><span>Cache TTL (сек, 0 = выкл)</span><input id="jev-cache-ttl" type="number" min="0" step="1" value="0" title="Кэш решений для одинаковых запросов"></label>
+        <label style="flex:1;display:flex;align-items:center;gap:8px;"><input type="checkbox" id="jev-security" style="width:auto;"><span>Security gate (400 при harmful ≥ 0.95)</span></label>
+      </div>
+      <label><span>Jev Question (пусто = дефолтный промпт)</span><textarea id="jev-question" rows="2" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;padding:4px 8px;"></textarea></label>
+      <label>
+        <span>Jev Candidates (пул: tier 0 = слабее/дешевле)</span>
+        <div id="jev-candidates"></div>
+        <button type="button" onclick="addJevRow()" style="margin-top:4px;">+ Add Candidate</button>
+      </label>
+    </div>
+    <label id="label-rule-fallbacks">
       <span>Fallbacks</span>
       <div id="fallbacks-container"></div>
       <button type="button" onclick="addFallbackRow()" style="margin-top:4px;">+ Add Fallback</button>
@@ -561,14 +583,25 @@ async function loadRules() {
       return `<span class="tag" style="${style}" title="${dis ? 'disabled fallback' : (f.priority ? 'priority ' + f.priority : '')}">${pr}${esc(f.server_id)}${tm}</span>`;
     }).join('') || '(none)';
     const models = (r.incoming_models || []).map(m => `<span class="tag" style="background:#1a1a3a;color:#58a6ff">${esc(m)}</span>`).join(' ');
+    const jev = r.router === 'jev' && r.jev ? r.jev : null;
+    const targetCell = jev
+      ? (jev.candidates || []).map(c => {
+          const dis = c.enabled === false;
+          const style = dis ? 'background:#3a3a1a;color:#484f58;text-decoration:line-through' : 'background:#1a3a3a;color:#39c5cf';
+          return `<span class="tag" style="${style}" title="tier ${c.tier || 0}${c.description ? ': ' + escAttr(c.description) : ''}">${esc(c.target_model || c.server_id)}</span>`;
+        }).join(' ') || '(empty pool)'
+      : esc(r.target_model);
+    const serverCell = jev
+      ? `<span class="tag" style="background:#2d1b4e;color:#d2a8ff" title="decision model: ${escAttr(jev.model || '(backend default)')}">jev → ${esc(jev.server_id)}</span>`
+      : esc(r.server_id);
     const enabled = r.enabled !== false ? '<input type="checkbox" checked onchange="toggleRuleEnabled(' + r._idx + ',this.checked)" title="Enable rule">' : '<input type="checkbox" onchange="toggleRuleEnabled(' + r._idx + ',this.checked)" title="Disable rule">';
     return `<tr style="opacity:${r.enabled !== false ? '1' : '0.45'}">
       <td>${r._idx}</td>
       <td>${enabled}</td>
       <td>${models}</td>
-      <td>${esc(r.target_model)}</td>
-      <td>${esc(r.server_id)}</td>
-      <td>${fallbacks}</td>
+      <td>${targetCell}</td>
+      <td>${serverCell}</td>
+      <td>${jev ? '(pool)' : fallbacks}</td>
       <td class="actions">
         <button onclick="editRule(${r._idx})">Edit</button>
         <button class="danger" onclick="deleteRule(${r._idx})">Delete</button>
@@ -580,8 +613,9 @@ async function loadRules() {
 async function populateServerDropdown() {
   const res = await fetch(API + '/servers');
   const servers = await res.json();
-  const sel = document.getElementById('rule-server');
-  sel.innerHTML = servers.map(s => `<option value="${esc(s.id)}">${esc(s.name)} (${esc(s.id)})</option>`).join('');
+  const opts = servers.map(s => `<option value="${esc(s.id)}">${esc(s.name)} (${esc(s.id)})</option>`).join('');
+  document.getElementById('rule-server').innerHTML = opts;
+  document.getElementById('jev-server').innerHTML = opts;
 }
 
 async function fetchServerModels() {
@@ -627,8 +661,30 @@ async function openRuleModal() {
   document.getElementById('rule-enabled').checked = true;
   document.getElementById('rule-context-window').value = 0;
   document.getElementById('fallbacks-container').innerHTML = '';
+  resetJevFields();
   await fetchServerModels();
   document.getElementById('rule-modal').classList.add('open');
+}
+
+function resetJevFields() {
+  document.getElementById('rule-router').value = '';
+  document.getElementById('jev-server').value = '';
+  document.getElementById('jev-model').value = '';
+  document.getElementById('jev-min-conf').value = 0;
+  document.getElementById('jev-default-tier').value = 0;
+  document.getElementById('jev-cache-ttl').value = 0;
+  document.getElementById('jev-security').checked = false;
+  document.getElementById('jev-question').value = '';
+  document.getElementById('jev-candidates').innerHTML = '';
+  toggleJevFields();
+}
+
+function toggleJevFields() {
+  const jev = document.getElementById('rule-router').value === 'jev';
+  for (const id of ['label-rule-server', 'label-rule-target', 'label-rule-fallbacks']) {
+    document.getElementById(id).style.display = jev ? 'none' : '';
+  }
+  document.getElementById('jev-fields').style.display = jev ? 'block' : 'none';
 }
 
 function closeRuleModal() { document.getElementById('rule-modal').classList.remove('open'); }
@@ -646,6 +702,21 @@ async function saveRule() {
     enabled: document.getElementById('rule-enabled').checked,
     context_window: parseInt(document.getElementById('rule-context-window').value, 10) || 0,
   };
+  if (document.getElementById('rule-router').value === 'jev') {
+    data.router = 'jev';
+    data.jev = {
+      server_id: document.getElementById('jev-server').value,
+      model: document.getElementById('jev-model').value.trim(),
+      question: document.getElementById('jev-question').value.trim(),
+      candidates: getJevCandidates(),
+      min_confidence: parseFloat(document.getElementById('jev-min-conf').value, 10) || 0,
+      default_tier: parseInt(document.getElementById('jev-default-tier').value, 10) || 0,
+      cache_ttl: parseInt(document.getElementById('jev-cache-ttl').value, 10) || 0,
+      security: document.getElementById('jev-security').checked,
+    };
+    data.server_id = '';
+    data.fallbacks = [];
+  }
   const method = idx !== '' ? 'PUT' : 'POST';
   const url = ruleURL(idx !== '' ? idx : null);
   const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
@@ -693,6 +764,22 @@ async function editRule(idx) {
   document.getElementById('fallbacks-container').innerHTML = '';
   for (const fb of fbs) {
     addFallbackRow(fb.server_id, fb.target_model || '', fb.priority || 0, fb.enabled !== false);
+  }
+  // Populate jev router fields
+  resetJevFields();
+  if (r.router === 'jev' && r.jev) {
+    document.getElementById('rule-router').value = 'jev';
+    document.getElementById('jev-server').value = r.jev.server_id || '';
+    document.getElementById('jev-model').value = r.jev.model || '';
+    document.getElementById('jev-min-conf').value = r.jev.min_confidence || 0;
+    document.getElementById('jev-default-tier').value = r.jev.default_tier || 0;
+    document.getElementById('jev-cache-ttl').value = r.jev.cache_ttl || 0;
+    document.getElementById('jev-security').checked = r.jev.security === true;
+    document.getElementById('jev-question').value = r.jev.question || '';
+    for (const c of (r.jev.candidates || [])) {
+      addJevRow(c.server_id, c.target_model || '', c.description || '', c.tier || 0, c.enabled !== false, c.context_window || 0);
+    }
+    toggleJevFields();
   }
   document.getElementById('rule-modal').classList.add('open');
   // Fetch models for the selected server
@@ -911,6 +998,87 @@ function getServersFromDropdown() {
   return servers;
 }
 
+// --- Jev candidates ---
+// ponytail: plain text model input, no per-server model fetch like fallback rows —
+// the jev pool is a handful of hand-picked models.
+function addJevRow(serverId, targetModel, description, tier, enabled, contextWindow) {
+  const servers = getServersFromDropdown();
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;margin-bottom:6px;width:100%;';
+  row.className = 'jev-row';
+  const inpStyle = 'padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.85rem;';
+  const sel = document.createElement('select');
+  sel.className = 'jev-server';
+  sel.style.cssText = 'flex:1 1 180px;min-width:150px;';
+  sel.innerHTML = servers.map(s => `<option value="${esc(s.id)}" ${s.id === serverId ? 'selected' : ''}>${esc(s.name)} (${esc(s.id)})</option>`).join('');
+  const modelInp = document.createElement('input');
+  modelInp.type = 'text';
+  modelInp.className = 'jev-model';
+  modelInp.placeholder = 'target model (пусто = server id)';
+  modelInp.value = targetModel;
+  modelInp.style.cssText = 'flex:1 1 140px;min-width:120px;' + inpStyle;
+  const descInp = document.createElement('input');
+  descInp.type = 'text';
+  descInp.className = 'jev-desc';
+  descInp.placeholder = 'описание для decision-модели';
+  descInp.value = description;
+  descInp.style.cssText = 'flex:2 1 180px;min-width:140px;' + inpStyle;
+  const tierInp = document.createElement('input');
+  tierInp.type = 'number';
+  tierInp.className = 'jev-tier';
+  tierInp.min = '0';
+  tierInp.step = '1';
+  tierInp.value = tier || 0;
+  tierInp.title = 'Tier: 0 = слабее всех; low confidence не опускает ниже Default Tier';
+  tierInp.style.cssText = 'flex:0 0 60px;' + inpStyle;
+  const cwInp = document.createElement('input');
+  cwInp.type = 'number';
+  cwInp.className = 'jev-cw';
+  cwInp.min = '0';
+  cwInp.step = '1';
+  cwInp.value = contextWindow || 0;
+  cwInp.title = 'Context window (для min по пулу в /v1/models; 0 = неизвестно)';
+  cwInp.style.cssText = 'flex:0 0 90px;' + inpStyle;
+  const enabledChk = document.createElement('input');
+  enabledChk.type = 'checkbox';
+  enabledChk.className = 'jev-enabled';
+  enabledChk.checked = enabled !== false;
+  enabledChk.title = 'Enabled (uncheck to remove from the pool)';
+  enabledChk.style.cssText = 'margin-top:9px;width:auto;';
+  const btn = document.createElement('button');
+  btn.textContent = '✕';
+  btn.className = 'danger';
+  btn.style.cssText = 'margin-top:2px;';
+  btn.onclick = () => row.remove();
+  row.appendChild(sel);
+  row.appendChild(modelInp);
+  row.appendChild(descInp);
+  row.appendChild(tierInp);
+  row.appendChild(cwInp);
+  row.appendChild(enabledChk);
+  row.appendChild(btn);
+  document.getElementById('jev-candidates').appendChild(row);
+}
+
+function getJevCandidates() {
+  const candidates = [];
+  document.querySelectorAll('.jev-row').forEach(row => {
+    const serverSel = row.querySelector('.jev-server');
+    if (!serverSel.value) return;
+    const c = {
+      server_id: serverSel.value,
+      target_model: row.querySelector('.jev-model').value.trim(),
+      description: row.querySelector('.jev-desc').value.trim(),
+      tier: parseInt(row.querySelector('.jev-tier').value, 10) || 0,
+    };
+    const cw = parseInt(row.querySelector('.jev-cw').value, 10) || 0;
+    if (cw > 0) c.context_window = cw;
+    if (!row.querySelector('.jev-enabled').checked) c.enabled = false;
+    candidates.push(c);
+  });
+  return candidates;
+}
+
 // --- Init ---
 // Restore sort state from cookies
 function restoreSortState() {
@@ -1048,7 +1216,7 @@ async function loadMetrics() {
   const res2 = await fetch(API + '/metrics/recent');
   const recent = await res2.json();
   const rbody = document.getElementById('recent-body');
-  if (!recent.length) { rbody.innerHTML = '<tr><td colspan="19" class="empty">No requests yet</td></tr>'; return; }
+  if (!recent.length) { rbody.innerHTML = '<tr><td colspan="20" class="empty">No requests yet</td></tr>'; return; }
   rbody.innerHTML = recent.slice().reverse().map(r => {
     const time = new Date(r.timestamp).toLocaleTimeString([], { hour12: false });
     const statusColor = r.status_code >= 200 && r.status_code < 300 ? '#3fb950' : r.status_code >= 400 ? '#f85149' : '#8b949e';
@@ -1058,6 +1226,15 @@ async function loadMetrics() {
       : `<td style="color:${statusColor}">${r.status_code}</td>`;
     const size = r.response_size ? formatBytes(r.response_size) : '-';
     const fallback = r.was_fallback ? '<span class="tag" style="background:#3a3a1a;color:#d29922">yes</span>' : '-';
+    let jevCell = '-';
+    if (r.jev_choice || r.jev_reason) {
+      const parts = [r.jev_reason || ''];
+      if (r.jev_latency_ms) parts.push(r.jev_latency_ms + 'ms');
+      if (r.jev_tokens) parts.push(r.jev_tokens + ' tok');
+      if (r.jev_scores) parts.push(r.jev_scores);
+      const label = r.jev_choice ? r.jev_choice + (r.jev_confidence ? ' ' + Math.round(r.jev_confidence * 100) + '%' : '') : (r.jev_reason || '-');
+      jevCell = `<span class="tag" style="background:#2d1b4e;color:#d2a8ff" title="${escAttr(parts.join(', '))}">${esc(label)}</span>`;
+    }
     const prefill = r.prefill_time_ms != null ? r.prefill_time_ms + 'ms' : '-';
     const decode = r.decode_time_ms != null ? r.decode_time_ms + 'ms' : '-';
     const pTokSec = r.prefill_tok_per_sec ? r.prefill_tok_per_sec.toFixed(1) : '-';
@@ -1105,6 +1282,7 @@ async function loadMetrics() {
       <td>${cacheNew}</td>
       <td>${size}</td>
       <td>${fallback}</td>
+      <td>${jevCell}</td>
       <td style="font-family:monospace;font-size:0.85rem;">${esc(r.client_ip || '-')}</td>
     </tr>`;
   }).join('');

@@ -476,6 +476,15 @@ func cloneRule(rule *domain.RoutingRule) *domain.RoutingRule {
 		NumRetries:    rule.NumRetries,
 		Enabled:       rule.Enabled,
 		ContextWindow: rule.ContextWindow,
+		Router:        rule.Router,
+	}
+	if rule.Jev != nil {
+		jev := *rule.Jev
+		if rule.Jev.Candidates != nil {
+			jev.Candidates = make([]domain.JevCandidate, len(rule.Jev.Candidates))
+			copy(jev.Candidates, rule.Jev.Candidates)
+		}
+		cpy.Jev = &jev
 	}
 	if rule.IncomingModels != nil {
 		cpy.IncomingModels = make([]string, len(rule.IncomingModels))
