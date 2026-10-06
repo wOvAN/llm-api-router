@@ -38,7 +38,7 @@ button.copy-icon { padding: 1px 6px; font-size: 0.7rem; margin-left: 4px; border
 
 .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 10; align-items: center; justify-content: center; }
 .modal-overlay.open { display: flex; }
-.modal { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 24px; width: 680px; max-width: 90vw; max-height: 80vh; overflow-y: auto; }
+.modal { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 24px; width: 720px; max-width: 92vw; max-height: 85vh; overflow: auto; }
 .modal h3 { margin-bottom: 16px; color: #58a6ff; }
 .modal label { display: block; margin-bottom: 12px; font-size: 0.85rem; color: #8b949e; }
 .modal label span { display: block; margin-bottom: 4px; }
@@ -749,13 +749,13 @@ async function addFallbackRow(serverId, targetModel, priority, enabled) {
   const container = document.getElementById('fallbacks-container');
   const idx = fallbackCounter++;
   const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:6px;align-items:flex-start;margin-bottom:6px;width:100%;';
+  row.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;margin-bottom:6px;width:100%;';
   row.className = 'fallback-row';
   const sel = document.createElement('select');
-  sel.style.cssText = 'flex:0 0 300px;';
+  sel.style.cssText = 'flex:1 1 220px;min-width:180px;';
   sel.innerHTML = servers.map(s => `<option value="${esc(s.id)}" ${s.id === serverId ? 'selected' : ''}>${esc(s.name)} (${esc(s.id)})</option>`).join('');
   const modelWrap = document.createElement('div');
-  modelWrap.style.cssText = 'flex:2;min-width:200px;';
+  modelWrap.style.cssText = 'flex:2 1 200px;min-width:160px;';
   const modelSel = document.createElement('select');
   modelSel.style.cssText = 'width:100%;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.85rem;';
   modelSel.innerHTML = '<option value="">(выберите модель)</option>';
