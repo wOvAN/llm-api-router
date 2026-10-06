@@ -887,7 +887,7 @@ function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;
 
 // --- Fallbacks ---
 let fallbackCounter = 0;
-async function addFallbackRow(serverId, targetModel, priority, enabled) {
+async function addFallbackRow(serverId, targetModel = '', priority = 0, enabled = true) {
   const servers = getServersFromDropdown();
   const container = document.getElementById('fallbacks-container');
   const idx = fallbackCounter++;
@@ -1042,7 +1042,7 @@ function getServersFromDropdown() {
 }
 
 // --- Jev candidates ---
-function addJevRow(serverId, targetModel, description, tier, enabled, contextWindow) {
+function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabled = true, contextWindow = 0) {
   const servers = getServersFromDropdown();
   const row = document.createElement('div');
   row.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;margin-bottom:6px;width:100%;';
