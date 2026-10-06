@@ -294,6 +294,56 @@ func TestExtractUsageFromJSON(t *testing.T) {
 			t.Errorf("cached/creation/reasoning = (%d,%d,%d), want (6,2,12)", pm.CachedTokens, pm.CacheCreationTokens, pm.ReasoningTokens)
 		}
 	})
+
+	t.Run("Responses API usage details", func(t *testing.T) {
+		// The Responses API spells the detail containers input/output_tokens_details.
+		body := []byte(`{"id":"resp_1","usage":{"input_tokens":10,"output_tokens":30,"total_tokens":40,"input_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":12}}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.CachedTokens != 6 || pm.CacheCreationTokens != 2 || pm.ReasoningTokens != 12 {
+			t.Errorf("cached/creation/reasoning = (%d,%d,%d), want (6,2,12)", pm.CachedTokens, pm.CacheCreationTokens, pm.ReasoningTokens)
+		}
+	})
+
+	t.Run("SGLang reasoning_tokens on usage", func(t *testing.T) {
+		body := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":30,"total_tokens":40,"reasoning_tokens":9}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.ReasoningTokens != 9 {
+			t.Errorf("ReasoningTokens = %d, want 9", pm.ReasoningTokens)
+		}
+	})
+
+	t.Run("TabbyAPI usage rates", func(t *testing.T) {
+		body := []byte(`{"usage":{"prompt_tokens":56,"completion_tokens":8,"total_tokens":64,"prompt_tokens_per_sec":35.17,"completion_tokens_per_sec":17.11}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptPerSec != 35.17 || pm.TokensPerSec != 17.11 {
+			t.Errorf("rates = (%f,%f), want (35.17,17.11)", pm.PromptPerSec, pm.TokensPerSec)
+		}
+	})
+
+	t.Run("oMLX usage rates", func(t *testing.T) {
+		body := []byte(`{"usage":{"prompt_tokens":56,"completion_tokens":8,"total_tokens":64,"prompt_tokens_per_second":63.74,"generation_tokens_per_second":66.38}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptPerSec != 63.74 || pm.TokensPerSec != 66.38 {
+			t.Errorf("rates = (%f,%f), want (63.74,66.38)", pm.PromptPerSec, pm.TokensPerSec)
+		}
+	})
+
+	t.Run("usage rates lose to timings", func(t *testing.T) {
+		body := []byte(`{"usage":{"prompt_tokens":56,"completion_tokens":8,"prompt_tokens_per_second":63.74,"generation_tokens_per_second":66.38},"timings":{"prompt_n":56,"predicted_n":8,"prompt_per_second":100.0,"predicted_per_second":40.0}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptPerSec != 100.0 || pm.TokensPerSec != 40.0 {
+			t.Errorf("rates = (%f,%f), want (100,40) from timings", pm.PromptPerSec, pm.TokensPerSec)
+		}
+	})
+
+	t.Run("partial timings keep usage rates", func(t *testing.T) {
+		// A timings object without rates must not erase the usage-reported ones.
+		body := []byte(`{"usage":{"prompt_tokens":56,"completion_tokens":8,"prompt_tokens_per_sec":35.17,"completion_tokens_per_sec":17.11},"timings":{"prompt_n":56,"predicted_n":8,"prompt_ms":10.0}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptPerSec != 35.17 || pm.TokensPerSec != 17.11 {
+			t.Errorf("rates = (%f,%f), want (35.17,17.11)", pm.PromptPerSec, pm.TokensPerSec)
+		}
+	})
 }
 
 func TestExtractUsageFromStream(t *testing.T) {
@@ -378,6 +428,35 @@ func TestExtractUsageFromStream(t *testing.T) {
 		}
 		if pm.ReasoningTokens != 3 {
 			t.Errorf("ReasoningTokens = %d, want 3", pm.ReasoningTokens)
+		}
+	})
+
+	t.Run("Responses API stream timings on data", func(t *testing.T) {
+		// llama.cpp attaches timings to the last event's `data` object.
+		body := []byte(
+			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n" +
+				"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":2}}},\"data\":{\"timings\":{\"prompt_n\":5,\"predicted_n\":10,\"prompt_ms\":20.0,\"predicted_ms\":250.0,\"prompt_per_second\":250.0,\"predicted_per_second\":40.0}}}\n",
+		)
+		pm := extractUsageFromStream(body)
+		if pm.PromptTokens != 5 || pm.CompletionTokens != 10 || pm.CachedTokens != 2 {
+			t.Errorf("tokens = (%d,%d,%d), want (5,10,2)", pm.PromptTokens, pm.CompletionTokens, pm.CachedTokens)
+		}
+		if pm.PromptMs != 20.0 || pm.PredictedMs != 250.0 || pm.PromptPerSec != 250.0 || pm.TokensPerSec != 40.0 {
+			t.Errorf("native timings = (%f,%f,%f,%f)", pm.PromptMs, pm.PredictedMs, pm.PromptPerSec, pm.TokensPerSec)
+		}
+	})
+
+	t.Run("Responses API stream metrics in response", func(t *testing.T) {
+		// vLLM carries metrics inside the response object of response.completed.
+		body := []byte(
+			"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":10,\"output_tokens_details\":{\"reasoning_tokens\":4}},\"metrics\":{\"time_to_first_token_ms\":12.0,\"generation_time_ms\":100.0,\"queue_time_ms\":2.5,\"tokens_per_second\":9.5}}}\n",
+		)
+		pm := extractUsageFromStream(body)
+		if pm.ReasoningTokens != 4 {
+			t.Errorf("ReasoningTokens = %d, want 4", pm.ReasoningTokens)
+		}
+		if pm.PromptMs != 12.0 || pm.PredictedMs != 100.0 || pm.TokensPerSec != 9.5 || pm.QueueMs != 2.5 {
+			t.Errorf("native timings = (%f,%f,%f,%f)", pm.PromptMs, pm.PredictedMs, pm.TokensPerSec, pm.QueueMs)
 		}
 	})
 

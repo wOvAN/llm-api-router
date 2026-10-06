@@ -14,6 +14,15 @@ import (
 // usagePaths lists JSON paths where usage can appear in SSE events.
 var usagePaths = []string{"usage", "response.usage", "message.usage"}
 
+// llamaTimingsPaths and vllmMetricsPaths list where the native backend timing
+// objects can appear in an SSE event: top level for chat/completions, and
+// nested for the Responses API, where llama.cpp attaches `timings` to the
+// event's `data` object and vLLM carries `metrics` inside `response`.
+var (
+	llamaTimingsPaths = []string{"timings", "response.timings", "data.timings"}
+	vllmMetricsPaths  = []string{"metrics", "response.metrics", "data.metrics"}
+)
+
 // extractUsageFromResponse parses token usage and timings from the response body.
 func extractUsageFromResponse(body []byte, contentEncoding string, isStream bool) ProxyMetrics {
 	if contentEncoding != "" {
@@ -107,13 +116,17 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 
 		// llama.cpp native timings; vLLM's `metrics` object arrives on the
 		// final stream chunk (intermediate chunks serialize it as null).
-		if t, ok := obj["timings"].(map[string]any); ok {
-			timings = t
-			hasAny = true
+		for _, path := range llamaTimingsPaths {
+			if t := getField(obj, path); t != nil {
+				timings = t
+				hasAny = true
+			}
 		}
-		if m, ok := obj["metrics"].(map[string]any); ok {
-			vllmMetrics = m
-			hasAny = true
+		for _, path := range vllmMetricsPaths {
+			if m := getField(obj, path); m != nil {
+				vllmMetrics = m
+				hasAny = true
+			}
 		}
 		return false
 	})
@@ -198,13 +211,15 @@ func sglangMetaInfo(obj map[string]any) map[string]any {
 	return meta
 }
 
-// usageCounts holds token counts extracted from a usage object.
+// usageCounts holds token counts and backend-reported rates from a usage object.
 type usageCounts struct {
 	input         int
 	output        int
-	cached        int // -1 = not reported
-	cacheCreation int // vLLM created_cache_tokens / Anthropic cache_creation_input_tokens
-	reasoning     int // completion_tokens_details.reasoning_tokens
+	cached        int     // -1 = not reported
+	cacheCreation int     // created_cache_tokens / cache_creation_input_tokens / cache_write_tokens
+	reasoning     int     // reasoning_tokens: nested details, or (SGLang) on usage itself
+	promptPerSec  float64 // TabbyAPI prompt_tokens_per_sec / oMLX prompt_tokens_per_second
+	tokensPerSec  float64 // TabbyAPI completion_tokens_per_sec / oMLX generation_tokens_per_second
 }
 
 // extractUsageTokens reads token counts from a usage map.
@@ -229,18 +244,56 @@ func extractUsageTokens(usage map[string]any) usageCounts {
 		if uc.cached < 0 {
 			uc.cached = intToFloat64(details["cached_tokens"])
 		}
-		if v, ok := details["created_cache_tokens"]; ok {
-			uc.cacheCreation = intToFloat64(v)
-		}
-	}
-	if v, ok := usage["cache_creation_input_tokens"]; ok {
-		uc.cacheCreation = intToFloat64(v)
-	}
-	if details, ok := usage["completion_tokens_details"].(map[string]any); ok {
-		uc.reasoning = intToFloat64(details["reasoning_tokens"])
 	}
 
+	// Written-cache and reasoning tokens are spelled three ways: vLLM nests them
+	// in prompt/completion_tokens_details, Anthropic puts cache creation on the
+	// usage object itself, and the Responses API uses input/output_tokens_details.
+	// SGLang reports reasoning tokens directly on usage.
+	uc.cacheCreation = firstPositive(0,
+		intToFloat64(usage["cache_creation_input_tokens"]),
+		nestedInt(usage, "prompt_tokens_details", "created_cache_tokens"),
+		nestedInt(usage, "input_tokens_details", "cache_write_tokens"))
+	uc.reasoning = firstPositive(0,
+		nestedInt(usage, "completion_tokens_details", "reasoning_tokens"),
+		nestedInt(usage, "output_tokens_details", "reasoning_tokens"),
+		intToFloat64(usage["reasoning_tokens"]))
+
+	// TabbyAPI and oMLX report the backend's own throughput inside usage, using
+	// different suffixes for the same two numbers.
+	uc.promptPerSec = firstPositiveF(0,
+		floatToFloat64(usage["prompt_tokens_per_sec"]),
+		floatToFloat64(usage["prompt_tokens_per_second"]))
+	uc.tokensPerSec = firstPositiveF(0,
+		floatToFloat64(usage["completion_tokens_per_sec"]),
+		floatToFloat64(usage["generation_tokens_per_second"]))
+
 	return uc
+}
+
+// nestedInt reads obj[container][key] as a number, 0 when either is absent.
+func nestedInt(obj map[string]any, container, key string) int {
+	m, _ := obj[container].(map[string]any)
+	return intToFloat64(m[key])
+}
+
+// firstPositive returns the first value greater than zero, else fallback.
+func firstPositive(fallback int, vals ...int) int {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
+	}
+	return fallback
+}
+
+func firstPositiveF(fallback float64, vals ...float64) float64 {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
+	}
+	return fallback
 }
 
 // buildMetricsFromData composes ProxyMetrics from token counts and optional
@@ -248,7 +301,8 @@ func extractUsageTokens(usage map[string]any) usageCounts {
 // top-level `metrics` (requires --enable-per-request-metrics), and SGLang's
 // `choices[0].meta_info` (requires return_meta_info + --enable-metrics). A
 // backend emits at most one of the three, so the timings block wins when both
-// are present.
+// are present. Rates embedded in the usage object (TabbyAPI, oMLX) seed the
+// throughput fields and lose to all three.
 func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetrics, sglangMeta map[string]any) ProxyMetrics {
 	pm := ProxyMetrics{
 		PromptTokens:        uc.input,
@@ -257,6 +311,10 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetric
 		CachedTokens:        uc.cached,
 		ReasoningTokens:     uc.reasoning,
 		CacheCreationTokens: uc.cacheCreation,
+		// TabbyAPI/oMLX rates ride inside usage; a real timings/metrics object
+		// below overrides them.
+		PromptPerSec: uc.promptPerSec,
+		TokensPerSec: uc.tokensPerSec,
 	}
 
 	// vLLM `metrics`: time_to_first_token_ms is prefill (queue wait excluded),
@@ -273,7 +331,8 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetric
 			pm.TokensPerSec = tps
 		}
 		pm.QueueMs = floatToFloat64(vllmMetrics["queue_time_ms"])
-		// Speculative decoding draft counts (n==1 only; null for n>1), mapped
+		// Speculative decoding draft counts (needs
+		// --per-request-spec-decode-metrics; n==1 only, null for n>1), mapped
 		// like llama.cpp's draft_n / draft_n_accepted.
 		if spec, ok := vllmMetrics["speculative_decoding"].(map[string]any); ok {
 			if n := intToFloat64(spec["num_draft_tokens"]); n > 0 {
@@ -322,12 +381,21 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetric
 		if n := intToFloat64(timings["predicted_n"]); n > 0 {
 			pm.CompletionTokens = n
 		}
-		pm.PromptPerSec = floatToFloat64(timings["prompt_per_second"])
-		pm.TokensPerSec = floatToFloat64(timings["predicted_per_second"])
+		// Guarded so a partial timings object cannot erase usage-reported rates.
+		if v := floatToFloat64(timings["prompt_per_second"]); v > 0 {
+			pm.PromptPerSec = v
+		}
+		if v := floatToFloat64(timings["predicted_per_second"]); v > 0 {
+			pm.TokensPerSec = v
+		}
 		pm.PromptMs = floatToFloat64(timings["prompt_ms"])
 		pm.PredictedMs = floatToFloat64(timings["predicted_ms"])
-		if cv := intToFloat64(timings["cache_n"]); cv >= 0 {
-			pm.CachedTokens = cv
+		// Presence-guarded: llama.cpp's per-chunk timings carry no cache_n, and a
+		// missing key must not erase the usage-derived count.
+		if v, ok := timings["cache_n"]; ok {
+			if cv := intToFloat64(v); cv >= 0 {
+				pm.CachedTokens = cv
+			}
 		}
 		// Speculative decoding stats, present only when a draft model is used.
 		pm.DraftTokens = intToFloat64(timings["draft_n"])
