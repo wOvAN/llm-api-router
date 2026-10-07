@@ -532,6 +532,62 @@ func TestJevAttemptsCountTokensSkipsDecision(t *testing.T) {
 	}
 }
 
+func TestJevAttemptsSticky(t *testing.T) {
+	r, store, _ := jevTestRouter(t)
+	calls := 0
+	decision := jevDecision(t, `{"answers":{"model":{"type":"choice","choice":"opus","confidence":0.9}}}`, &calls)
+	addJevServers(t, store, decision.URL)
+	rule := jevRule(decision.URL, 0.3, 0) // default tier 0 = s0/haiku
+
+	// A user turn with text gets a decision; it pins the conversation.
+	body := []byte(`{"model":"auto","prompt_cache_key":"sess-1","messages":[{"role":"user","content":"design a migration"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(body)))
+	attempts, out := r.jevAttempts(req, rule, body, "auto")
+	if out.Reason != "jev" || calls != 1 || len(attempts) == 0 || attempts[0].server.ID != "s2" {
+		t.Fatalf("user turn: reason = %q calls = %d first = %v, want jev s2 with one call", out.Reason, calls, attemptIDs(attempts))
+	}
+
+	// A tool-continuation turn of the same conversation reuses the decision:
+	// no decision call, the pinned candidate first.
+	body = []byte(`{"model":"auto","prompt_cache_key":"sess-1","messages":[{"role":"user","content":[{"type":"tool_result","content":"ok"}]}]}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(body)))
+	attempts, out = r.jevAttempts(req, rule, body, "auto")
+	if out.Reason != "sticky" || out.Choice != "opus" || calls != 1 {
+		t.Errorf("tool turn: reason = %q choice = %q calls = %d, want sticky opus with no call", out.Reason, out.Choice, calls)
+	}
+	if len(attempts) == 0 || attempts[0].server.ID != "s2" {
+		t.Errorf("attempts = %v, want the pinned server first", attemptIDs(attempts))
+	}
+
+	// The Anthropic metadata.user_id session_id keys the same way.
+	body = []byte(`{"model":"auto","metadata":{"user_id":"{\"session_id\":\"s-9\"}"},"messages":[{"role":"user","content":"write a regex"}]}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(body)))
+	if _, out = r.jevAttempts(req, rule, body, "auto"); out.Reason != "jev" || calls != 2 {
+		t.Fatalf("metadata user turn: reason = %q calls = %d, want jev with a call", out.Reason, calls)
+	}
+	body = []byte(`{"model":"auto","metadata":{"user_id":"{\"session_id\":\"s-9\"}"},"messages":[{"role":"user","content":[{"type":"tool_result","content":"ok"}]}]}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(body)))
+	if _, out = r.jevAttempts(req, rule, body, "auto"); out.Reason != "sticky" || calls != 2 {
+		t.Errorf("metadata tool turn: reason = %q calls = %d, want sticky with no call", out.Reason, calls)
+	}
+
+	// A conversation without the pinned key falls back to the default tier.
+	body = []byte(`{"model":"auto","messages":[{"role":"user","content":[{"type":"tool_result","content":"ok"}]}]}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(body)))
+	attempts, out = r.jevAttempts(req, rule, body, "auto")
+	if out.Reason != "off" || calls != 2 || attempts[0].server.ID != "s0" {
+		t.Errorf("keyless tool turn: reason = %q calls = %d first = %v, want off on the default tier", out.Reason, calls, attemptIDs(attempts))
+	}
+
+	// The explicit header bypass beats the pin.
+	body = []byte(`{"model":"auto","prompt_cache_key":"sess-1","messages":[{"role":"user","content":[{"type":"tool_result","content":"ok"}]}]}`)
+	req = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(body)))
+	req.Header.Set("X-Router-Jev", "off")
+	if _, out = r.jevAttempts(req, rule, body, "auto"); out.Reason != "off" {
+		t.Errorf("header off: reason = %q, want off", out.Reason)
+	}
+}
+
 func TestListModelsJevPoolContext(t *testing.T) {
 	r, store, _ := jevTestRouter(t)
 	_ = store.AddRule(&domain.RoutingRule{

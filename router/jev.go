@@ -36,6 +36,9 @@ const (
 	// jevCacheSweepAt bounds the decision cache size; expired entries are swept
 	// on insert once it is exceeded (no background goroutine).
 	jevCacheSweepAt = 4096
+	// jevStickyTTL bounds how long a conversation's follow-up (tool-continuation)
+	// turns may reuse its last real decision.
+	jevStickyTTL = 30 * time.Minute
 )
 
 const jevDefaultQuestion = "Pick the cheapest model that can fully complete this request in one pass, " +
@@ -106,16 +109,35 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 		images = jevRequestImages(body)
 	}
 
+	// Conversation identity, scoped to the rule's incoming model: the real
+	// decision of a user turn pins the follow-up tool turns of the same
+	// conversation (see jevStickyGet).
+	sessionKey := ""
+	if s := jevSessionKey(body); s != "" {
+		sessionKey = requested + "\x00" + s
+	}
+
 	choice := -1
 	switch {
 	case req.Header.Get("X-Router-Jev") == "off",
-		strings.Contains(req.URL.Path, "count_tokens"),
-		text == "":
-		// Bypass the decision: explicit header; count_tokens is a metadata
-		// call (Claude Code fires bursts of it); an empty request text means
-		// an auxiliary call (tool_result-only turns) — the reference Jev
-		// plugin skips the decision on all of these.
+		strings.Contains(req.URL.Path, "count_tokens"):
+		// Explicit per-request bypass; count_tokens is a metadata call
+		// (Claude Code fires bursts of it).
 		out.Reason = "off"
+	case text == "":
+		// No user text anywhere — an agent loop's tool-continuation turn (the
+		// reference Jev plugin skips the decision on these). Reuse the
+		// conversation's last real decision so the loop keeps its decided
+		// model (plugin: per-conversation tier pin; LiteLLM: session pin);
+		// without one, land on the default tier.
+		if c := r.jevStickyGet(sessionKey); c != "" {
+			if choice = slices.Index(ids, c); choice >= 0 {
+				out.Choice, out.Reason = c, "sticky"
+			}
+		}
+		if choice < 0 {
+			out.Reason = "off"
+		}
 	default:
 		key := ""
 		if j.CacheTTL > 0 {
@@ -199,7 +221,7 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 	def := jevTierIndex(pool, j.DefaultTier)
 	if choice < 0 {
 		choice = def
-	} else if out.Confidence < minConf {
+	} else if out.Reason != "sticky" && out.Confidence < minConf {
 		// Jev is unsure: never step down to a weaker model, and cap the upgrade
 		// at the tier above the default (the CLI's low-confidence rules).
 		switch {
@@ -217,6 +239,10 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 	if choice >= 0 && pool[choice].Tier < pool[def].Tier && contextTokens > jevDowngradeMaxContext {
 		choice = def
 		out.Reason = "context-no-downgrade"
+	}
+	// Pin the served candidate for this conversation's follow-up turns.
+	if choice >= 0 {
+		r.jevStickyPut(sessionKey, ids[choice])
 	}
 
 	order := []int{choice}
@@ -400,6 +426,110 @@ func (r *Router) jevCachePut(key string, out jevOutcome, ttl time.Duration) {
 		}
 	}
 	r.jevCache[key] = jevCacheEntry{outcome: out, expires: time.Now().Add(ttl)}
+}
+
+// --- conversation sticky (agent-loop tier pin) ---
+
+type jevStickyEntry struct {
+	choice  string // candidate id served for the conversation's last real decision
+	expires time.Time
+}
+
+// jevStickyGet returns the candidate pinned for a conversation, "" when none.
+func (r *Router) jevStickyGet(key string) string {
+	if key == "" {
+		return ""
+	}
+	r.jevMu.Lock()
+	defer r.jevMu.Unlock()
+	e, ok := r.jevSticky[key]
+	if !ok {
+		return ""
+	}
+	if time.Now().After(e.expires) {
+		delete(r.jevSticky, key)
+		return ""
+	}
+	return e.choice
+}
+
+// jevStickyPut pins the served candidate for a conversation's follow-up turns.
+func (r *Router) jevStickyPut(key, choice string) {
+	if key == "" || choice == "" {
+		return
+	}
+	r.jevMu.Lock()
+	defer r.jevMu.Unlock()
+	if len(r.jevSticky) >= jevCacheSweepAt {
+		now := time.Now()
+		for k, e := range r.jevSticky {
+			if now.After(e.expires) {
+				delete(r.jevSticky, k)
+			}
+		}
+	}
+	r.jevSticky[key] = jevStickyEntry{choice: choice, expires: time.Now().Add(jevStickyTTL)}
+}
+
+// jevSessionKey identifies the conversation a request belongs to: the
+// Responses-API prompt_cache_key, the Anthropic metadata.user_id session_id
+// (Claude Code embeds it as a JSON string), falling back to the first user
+// turn's text — fixed once a conversation starts and it separates the main
+// agent from sub-agents sharing the endpoint (the reference plugin's
+// conversation key). "" when the request carries none.
+func jevSessionKey(body []byte) string {
+	var req struct {
+		PromptCacheKey string          `json:"prompt_cache_key"`
+		Metadata       json.RawMessage `json:"metadata"`
+		Messages       json.RawMessage `json:"messages"`
+		Input          json.RawMessage `json:"input"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return ""
+	}
+	if req.PromptCacheKey != "" {
+		return req.PromptCacheKey
+	}
+	if len(req.Metadata) > 0 {
+		var md struct {
+			UserID string `json:"user_id"`
+		}
+		if json.Unmarshal(req.Metadata, &md) == nil {
+			var uid struct {
+				SessionID string `json:"session_id"`
+			}
+			if json.Unmarshal([]byte(md.UserID), &uid) == nil && uid.SessionID != "" {
+				return uid.SessionID
+			}
+		}
+	}
+	for _, raw := range [][]byte{req.Messages, req.Input} {
+		if len(raw) == 0 {
+			continue
+		}
+		var msgs []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(raw, &msgs) == nil {
+			for _, m := range msgs {
+				if m.Role != "user" {
+					continue
+				}
+				if t := jevContentText(m.Content); t != "" {
+					h := sha256.Sum256([]byte(t))
+					return hex.EncodeToString(h[:])
+				}
+			}
+			continue
+		}
+		var s string
+		if json.Unmarshal(raw, &s) == nil && s != "" {
+			h := sha256.Sum256([]byte(s))
+			return hex.EncodeToString(h[:])
+		}
+	}
+	return ""
 }
 
 // jevRequestText pulls the text the decision model should read (the last user
