@@ -482,7 +482,7 @@ func (r *Router) jevStickyPut(key, choice string) {
 func jevSessionKey(body []byte) string {
 	var req struct {
 		PromptCacheKey   string          `json:"prompt_cache_key"`
-		User             string          `json:"user"`
+		User             json.RawMessage `json:"user"`
 		SafetyIdentifier string          `json:"safety_identifier"`
 		Metadata         json.RawMessage `json:"metadata"`
 		Messages         json.RawMessage `json:"messages"`
@@ -494,8 +494,8 @@ func jevSessionKey(body []byte) string {
 	if req.PromptCacheKey != "" {
 		return req.PromptCacheKey
 	}
-	if req.User != "" {
-		return req.User
+	if k := jevUserKey(req.User); k != "" {
+		return k
 	}
 	if req.SafetyIdentifier != "" {
 		return req.SafetyIdentifier
@@ -538,6 +538,25 @@ func jevSessionKey(body []byte) string {
 			h := sha256.Sum256([]byte(s))
 			return hex.EncodeToString(h[:])
 		}
+	}
+	return ""
+}
+
+// jevUserKey extracts a stable id from the OpenAI user field — a plain string
+// (API clients) or an {id,email} object (Open WebUI).
+func jevUserKey(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var o struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(raw, &o) == nil {
+		return o.ID
 	}
 	return ""
 }
@@ -591,6 +610,8 @@ func jevRequestText(body []byte) (string, int) {
 }
 
 // jevContentText flattens message content: a plain string, or text blocks.
+// Responses-API block types (input_text/output_text, Open WebUI et al.) count
+// as text too.
 func jevContentText(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -608,7 +629,7 @@ func jevContentText(raw json.RawMessage) string {
 	}
 	var b strings.Builder
 	for _, blk := range blocks {
-		if blk.Type == "text" && blk.Text != "" {
+		if (blk.Type == "text" || blk.Type == "input_text" || blk.Type == "output_text") && blk.Text != "" {
 			if b.Len() > 0 {
 				b.WriteByte('\n')
 			}
@@ -643,11 +664,9 @@ func jevRequestImages(body []byte) []string {
 			continue
 		}
 		var blocks []struct {
-			Type     string `json:"type"`
-			ImageURL struct {
-				URL string `json:"url"`
-			} `json:"image_url"`
-			Source struct {
+			Type     string          `json:"type"`
+			ImageURL json.RawMessage `json:"image_url"`
+			Source   struct {
 				Type      string `json:"type"`
 				MediaType string `json:"media_type"`
 				Data      string `json:"data"`
@@ -660,8 +679,19 @@ func jevRequestImages(body []byte) []string {
 		for _, b := range blocks {
 			url := ""
 			switch b.Type {
-			case "image_url":
-				url = b.ImageURL.URL
+			case "image_url", "input_image":
+				// chat format: image_url is {"url":...}; Responses API: a bare string
+				var s string
+				if json.Unmarshal(b.ImageURL, &s) == nil {
+					url = s
+				} else {
+					var o struct {
+						URL string `json:"url"`
+					}
+					if json.Unmarshal(b.ImageURL, &o) == nil {
+						url = o.URL
+					}
+				}
 			case "image":
 				if b.Source.Type == "base64" && b.Source.Data != "" {
 					url = "data:" + b.Source.MediaType + ";base64," + b.Source.Data

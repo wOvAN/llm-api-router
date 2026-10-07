@@ -592,6 +592,7 @@ func TestJevSessionKey(t *testing.T) {
 	cases := []struct{ body, want string }{
 		{`{"prompt_cache_key":"pk","user":"u"}`, "pk"},
 		{`{"user":"u1"}`, "u1"},
+		{`{"user":{"id":"u2","email":"a@b"},"messages":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`, "u2"},
 		{`{"safety_identifier":"s1"}`, "s1"},
 		{`{"metadata":{"user_id":"{\"session_id\":\"abc\"}"}}`, "abc"},
 		{`{"messages":[{"role":"user","content":"hi"}]}`, ""}, // hash — just non-empty below
@@ -608,6 +609,24 @@ func TestJevSessionKey(t *testing.T) {
 		if got != c.want {
 			t.Errorf("key(%s) = %q, want %q", c.body, got, c.want)
 		}
+	}
+}
+
+func TestJevRequestTextResponsesBlocks(t *testing.T) {
+	// Open WebUI on the Responses API: items with role + input_text blocks.
+	body := []byte(`{"model":"auto","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what is the capital of France"}]},{"type":"function_call","name":"search"},{"type":"function_call_output","call_id":"c1","output":"..."}]}`)
+	text, _ := jevRequestText(body)
+	if text != "what is the capital of France" {
+		t.Errorf("text = %q, want the user turn's input_text", text)
+	}
+}
+
+func TestJevRequestImagesResponsesInputImage(t *testing.T) {
+	// Responses API: input_image with a bare string image_url.
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":[{"type":"input_text","text":"look"},{"type":"input_image","image_url":"data:image/png;base64,AAA="}]}]}`)
+	imgs := jevRequestImages(body)
+	if len(imgs) != 1 || imgs[0] != "data:image/png;base64,AAA=" {
+		t.Errorf("images = %v, want the data URL", imgs)
 	}
 }
 
