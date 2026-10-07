@@ -588,6 +588,29 @@ func TestJevAttemptsSticky(t *testing.T) {
 	}
 }
 
+func TestJevSessionKey(t *testing.T) {
+	cases := []struct{ body, want string }{
+		{`{"prompt_cache_key":"pk","user":"u"}`, "pk"},
+		{`{"user":"u1"}`, "u1"},
+		{`{"safety_identifier":"s1"}`, "s1"},
+		{`{"metadata":{"user_id":"{\"session_id\":\"abc\"}"}}`, "abc"},
+		{`{"messages":[{"role":"user","content":"hi"}]}`, ""}, // hash — just non-empty below
+		{`{"model":"auto"}`, ""},
+	}
+	for _, c := range cases {
+		got := jevSessionKey([]byte(c.body))
+		if c.want == "" && strings.Contains(c.body, "hi") {
+			if got == "" {
+				t.Errorf("first-turn fallback: key = %q, want a hash", got)
+			}
+			continue
+		}
+		if got != c.want {
+			t.Errorf("key(%s) = %q, want %q", c.body, got, c.want)
+		}
+	}
+}
+
 func TestListModelsJevPoolContext(t *testing.T) {
 	r, store, _ := jevTestRouter(t)
 	_ = store.AddRule(&domain.RoutingRule{

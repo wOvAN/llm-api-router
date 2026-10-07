@@ -217,6 +217,7 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 		}
 		r.jevCachePut(key, out, time.Duration(j.CacheTTL)*time.Second)
 	}
+	log.Debugf("jev %s: session=%q text=%d images=%d reason=%s", requested, sessionKey, len(text), len(images), out.Reason)
 
 	def := jevTierIndex(pool, j.DefaultTier)
 	if choice < 0 {
@@ -472,23 +473,32 @@ func (r *Router) jevStickyPut(key, choice string) {
 }
 
 // jevSessionKey identifies the conversation a request belongs to: the
-// Responses-API prompt_cache_key, the Anthropic metadata.user_id session_id
-// (Claude Code embeds it as a JSON string), falling back to the first user
-// turn's text — fixed once a conversation starts and it separates the main
-// agent from sub-agents sharing the endpoint (the reference plugin's
+// Responses-API prompt_cache_key (or the OpenAI user / safety_identifier
+// fields, which bridges set per user), the Anthropic metadata.user_id
+// session_id (Claude Code embeds it as a JSON string), falling back to the
+// first user turn's text — fixed once a conversation starts and it separates
+// the main agent from sub-agents sharing the endpoint (the reference plugin's
 // conversation key). "" when the request carries none.
 func jevSessionKey(body []byte) string {
 	var req struct {
-		PromptCacheKey string          `json:"prompt_cache_key"`
-		Metadata       json.RawMessage `json:"metadata"`
-		Messages       json.RawMessage `json:"messages"`
-		Input          json.RawMessage `json:"input"`
+		PromptCacheKey   string          `json:"prompt_cache_key"`
+		User             string          `json:"user"`
+		SafetyIdentifier string          `json:"safety_identifier"`
+		Metadata         json.RawMessage `json:"metadata"`
+		Messages         json.RawMessage `json:"messages"`
+		Input            json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &req) != nil {
 		return ""
 	}
 	if req.PromptCacheKey != "" {
 		return req.PromptCacheKey
+	}
+	if req.User != "" {
+		return req.User
+	}
+	if req.SafetyIdentifier != "" {
+		return req.SafetyIdentifier
 	}
 	if len(req.Metadata) > 0 {
 		var md struct {
