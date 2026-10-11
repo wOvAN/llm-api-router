@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -83,10 +84,25 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 	j := rule.Jev
 	out := jevOutcome{Model: j.Model}
 
+	text, contextTokens := jevRequestText(body)
+	text = jevTruncate(text, j.StateMaxChars)
+	requestImages := jevRequestImages(body)
+	var images []string
+	if j.Images {
+		images = requestImages
+	}
+
 	pool := j.EnabledCandidates()
 	if len(pool) == 0 {
 		out.Reason = "no-pool"
 		return nil, out
+	}
+	if len(requestImages) > 0 {
+		pool = r.resolveVisionPool(req.Context(), pool)
+		if filtered := jevVisionPool(pool); len(filtered) > 0 {
+			log.Debugf("jev %s: pool filtered to %d vision candidates", requested, len(filtered))
+			pool = filtered
+		}
 	}
 	ids := jevCandidateIDs(pool)
 
@@ -101,12 +117,6 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 	question := j.Question
 	if question == "" {
 		question = jevDefaultQuestion
-	}
-	text, contextTokens := jevRequestText(body)
-	text = jevTruncate(text, j.StateMaxChars)
-	var images []string
-	if j.Images {
-		images = jevRequestImages(body)
 	}
 
 	// Conversation identity, scoped to the rule's incoming model: the real
@@ -124,7 +134,7 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 		// Explicit per-request bypass; count_tokens is a metadata call
 		// (Claude Code fires bursts of it).
 		out.Reason = "off"
-	case text == "":
+	case text == "" && len(images) == 0:
 		// No user text anywhere — an agent loop's tool-continuation turn (the
 		// reference Jev plugin skips the decision on these). Reuse the
 		// conversation's last real decision so the loop keeps its decided
@@ -297,6 +307,39 @@ func jevCandidateIDs(pool []domain.JevCandidate) []string {
 		ids[i] = id
 	}
 	return ids
+}
+
+// jevVisionPool keeps the candidates that can plausibly handle image input:
+// explicit vision candidates and unknowns (nil). Explicitly blind candidates
+// are dropped. An empty result means the caller keeps the full pool (fail-open).
+func jevVisionPool(pool []domain.JevCandidate) []domain.JevCandidate {
+	out := make([]domain.JevCandidate, 0, len(pool))
+	for _, c := range pool {
+		if c.Vision == nil || *c.Vision {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// resolveVisionPool fills in nil candidate Vision flags from the backend's own
+// /v1/models capability report (lazy, cached). Explicit flags are never
+// touched; unknown answers stay nil so the pool filter fails open.
+func (r *Router) resolveVisionPool(ctx context.Context, pool []domain.JevCandidate) []domain.JevCandidate {
+	for i := range pool {
+		if pool[i].Vision != nil || pool[i].TargetModel == "" {
+			continue
+		}
+		srv, ok := r.store.GetServer(pool[i].ServerID)
+		if !ok {
+			continue
+		}
+		if vision, known := r.caps.Vision(ctx, srv, pool[i].TargetModel); known {
+			b := vision
+			pool[i].Vision = &b
+		}
+	}
+	return pool
 }
 
 // jevTierIndex returns the pool index at exactly tier, preferring the nearest
@@ -643,20 +686,29 @@ func jevContentText(raw json.RawMessage) string {
 const jevMaxImages = 8
 
 // jevRequestImages collects the last user turn's images as data URLs — OpenAI
-// image_url parts and Anthropic base64 sources. Remote http(s) image URLs are
-// skipped (the decision endpoint accepts data URLs only).
+// image_url parts and Anthropic base64 sources. It reads both chat `messages`
+// and Responses-API `input`. Remote http(s) image URLs are skipped (the decision
+// endpoint accepts data URLs only).
 func jevRequestImages(body []byte) []string {
 	var req struct {
 		Messages json.RawMessage `json:"messages"`
+		Input    json.RawMessage `json:"input"`
 	}
-	if json.Unmarshal(body, &req) != nil || len(req.Messages) == 0 {
+	if json.Unmarshal(body, &req) != nil {
+		return nil
+	}
+	raw := req.Messages
+	if len(raw) == 0 {
+		raw = req.Input
+	}
+	if len(raw) == 0 {
 		return nil
 	}
 	var msgs []struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	}
-	if json.Unmarshal(req.Messages, &msgs) != nil {
+	if json.Unmarshal(raw, &msgs) != nil {
 		return nil
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {

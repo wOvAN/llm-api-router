@@ -88,6 +88,9 @@ type JevCandidate struct {
 	// ContextWindow is the candidate's context size; a jev rule without its own
 	// context_window reports the pool minimum in /v1/models (0 = unknown).
 	ContextWindow int `json:"context_window,omitempty"`
+	// Vision marks whether this candidate accepts image input. nil = unknown
+	// (kept in image-request pools), false = blind (removed from them).
+	Vision *bool `json:"vision,omitempty"`
 	// Enabled toggles the candidate. nil = enabled.
 	Enabled *bool `json:"enabled,omitempty"`
 }

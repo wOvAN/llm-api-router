@@ -508,6 +508,205 @@ func TestJevRequestImagesCap(t *testing.T) {
 	}
 }
 
+func TestJevRequestImagesResponsesInput(t *testing.T) {
+	body := []byte(`{"model":"auto","input":[{"type":"message","role":"user","content":[` +
+		`{"type":"input_text","text":"look"},` +
+		`{"type":"input_image","image_url":"data:image/png;base64,AAA="}` +
+		`]}]}`)
+	imgs := jevRequestImages(body)
+	if len(imgs) != 1 || imgs[0] != "data:image/png;base64,AAA=" {
+		t.Errorf("images = %v, want the data URL from input", imgs)
+	}
+}
+
+func TestJevAttemptsImageOnlyDecides(t *testing.T) {
+	r, store, _ := jevTestRouter(t)
+	calls := 0
+	decision := jevDecision(t, `{"answers":{"model":{"type":"choice","choice":"sonnet","confidence":0.9}}}`, &calls)
+	addJevServers(t, store, decision.URL)
+	rule := jevRule(decision.URL, 0.3, 1)
+	rule.Jev.Images = true
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":[` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}` +
+		`]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	attempts, out := r.jevAttempts(req, rule, body, "auto")
+
+	if out.Reason != "jev" || calls != 1 {
+		t.Fatalf("reason = %q calls = %d, want a real decision for an image-only request", out.Reason, calls)
+	}
+	if len(attempts) == 0 || attempts[0].server.ID != "s1" {
+		t.Errorf("attempts = %v, want the chosen candidate first", attemptIDs(attempts))
+	}
+}
+
+func TestJevAttemptsVisionFilter(t *testing.T) {
+	r, store, _ := jevTestRouter(t)
+	calls := 0
+	decision := jevDecision(t, `{"answers":{"model":{"type":"choice","choice":"sonnet","confidence":0.9}}}`, &calls)
+	addJevServers(t, store, decision.URL)
+	rule := jevRule(decision.URL, 0.3, 1)
+	rule.Jev.Images = true
+	rule.Jev.Candidates[0].Vision = new(false) // haiku is blind
+	rule.Jev.Candidates[1].Vision = new(true)  // sonnet sees images
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"what is in this image?"},` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}` +
+		`]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	attempts, out := r.jevAttempts(req, rule, body, "auto")
+
+	if out.Reason != "jev" {
+		t.Fatalf("reason = %q, want jev", out.Reason)
+	}
+	if got := strings.Join(attemptIDs(attempts), ","); got != "s1,s2,s3" {
+		t.Errorf("attempts = %v, want the blind candidate dropped", attemptIDs(attempts))
+	}
+}
+
+func TestJevVisionFilterFailOpen(t *testing.T) {
+	r, store, _ := jevTestRouter(t)
+	calls := 0
+	decision := jevDecision(t, `{"answers":{"model":{"type":"choice","choice":"sonnet","confidence":0.9}}}`, &calls)
+	addJevServers(t, store, decision.URL)
+	rule := jevRule(decision.URL, 0.3, 1)
+	rule.Jev.Images = true
+	for i := range rule.Jev.Candidates {
+		rule.Jev.Candidates[i].Vision = new(false)
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":[` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}` +
+		`]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	attempts, out := r.jevAttempts(req, rule, body, "auto")
+
+	if out.Reason != "jev" {
+		t.Fatalf("reason = %q, want jev", out.Reason)
+	}
+	if len(attempts) != 4 || attempts[0].server.ID != "s1" {
+		t.Errorf("attempts = %v, want the full pool when no vision candidate survives", attemptIDs(attempts))
+	}
+}
+
+func TestJevVisionFilterNoImages(t *testing.T) {
+	r, store, _ := jevTestRouter(t)
+	calls := 0
+	decision := jevDecision(t, `{"answers":{"model":{"type":"choice","choice":"haiku","confidence":0.9}}}`, &calls)
+	addJevServers(t, store, decision.URL)
+	rule := jevRule(decision.URL, 0.3, 1)
+	rule.Jev.Candidates[0].Vision = new(false)
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	attempts, out := r.jevAttempts(req, rule, body, "auto")
+
+	if out.Reason != "jev" {
+		t.Fatalf("reason = %q, want jev", out.Reason)
+	}
+	if got := strings.Join(attemptIDs(attempts), ","); got != "s0,s1,s2,s3" {
+		t.Errorf("attempts = %v, want the blind candidate kept for a text-only request", attemptIDs(attempts))
+	}
+}
+
+func TestJevAttemptsVisionAuto(t *testing.T) {
+	caps := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[` +
+			`{"id":"haiku","architecture":{"input_modalities":["text","image"]}},` +
+			`{"id":"sonnet","architecture":{"input_modalities":["text"]}}` +
+			`]}`))
+	}))
+	t.Cleanup(caps.Close)
+
+	r, store, _ := jevTestRouter(t)
+	calls := 0
+	decision := jevDecision(t, `{"answers":{"model":{"type":"choice","choice":"haiku","confidence":0.9}}}`, &calls)
+	for _, id := range []string{"s0", "s1"} {
+		if err := store.AddServer(&domain.Server{ID: id, Name: id, URL: caps.URL,
+			APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+			t.Fatalf("AddServer %s: %v", id, err)
+		}
+	}
+	if err := store.AddServer(&domain.Server{ID: "decision", Name: "decision", URL: decision.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+		t.Fatalf("AddServer decision: %v", err)
+	}
+
+	rule := jevRule(decision.URL, 0.3, 0)
+	rule.Jev.Images = true
+	rule.Jev.Candidates = []domain.JevCandidate{
+		{ServerID: "s0", TargetModel: "haiku", Tier: 0},
+		{ServerID: "s1", TargetModel: "sonnet", Tier: 1},
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"what is in this image?"},` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}` +
+		`]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	attempts, out := r.jevAttempts(req, rule, body, "auto")
+
+	if out.Reason != "jev" {
+		t.Fatalf("reason = %q, want jev", out.Reason)
+	}
+	if got := strings.Join(attemptIDs(attempts), ","); got != "s0" {
+		t.Errorf("attempts = %v, want the auto-detected blind candidate dropped", attemptIDs(attempts))
+	}
+}
+
+func TestJevVisionAutoUnknownFailOpen(t *testing.T) {
+	caps := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		// No modality fields: the backend does not report capabilities.
+		_, _ = w.Write([]byte(`{"data":[{"id":"haiku"},{"id":"sonnet"}]}`))
+	}))
+	t.Cleanup(caps.Close)
+
+	r, store, _ := jevTestRouter(t)
+	calls := 0
+	decision := jevDecision(t, `{"answers":{"model":{"type":"choice","choice":"haiku","confidence":0.9}}}`, &calls)
+	for _, id := range []string{"s0", "s1"} {
+		if err := store.AddServer(&domain.Server{ID: id, Name: id, URL: caps.URL,
+			APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+			t.Fatalf("AddServer %s: %v", id, err)
+		}
+	}
+	if err := store.AddServer(&domain.Server{ID: "decision", Name: "decision", URL: decision.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+		t.Fatalf("AddServer decision: %v", err)
+	}
+
+	rule := jevRule(decision.URL, 0.3, 0)
+	rule.Jev.Images = true
+	rule.Jev.Candidates = []domain.JevCandidate{
+		{ServerID: "s0", TargetModel: "haiku", Tier: 0},
+		{ServerID: "s1", TargetModel: "sonnet", Tier: 1},
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"what is in this image?"},` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}` +
+		`]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	attempts, out := r.jevAttempts(req, rule, body, "auto")
+
+	if out.Reason != "jev" {
+		t.Fatalf("reason = %q, want jev", out.Reason)
+	}
+	if got := strings.Join(attemptIDs(attempts), ","); got != "s0,s1" {
+		t.Errorf("attempts = %v, want the full pool when capabilities are unknown", attemptIDs(attempts))
+	}
+}
+
 func TestJevAttemptsCountTokensSkipsDecision(t *testing.T) {
 	r, store, _ := jevTestRouter(t)
 	calls := 0

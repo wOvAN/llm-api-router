@@ -27,6 +27,7 @@ type Router struct {
 	health    *config.HealthTracker
 	rateLimit *config.RateLimiter
 	quota     *config.QuotaTracker
+	caps      *config.CapabilitiesCache
 	jevMu     sync.Mutex                // guards jevCache and jevSticky
 	jevCache  map[string]jevCacheEntry  // jev decision cache (opt-in per rule)
 	jevSticky map[string]jevStickyEntry // last jev decision per conversation
@@ -35,7 +36,7 @@ type Router struct {
 // New creates a new Router.
 func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter, quota *config.QuotaTracker) *Router {
 	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit, quota: quota,
-		jevCache: map[string]jevCacheEntry{}, jevSticky: map[string]jevStickyEntry{}}
+		caps: config.NewCapabilitiesCache(), jevCache: map[string]jevCacheEntry{}, jevSticky: map[string]jevStickyEntry{}}
 }
 
 // serverAttempt is one proxy target: a backend server plus the model to send it.

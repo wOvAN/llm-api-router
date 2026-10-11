@@ -1,8 +1,11 @@
 # Jev Router: vision-роутинг (картинки → vision-модель)
 
-> Статус: план, не реализовано. Зависимости: фаза 1–2 jev-роутера
-> (`docs/jev-router.md`), извлечение картинок `jevRequestImages` (уже есть,
-> для `images: true`).
+> Статус: реализованы ручной `vision` pre-filter и автоопределение из
+> `/v1/models` (`config.CapabilitiesCache`, `input_modalities`/
+> `supported_modalities`, кэш 10 минут, fail-open на неизвестно). Не
+> реализовано: GUI-автозаполнение select из серверного лукапа. Зависимости:
+> фаза 1–2 jev-роутера (`docs/jev-router.md`), извлечение картинок
+> `jevRequestImages` (уже есть, для `images: true`).
 
 ## Проблема
 

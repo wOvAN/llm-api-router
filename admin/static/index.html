@@ -848,7 +848,7 @@ async function editRule(idx) {
     document.getElementById('jev-images').checked = r.jev.images === true;
     document.getElementById('jev-question').value = r.jev.question || '';
     for (const c of (r.jev.candidates || [])) {
-      addJevRow(c.server_id, c.target_model || '', c.description || '', c.tier || 0, c.enabled !== false, c.context_window || 0);
+      addJevRow(c.server_id, c.target_model || '', c.description || '', c.tier || 0, c.enabled !== false, c.context_window || 0, c.vision === true ? 'true' : c.vision === false ? 'false' : '');
     }
     toggleJevFields();
   }
@@ -1057,7 +1057,7 @@ function getServersFromDropdown() {
 }
 
 // --- Jev candidates ---
-function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabled = true, contextWindow = 0) {
+function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabled = true, contextWindow = 0, vision = '') {
   const servers = getServersFromDropdown();
   const row = document.createElement('div');
   row.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;margin-bottom:6px;width:100%;';
@@ -1138,6 +1138,12 @@ function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabl
   cwInp.value = contextWindow || 0;
   cwInp.title = 'Context window (для min по пулу в /v1/models; 0 = неизвестно)';
   cwInp.style.cssText = 'flex:0 0 90px;' + inpStyle;
+  const visionSel = document.createElement('select');
+  visionSel.className = 'jev-vision';
+  visionSel.title = 'Vision: auto = неизвестно, vision = видит картинки, blind = слепа (вне пула image-запросов)';
+  visionSel.style.cssText = 'flex:0 0 90px;' + inpStyle;
+  visionSel.innerHTML = '<option value="">auto</option><option value="true">vision</option><option value="false">blind</option>';
+  visionSel.value = vision;
   const enabledChk = document.createElement('input');
   enabledChk.type = 'checkbox';
   enabledChk.className = 'jev-enabled';
@@ -1155,6 +1161,7 @@ function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabl
   row.appendChild(descInp);
   row.appendChild(tierInp);
   row.appendChild(cwInp);
+  row.appendChild(visionSel);
   row.appendChild(enabledChk);
   row.appendChild(btn);
   document.getElementById('jev-candidates').appendChild(row);
@@ -1189,6 +1196,9 @@ function getJevCandidates() {
     };
     const cw = parseInt(row.querySelector('.jev-cw').value, 10) || 0;
     if (cw > 0) c.context_window = cw;
+    const vision = row.querySelector('.jev-vision').value;
+    if (vision === 'true') c.vision = true;
+    if (vision === 'false') c.vision = false;
     if (!row.querySelector('.jev-enabled').checked) c.enabled = false;
     candidates.push(c);
   });
