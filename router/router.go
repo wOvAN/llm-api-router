@@ -399,13 +399,25 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 
-			// Client disconnect: stop immediately, no fallback needed
+			// Client disconnect: stop immediately, no fallback needed. A
+			// disconnect after the backend answered is an interrupted response —
+			// the generation ran (and cost tokens), so record its telemetry
+			// like a mid-stream error, with 499 "client closed request" (nginx
+			// convention) to keep it distinct from served requests. A disconnect
+			// before any backend response carries nothing to record.
 			if req.Context().Err() != nil {
 				if r.quota != nil {
-					r.quota.Complete(srv.ID, reservedTokens, 0)
+					var used int64
+					if pm != nil {
+						used = int64(pm.TotalTokens)
+					}
+					r.quota.Complete(srv.ID, reservedTokens, used)
 				}
 				log.Warnf("[%s] model=%q — client disconnected during proxy (attempt %d/%d)",
 					req.URL.Path, model, i+1, len(attempts))
+				if pm != nil && pm.StatusCode > 0 {
+					r.record(req, requestStart, model, targetModel, srv.ID, *pm, 499, "client disconnected", wasFallback, apiType, jev)
+				}
 				return
 			}
 			// Mid-stream error: headers already sent to client, retry/fallback impossible

@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -871,6 +872,83 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 	recent := ms.Recent()
 	if len(recent) != 0 {
 		t.Errorf("expected 0 metrics after client disconnect, got %d", len(recent))
+	}
+}
+
+// flakyWriter delivers writes to an embedded recorder until the cancel func is
+// called on the second write — simulating a client that dies mid-stream.
+type flakyWriter struct {
+	header http.Header
+	body   strings.Builder
+	writes int
+	cancel context.CancelFunc
+}
+
+func (f *flakyWriter) Header() http.Header {
+	if f.header == nil {
+		f.header = make(http.Header)
+	}
+	return f.header
+}
+func (f *flakyWriter) WriteHeader(int) {}
+func (f *flakyWriter) Flush()          {}
+func (f *flakyWriter) Write(p []byte) (int, error) {
+	f.writes++
+	if f.writes == 2 {
+		f.cancel()
+		return 0, errors.New("client disconnected")
+	}
+	return f.body.Write(p)
+}
+
+// TestHandleClientDisconnectRecordsMetrics verifies a client that goes away
+// mid-stream leaves a 499 metric with the tokens the backend produced —
+// the generation ran and cost tokens, so it must not vanish from metrics.
+func TestHandleClientDisconnectRecordsMetrics(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		f := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		f.Flush()
+		time.Sleep(100 * time.Millisecond) // relay must see two separate writes
+		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"total_tokens\":9}}\n\n"))
+		f.Flush()
+	}))
+	defer backend.Close()
+
+	r, store, ms := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID:       "s1",
+		Name:     "test-server",
+		URL:      backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"},
+		TargetModel:    "gpt-4",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	req = req.WithContext(ctx)
+
+	r.Handle(&flakyWriter{cancel: cancel}, req)
+
+	recent := ms.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("expected 1 metric after mid-stream disconnect, got %d", len(recent))
+	}
+	m := recent[0]
+	if m.StatusCode != 499 {
+		t.Errorf("StatusCode = %d, want 499", m.StatusCode)
+	}
+	if m.PromptTokens != 7 || m.CompletionTokens != 2 {
+		t.Errorf("tokens = prompt %d completion %d, want 7/2", m.PromptTokens, m.CompletionTokens)
 	}
 }
 
