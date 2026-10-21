@@ -37,6 +37,12 @@ type RequestMetric struct {
 	NativeDecodeTokPerSec float64 `json:"native_decode_tok_per_sec"`
 	NativeQueueMs         float64 `json:"native_queue_ms"`
 
+	// Audio endpoints (TTS/STT) have no tokens to report. What a backend does
+	// report is the length of the audio and how fast it was produced
+	// (rtf = wall ms per ms of audio); zero on text endpoints.
+	AudioDurationMs int64   `json:"audio_duration_ms,omitempty"`
+	AudioRTF        float64 `json:"audio_rtf,omitempty"`
+
 	// Jev auto-routing decision (empty/zero on static rules): the chosen
 	// candidate, its confidence, how long the decision took, the decision model,
 	// why that candidate won, and tokens the decision itself cost.

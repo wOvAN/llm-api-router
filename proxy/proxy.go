@@ -263,6 +263,10 @@ type ProxyMetrics struct {
 	TokensPerSec        float64
 	QueueMs             float64 // vLLM metrics.queue_time_ms
 	BackendModel        string  // model name returned by the backend (before rewriting)
+	// Audio endpoints (TTS/STT) have no tokens: the backend's own metering is
+	// the length of the audio and how fast it was produced.
+	AudioDurationMs int64   // audio.cpp timing.audio_duration_ms
+	AudioRTF        float64 // audio.cpp timing.rtf (wall ms per ms of audio)
 }
 
 // RouterHeaders are custom response headers injected by the router
@@ -387,6 +391,19 @@ func (m *metricsWriter) metrics() ProxyMetrics {
 	}
 	pm.TTFBMs = ttfb
 	pm.ResponseSize = m.responseSize
+
+	// A binary audio response (audio.cpp TTS with the default WAV output) has no
+	// body to parse, so the backend reports its timing in headers instead.
+	if pm.AudioDurationMs == 0 {
+		if v, err := strconv.ParseInt(m.ResponseWriter.Header().Get("X-AudioCPP-Audio-Duration-Ms"), 10, 64); err == nil {
+			pm.AudioDurationMs = v
+		}
+	}
+	if pm.AudioRTF == 0 {
+		if v, err := strconv.ParseFloat(m.ResponseWriter.Header().Get("X-AudioCPP-RTF"), 64); err == nil {
+			pm.AudioRTF = v
+		}
+	}
 
 	return pm
 }
@@ -1251,12 +1268,17 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// frames (Anthropic "event: ping" or OpenAI comment); wait signals use a
 	// custom `router_wait` event that SDKs ignore but that keeps the TCP read
 	// side alive.
-	if ka != nil && strings.Contains(upstreamResp.Header.Get("Content-Type"), "text/event-stream") {
+	isStream := strings.Contains(upstreamResp.Header.Get("Content-Type"), "text/event-stream")
+	if ka != nil && isStream {
 		ka.Start()
 	}
-	if ws != nil && strings.Contains(upstreamResp.Header.Get("Content-Type"), "text/event-stream") {
+	if ws != nil && isStream {
 		ws.Start()
 	}
+	// Non-SSE bodies (JSON, and the raw audio of TTS/STT streams) have no frames
+	// to split: framing them would hold bytes for a blank line that never
+	// arrives, turning a streamed clip into one delivery at stream end.
+	clientW.setRaw(!isStream)
 
 	// Write status code (triggers TTFB and X-Router-Status injection)
 	ld.WriteHeader(upstreamResp.StatusCode)

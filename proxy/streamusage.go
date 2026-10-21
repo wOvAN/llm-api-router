@@ -64,11 +64,21 @@ type sseRelay struct {
 	pending []byte
 	strip   bool
 	dropped bool // true once at least one artifact frame was stripped
+	// raw is armed by StreamProxy for non-SSE responses (JSON bodies, and the
+	// raw audio of TTS/STT streams): framing does not apply, so bytes are
+	// forwarded as they arrive instead of being held for a blank line.
+	raw bool
 }
 
 func newSSERelay(w http.ResponseWriter, strip bool) *sseRelay {
 	return &sseRelay{ResponseWriter: w, strip: strip}
 }
+
+// setRaw switches the relay to pass-through mode. The proxy knows the response
+// kind from the upstream headers, so it arms this once, before any body byte is
+// written (inspection of the client writer's header map is not reliable — test
+// stubs hand out a fresh map per call).
+func (s *sseRelay) setRaw(raw bool) { s.raw = raw }
 
 // Write buffers incoming SSE bytes and forwards complete frames, minus
 // usage-only frames when stripping. A frame is dropped when all of its choices
@@ -76,6 +86,12 @@ func newSSERelay(w http.ResponseWriter, strip bool) *sseRelay {
 // an empty choices array — the exact shape of the injected usage /
 // prompt-filter chunk.
 func (s *sseRelay) Write(data []byte) (int, error) {
+	if s.raw {
+		n, err := s.ResponseWriter.Write(data)
+		s.flush()
+		return n, err
+	}
+
 	s.pending = append(s.pending, data...)
 
 	total := 0

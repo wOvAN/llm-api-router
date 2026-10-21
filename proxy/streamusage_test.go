@@ -345,6 +345,56 @@ func TestStreamProxyFlushesPerChunk(t *testing.T) {
 	}
 }
 
+// TestStreamProxyStreamsRawAudio verifies a non-SSE streamed body (llama.cpp TTS
+// with stream=true, audio.cpp with stream_format=audio) is relayed chunk by
+// chunk. SSE frame buffering must not be applied to audio: holding bytes for a
+// blank line would deliver the whole clip only at stream end.
+func TestStreamProxyStreamsRawAudio(t *testing.T) {
+	received := make(chan struct{})
+	sawSignal := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("RIFFxxxx"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-received:
+			close(sawSignal)
+		case <-time.After(2 * time.Second):
+			return // audio arrived buffered — streaming playback is dead
+		}
+		_, _ = w.Write([]byte("WAVEfmt "))
+	}))
+	defer backend.Close()
+
+	client := &bufWriter{}
+	clientW := &flushNotifyingWriter{ResponseWriter: client, onFlush: func() {
+		if strings.Contains(client.content(), "RIFFxxxx") {
+			select {
+			case <-received:
+			default:
+				close(received)
+			}
+		}
+	}}
+
+	req := httptest.NewRequest(http.MethodPost, "/tts", strings.NewReader(`{"model":"voice-1","input":"hi"}`))
+	if _, err := StreamProxy(req.Context(), backend.URL, "key", req, clientW, "voice-1", "voice-1", nil, false, nil); err != nil {
+		t.Fatalf("StreamProxy: %v", err)
+	}
+
+	select {
+	case <-sawSignal:
+	default:
+		t.Error("first audio chunk was not flushed to the client before the backend proceeded")
+	}
+	if got := client.content(); got != "RIFFxxxxWAVEfmt " {
+		t.Errorf("audio = %q, want RIFFxxxxWAVEfmt ", got)
+	}
+}
+
 // flushNotifyingWriter wraps a writer and calls onFlush every time Flush is
 // invoked, so tests can react to delivery without peeking at socket internals.
 type flushNotifyingWriter struct {

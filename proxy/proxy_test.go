@@ -607,7 +607,7 @@ func TestExtractUsageTokens(t *testing.T) {
 
 func TestBuildMetricsFromData(t *testing.T) {
 	t.Run("without timings", func(t *testing.T) {
-		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: 5}, 30, nil, nil, nil)
+		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: 5}, 30, nil, nil, nil, nil)
 		if pm.PromptTokens != 10 || pm.CompletionTokens != 20 || pm.TotalTokens != 30 || pm.CachedTokens != 5 {
 			t.Errorf("got tokens (%d,%d,%d,%d)", pm.PromptTokens, pm.CompletionTokens, pm.TotalTokens, pm.CachedTokens)
 		}
@@ -624,7 +624,7 @@ func TestBuildMetricsFromData(t *testing.T) {
 			"cache_n":              float64(3),
 			"draft_n":              float64(10),
 			"draft_n_accepted":     float64(7),
-		}, nil, nil)
+		}, nil, nil, nil)
 		if pm.PromptTokens != 5 {
 			t.Errorf("PromptTokens = %d, want 5", pm.PromptTokens)
 		}
@@ -649,7 +649,7 @@ func TestBuildMetricsFromData(t *testing.T) {
 			"queue_time_ms":          float64(7.5),
 			"mean_itl_ms":            float64(25.0),
 			"tokens_per_second":      float64(39.0),
-		}, nil)
+		}, nil, nil)
 		if pm.PromptTokens != 10 || pm.CompletionTokens != 20 {
 			t.Errorf("tokens = (%d,%d), want (10,20)", pm.PromptTokens, pm.CompletionTokens)
 		}
@@ -1775,5 +1775,25 @@ func TestStreamProxyResponseHeaderTimeout(t *testing.T) {
 	}
 	if elapsed > 400*time.Millisecond {
 		t.Errorf("request took %v; ResponseHeaderTimeout (100ms) should have cut it off", elapsed)
+	}
+}
+
+// audio.cpp reports audio metering in a `timing` object (JSON responses and the
+// terminal SSE event); token usage is absent entirely.
+func TestExtractAudioTiming(t *testing.T) {
+	pm := extractUsageFromJSON([]byte(`{"text":"hello","timing":{"wall_ms":900,"audio_duration_ms":3200,"rtf":0.28}}`))
+	if pm.AudioDurationMs != 3200 || pm.AudioRTF != 0.28 {
+		t.Errorf("JSON timing = %dms/%v; want 3200/0.28", pm.AudioDurationMs, pm.AudioRTF)
+	}
+
+	pm = extractUsageFromStream([]byte("data: {\"type\":\"speech.audio.delta\",\"audio\":\"AAAA\"}\n\ndata: {\"type\":\"batch.transcription.done\",\"result_count\":2,\"timing\":{\"wall_ms\":5000,\"audio_duration_ms\":4000,\"rtf\":1.5}}\n\ndata: [DONE]\n\n"))
+	if pm.AudioDurationMs != 4000 || pm.AudioRTF != 1.5 {
+		t.Errorf("stream timing = %dms/%v; want 4000/1.5", pm.AudioDurationMs, pm.AudioRTF)
+	}
+
+	// Text responses have no timing object — fields stay zero.
+	pm = extractUsageFromJSON([]byte(`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2}}`))
+	if pm.AudioDurationMs != 0 || pm.AudioRTF != 0 {
+		t.Errorf("text response must not report audio: %d/%v", pm.AudioDurationMs, pm.AudioRTF)
 	}
 }

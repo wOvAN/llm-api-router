@@ -92,6 +92,10 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/", apiRouter.Handle)
+	// llama.cpp keeps its TTS route (and the STT alias) outside /v1 — route them
+	// like any other endpoint so audio traffic isn't 404'd at the mux.
+	mux.HandleFunc("/tts", apiRouter.Handle)
+	mux.HandleFunc("/audio/", apiRouter.Handle)
 	mux.HandleFunc("/admin/api/", adminHandler.ServeHTTP)
 
 	// Build version (exact pattern beats the /admin/api/ catch-all above).

@@ -1,11 +1,13 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -425,6 +427,173 @@ func TestHandleSystemone(t *testing.T) {
 	}
 	if recent[0].PromptTokens != 10 {
 		t.Errorf("prompt tokens = %v, want 10", recent[0].PromptTokens)
+	}
+}
+
+// Audio uploads (OpenAI/llama.cpp /v1/audio/transcriptions) arrive as
+// multipart/form-data with the model as a form field, not as JSON.
+func TestHandleAudioTranscriptionsMultipart(t *testing.T) {
+	var receivedBody, receivedType string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		receivedBody = string(b)
+		receivedType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":"privet","timing":{"wall_ms":900,"audio_duration_ms":3200,"rtf":0.28}}`))
+	}))
+	defer backend.Close()
+
+	r, store, ms := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID: "s1", Name: "audio", URL: backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"whisper"},
+		TargetModel:    "whisper-large",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("model", "whisper"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	if err := mw.WriteField("language", "ru"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	fw, err := mw.CreateFormFile("file", "a.wav")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := fw.Write([]byte("RIFFxxxxWAVEfmt ")); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if res := w.Result(); res.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200: %s", res.StatusCode, w.Body.String())
+	}
+	if !strings.HasPrefix(receivedType, "multipart/") {
+		t.Errorf("upstream content type = %q, want multipart", receivedType)
+	}
+	// The model field follows the rule's target model; the upload and the
+	// sibling fields are forwarded untouched.
+	if got, ok := proxy.ExtractModelFromMultipart([]byte(receivedBody)); !ok || got != "whisper-large" {
+		t.Errorf("upstream model field = %q,%v; want whisper-large", got, ok)
+	}
+	for _, want := range []string{"RIFFxxxxWAVEfmt ", "language"} {
+		if !strings.Contains(receivedBody, want) {
+			t.Errorf("upload lost %q", want)
+		}
+	}
+	if !strings.Contains(w.Body.String(), `"text":"privet"`) {
+		t.Errorf("response not forwarded: %s", w.Body.String())
+	}
+
+	recent := ms.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("expected 1 recorded request, got %d", len(recent))
+	}
+	if recent[0].APIEndpoint != "transcriptions" {
+		t.Errorf("endpoint = %q, want transcriptions", recent[0].APIEndpoint)
+	}
+	if recent[0].AudioDurationMs != 3200 || recent[0].AudioRTF != 0.28 {
+		t.Errorf("audio timing = %dms/%v, want 3200/0.28", recent[0].AudioDurationMs, recent[0].AudioRTF)
+	}
+}
+
+// llama.cpp's TTS route lives outside /v1 and answers with raw bytes: the audio
+// must reach the client intact, and audio.cpp reports its metering in
+// X-AudioCPP-* headers when there is no JSON body to parse.
+func TestHandleTTSBinaryPassthrough(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(b), `"model":"voice-1"`) {
+			t.Errorf("upstream body = %s", b)
+		}
+		w.Header().Set("Content-Type", "audio/wav")
+		w.Header().Set("X-AudioCPP-Audio-Duration-Ms", "4500")
+		w.Header().Set("X-AudioCPP-RTF", "0.4")
+		_, _ = w.Write([]byte("RIFFxxxxWAVEfmt "))
+	}))
+	defer backend.Close()
+
+	r, store, ms := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID: "s1", Name: "audio", URL: backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"tts"},
+		TargetModel:    "voice-1",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/tts", strings.NewReader(`{"model":"tts","input":"hello"}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Body.String() != "RIFFxxxxWAVEfmt " {
+		t.Fatalf("audio not forwarded intact: %q", w.Body.String())
+	}
+	recent := ms.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("expected 1 recorded request, got %d", len(recent))
+	}
+	if recent[0].APIEndpoint != "tts" {
+		t.Errorf("endpoint = %q, want tts", recent[0].APIEndpoint)
+	}
+	if recent[0].AudioDurationMs != 4500 || recent[0].AudioRTF != 0.4 {
+		t.Errorf("audio timing = %dms/%v, want 4500/0.4", recent[0].AudioDurationMs, recent[0].AudioRTF)
+	}
+}
+
+// audio.cpp's voice picker is a GET with the model in the query string.
+func TestHandleAudioVoicesGet(t *testing.T) {
+	var receivedQuery string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"voices":["alba","cosette"]}`))
+	}))
+	defer backend.Close()
+
+	r, store, ms := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID: "s1", Name: "audio", URL: backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"pocket-tts"},
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/audio/voices?model=pocket-tts", nil)
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if res := w.Result(); res.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200: %s", res.StatusCode, w.Body.String())
+	}
+	if !strings.Contains(receivedQuery, "model=pocket-tts") {
+		t.Errorf("query not forwarded: %q", receivedQuery)
+	}
+	if !strings.Contains(w.Body.String(), "cosette") {
+		t.Errorf("response not forwarded: %s", w.Body.String())
+	}
+	if recent := ms.Recent(); len(recent) != 1 || recent[0].APIEndpoint != "voices" {
+		t.Errorf("recent = %+v, want one voices request", recent)
 	}
 }
 

@@ -113,6 +113,18 @@ func apiEndpointFromPath(path string) string {
 	if strings.Contains(path, "/embeddings") {
 		return "embeddings"
 	}
+	if strings.Contains(path, "/audio/speech") {
+		return "speech"
+	}
+	if strings.Contains(path, "/audio/transcriptions") {
+		return "transcriptions"
+	}
+	if strings.Contains(path, "/audio/voices") {
+		return "voices"
+	}
+	if strings.HasSuffix(path, "/tts") {
+		return "tts"
+	}
 	if strings.Contains(path, "/completions") {
 		return "completions"
 	}
@@ -133,7 +145,12 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if req.Method != http.MethodPost {
+	// Audio routes are the one GET family the router proxies: audio.cpp's
+	// `GET /v1/audio/voices?model=<id>` (voice pickers in clients like Open
+	// WebUI). Their model rides in the query string, so they join the normal
+	// routing below.
+	if req.Method != http.MethodPost &&
+		(req.Method != http.MethodGet || !strings.HasPrefix(req.URL.Path, "/v1/audio/")) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -155,9 +172,16 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 	model, err := extractModel(body)
 	if err != nil {
-		// llama.cpp's /v1/systemone (TypeSafe decision API) has no "model"
-		// field in the body — route by endpoint name.
-		if req.URL.Path == "/v1/systemone" {
+		// Endpoints with no JSON "model" field: audio uploads (OpenAI, llama.cpp,
+		// audio.cpp) are multipart/form-data with a `model` form field; audio.cpp's
+		// GET voice list takes it as a query parameter; llama.cpp's /v1/systemone
+		// (TypeSafe decision API) has no model at all and is routed by endpoint
+		// name.
+		if m, ok := proxy.ExtractModelFromMultipart(body); ok {
+			model = m
+		} else if m := strings.TrimSpace(req.URL.Query().Get("model")); m != "" && req.Method == http.MethodGet {
+			model = m
+		} else if req.URL.Path == "/v1/systemone" {
 			model = "systemone"
 		} else {
 			log.Errorf("[%s] invalid request body: %v", req.URL.Path, err)
@@ -281,7 +305,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 
-		rewrittenBody, err := proxy.RewriteModelInBody(body, targetModel)
+		rewrittenBody, err := rewriteAttemptBody(req, body, targetModel)
 		if err != nil {
 			log.Errorf("[%s] failed to rewrite model %q -> %q: %v", req.URL.Path, model, targetModel, err)
 			http.Error(w, fmt.Sprintf("failed to rewrite model: %v", err), http.StatusInternalServerError)
@@ -504,6 +528,8 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 		NativePromptTokPerSec: pm.PromptPerSec,
 		NativeDecodeTokPerSec: pm.TokensPerSec,
 		NativeQueueMs:         pm.QueueMs,
+		AudioDurationMs:       pm.AudioDurationMs,
+		AudioRTF:              pm.AudioRTF,
 		APIType:               apiType,
 		APIEndpoint:           apiEndpointFromPath(req.URL.Path),
 		ClientIP:              clientIP(req),
@@ -593,6 +619,20 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 		"data":   models,
 	}); err != nil {
 		log.Errorf("[%s] failed to encode /v1/models response: %v", req.URL.Path, err)
+	}
+}
+
+// rewriteAttemptBody points the request body at the attempt's target model.
+// JSON bodies are re-marshalled; multipart uploads (audio uploads) keep every
+// byte but their `model` form field; GETs have no body at all.
+func rewriteAttemptBody(req *http.Request, body []byte, targetModel string) ([]byte, error) {
+	switch {
+	case req.Method == http.MethodGet:
+		return body, nil
+	case strings.HasPrefix(req.Header.Get("Content-Type"), "multipart/"):
+		return proxy.RewriteModelInMultipart(body, targetModel)
+	default:
+		return proxy.RewriteModelInBody(body, targetModel)
 	}
 }
 

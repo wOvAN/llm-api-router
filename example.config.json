@@ -28,6 +28,13 @@
       "tpm_limit": 100000,
       "rpm_limit": 60
     },
+    "local-audio": {
+      "id": "local-audio",
+      "name": "Local Audio (TTS/STT)",
+      "url": "localhost:8081/v1",
+      "api_key": "",
+      "api_types": ["openai"]
+    },
     "fallback": {
       "id": "fallback",
       "name": "Fallback Server",
@@ -82,6 +89,14 @@
           "server_id": "local-llama",
           "fallbacks": [],
           "enabled": true
+        },
+        {
+          "incoming_models": ["whisper", "tts"],
+          "target_model": "qwen3-tts",
+          "server_id": "local-audio",
+          "num_retries": 1,
+          "fallbacks": [],
+          "enabled": false
         },
         {
           "incoming_models": ["auto"],

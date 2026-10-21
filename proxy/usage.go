@@ -75,6 +75,7 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 		uc          usageCounts
 		timings     map[string]any
 		vllmMetrics map[string]any
+		audioTiming map[string]any
 		hasAny      bool
 	)
 	uc.cached = -1
@@ -128,6 +129,12 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 				hasAny = true
 			}
 		}
+		// audio.cpp streams its timing on the terminal done event
+		// (speech.audio.done / transcript.text.done).
+		if t := getField(obj, "timing"); t != nil {
+			audioTiming = t
+			hasAny = true
+		}
 		return false
 	})
 
@@ -137,7 +144,7 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 
 	// SGLang never emits meta_info in stream chunks (return_meta_info requires
 	// stream=false), so the stream path has no native timing source.
-	return buildMetricsFromData(uc, 0, timings, vllmMetrics, nil)
+	return buildMetricsFromData(uc, 0, timings, vllmMetrics, nil, audioTiming)
 }
 
 // extractUsageFromJSON parses a non-streaming JSON response.
@@ -161,15 +168,17 @@ func extractUsageFromJSON(body []byte) ProxyMetrics {
 		vllmMetrics = m
 	}
 	sglangMeta := sglangMetaInfo(obj)
+	// audio.cpp answers audio requests with a `timing` object and no usage at all.
+	audioTiming, _ := obj["timing"].(map[string]any)
 
-	if usage == nil && timings == nil && vllmMetrics == nil && sglangMeta == nil {
+	if usage == nil && timings == nil && vllmMetrics == nil && sglangMeta == nil && audioTiming == nil {
 		return ProxyMetrics{CachedTokens: -1}
 	}
 
 	uc := extractUsageTokens(usage)
 	total := intToFloat64(usage["total_tokens"])
 
-	return buildMetricsFromData(uc, int64(total), timings, vllmMetrics, sglangMeta)
+	return buildMetricsFromData(uc, int64(total), timings, vllmMetrics, sglangMeta, audioTiming)
 }
 
 // getField traverses a dotted JSON path in a map.
@@ -303,7 +312,7 @@ func firstPositiveF(fallback float64, vals ...float64) float64 {
 // backend emits at most one of the three, so the timings block wins when both
 // are present. Rates embedded in the usage object (TabbyAPI, oMLX) seed the
 // throughput fields and lose to all three.
-func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetrics, sglangMeta map[string]any) ProxyMetrics {
+func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetrics, sglangMeta, audioTiming map[string]any) ProxyMetrics {
 	pm := ProxyMetrics{
 		PromptTokens:        uc.input,
 		CompletionTokens:    uc.output,
@@ -400,6 +409,14 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetric
 		// Speculative decoding stats, present only when a draft model is used.
 		pm.DraftTokens = intToFloat64(timings["draft_n"])
 		pm.DraftTokensAccepted = intToFloat64(timings["draft_n_accepted"])
+	}
+
+	// audio.cpp `timing`: the length of the audio produced/recognized, and the
+	// real-time factor (wall ms per ms of audio). wall_ms and ttft_ms are
+	// dropped — the proxy measures latency and TTFB itself.
+	if audioTiming != nil {
+		pm.AudioDurationMs = int64(intToFloat64(audioTiming["audio_duration_ms"]))
+		pm.AudioRTF = floatToFloat64(audioTiming["rtf"])
 	}
 
 	return pm

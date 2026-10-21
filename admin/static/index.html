@@ -1351,6 +1351,14 @@ async function loadMetrics() {
       ? `<td style="color:${statusColor}" title="${escAttr(errText)}">${r.status_code}<button class="copy-icon" data-err="${escAttr(errText)}" onclick="copyErrorText(this)" title="Copy error text">⧉</button></td>`
       : `<td style="color:${statusColor}">${r.status_code}</td>`;
     const size = r.response_size ? formatBytes(r.response_size) : '-';
+    // Audio endpoints (TTS/STT) have no tokens: show the audio length the
+    // backend reported and its real-time factor next to the response size.
+    let audioNote = '';
+    if (r.audio_duration_ms > 0) {
+      const audioParts = [(r.audio_duration_ms / 1000).toFixed(1) + 's audio'];
+      if (r.audio_rtf > 0) audioParts.push('RTF ' + r.audio_rtf.toFixed(3));
+      audioNote = ` <span class="tag" style="background:#3a2a1a;color:#ffa657" title="${escAttr(audioParts.join(', '))}">🔊</span>`;
+    }
     const fallback = r.was_fallback ? '<span class="tag" style="background:#3a3a1a;color:#d29922">yes</span>' : '-';
     let jevCell = '-';
     if (r.jev_choice || r.jev_reason) {
