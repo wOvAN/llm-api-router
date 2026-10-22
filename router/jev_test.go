@@ -424,7 +424,14 @@ func TestHandleJevSecurityBlock(t *testing.T) {
 	}))
 	defer decision.Close()
 	hit := false
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = true }))
+	// The candidate server also serves the capability probe (GET /v1/models,
+	// which the audio pool filter runs before the decision) — only a proxied
+	// POST means the blocked request got through.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			hit = true
+		}
+	}))
 	defer backend.Close()
 
 	r, store, ms := jevTestRouter(t)
