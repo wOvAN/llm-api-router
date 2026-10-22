@@ -23,10 +23,11 @@ const capabilitiesTTL = 10 * time.Minute
 // capabilitiesProbeTimeout bounds a single /v1/models capability probe.
 const capabilitiesProbeTimeout = 2 * time.Second
 
-// CapabilitiesCache answers "does this server's model accept image input?" from
-// the backend's own /v1/models listing. It is intentionally lazy and fail-open:
-// an unknown answer (no listing, no modality fields, probe failure) is reported
-// as known=false, and the caller keeps the candidate in the pool.
+// CapabilitiesCache answers "does this server's model accept image input?" and
+// "is it an audio model?" from the backend's own /v1/models listing. It is
+// intentionally lazy and fail-open: an unknown answer (no listing, no modality
+// fields, probe failure) is reported as known=false, and the caller keeps the
+// candidate in the pool.
 type CapabilitiesCache struct {
 	mu      sync.Mutex
 	ttl     time.Duration
@@ -36,6 +37,7 @@ type CapabilitiesCache struct {
 type serverCapabilities struct {
 	fetched time.Time
 	vision  map[string]*bool // model id -> nil when the backend reports no modalities
+	audio   map[string]bool  // model id -> present when the model declares an audio `task`
 }
 
 // NewCapabilitiesCache creates an empty cache.
@@ -73,8 +75,30 @@ func (c *CapabilitiesCache) Vision(ctx context.Context, srv *domain.Server, mode
 	return *v, true
 }
 
+// Audio reports whether srv's model is an audio-domain model, as declared by the
+// `task` field of its /v1/models entry (audio.cpp: tts/asr/s2s/diar/...). Text
+// engines omit the field entirely, so known=false is the normal answer for a
+// chat backend and the caller must treat the model as a text candidate.
+func (c *CapabilitiesCache) Audio(ctx context.Context, srv *domain.Server, model string) (audio bool, known bool) {
+	if c == nil || srv == nil || model == "" {
+		return false, false
+	}
+
+	c.mu.Lock()
+	entry, ok := c.entries[srv.ID]
+	if !ok || time.Since(entry.fetched) >= c.ttl {
+		c.mu.Unlock()
+		entry = probeServerCapabilities(ctx, srv)
+		c.mu.Lock()
+		entry.fetched = time.Now()
+		c.entries[srv.ID] = entry
+	}
+	defer c.mu.Unlock()
+	return entry.audio[model], entry.audio[model]
+}
+
 func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapabilities {
-	out := serverCapabilities{vision: make(map[string]*bool)}
+	out := serverCapabilities{vision: make(map[string]*bool), audio: make(map[string]bool)}
 
 	// Detach from the request context: a client disconnect must not poison the
 	// capability cache with a negative entry for the next ten minutes.
@@ -121,6 +145,7 @@ func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapa
 	var payload struct {
 		Data []struct {
 			ID           string `json:"id"`
+			Task         string `json:"task"`
 			Architecture struct {
 				InputModalities *[]string `json:"input_modalities"`
 			} `json:"architecture"`
@@ -135,6 +160,12 @@ func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapa
 	for _, m := range payload.Data {
 		if m.ID == "" {
 			continue
+		}
+		// A declared task is audio.cpp's vocabulary (tts/asr/s2s/diar/clon/...):
+		// such a model has no chat completion to serve. Text engines never send
+		// the field, so they stay absent (= unknown).
+		if m.Task != "" {
+			out.audio[m.ID] = true
 		}
 		// No modality fields at all: the backend does not report capabilities
 		// (old vLLM, Anthropic) — leave the model unknown, not blindly false.

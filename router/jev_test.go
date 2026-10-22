@@ -344,6 +344,79 @@ func TestJevAttemptsSecurity(t *testing.T) {
 	}
 }
 
+// A candidate the backend declares as an audio model (`task` in /v1/models) is
+// dropped from the pool: the decision model must not spend a choice on a server
+// that has no chat completion to serve.
+func TestHandleJevAudioCandidateFiltered(t *testing.T) {
+	var decisionBody map[string]any
+	decision := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &decisionBody)
+		_, _ = w.Write([]byte(`{"answers":{"model":{"type":"choice","choice":"voice","confidence":0.9}}}`))
+	}))
+	defer decision.Close()
+
+	// The TTS worker answers /v1/models with a task-tagged entry, as audio.cpp does.
+	audio := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"voice","task":"tts","object":"model"}]}`))
+	}))
+	defer audio.Close()
+
+	textHit := ""
+	text := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		textHit = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"sonnet","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer text.Close()
+
+	r, store, _ := jevTestRouter(t)
+	_ = store.AddServer(&domain.Server{ID: "decision", Name: "decision", URL: decision.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}})
+	_ = store.AddServer(&domain.Server{ID: "audio", Name: "audio", URL: audio.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}})
+	_ = store.AddServer(&domain.Server{ID: "strong", Name: "strong", URL: text.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"auto"},
+		Router:         domain.RouterJev,
+		Enabled:        true,
+		Jev: &domain.JevRouter{
+			ServerID:    "decision",
+			Model:       "laya",
+			DefaultTier: 1,
+			Candidates: []domain.JevCandidate{
+				{ServerID: "audio", TargetModel: "voice", Tier: 0},
+				{ServerID: "strong", TargetModel: "sonnet", Tier: 1},
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"refactor the parser"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Result().StatusCode, w.Body.String())
+	}
+	// The pool offered to the decision model excluded the audio candidate, so its
+	// answer ("voice") is unknown and the request lands on default_tier.
+	state, _ := decisionBody["state"].(map[string]any)
+	env, _ := state["environment"].(map[string]any)
+	models, _ := env["available_models"].([]any)
+	if len(models) != 1 || models[0] != "sonnet" {
+		t.Errorf("available_models = %v, want only sonnet", models)
+	}
+	if got := w.Result().Header.Get("X-Router-Jev-Reason"); got != "unknown-choice" {
+		t.Errorf("X-Router-Jev-Reason = %q, want unknown-choice", got)
+	}
+	if textHit == "" {
+		t.Error("request never reached the text backend")
+	}
+}
+
 func TestHandleJevSecurityBlock(t *testing.T) {
 	decision := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"answers":{"model":{"type":"choice","choice":"sonnet","confidence":0.9},` +

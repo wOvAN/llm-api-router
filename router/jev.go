@@ -97,6 +97,14 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 		out.Reason = "no-pool"
 		return nil, out
 	}
+	// A candidate the backend reports as an audio model (its /v1/models entry
+	// carries a `task`) has no chat completion to serve — drop it from the pool
+	// so the decision model never spends a choice on it. Fails open when the
+	// backend says nothing.
+	if filtered := r.jevAudioPool(req.Context(), pool); len(filtered) > 0 && len(filtered) < len(pool) {
+		log.Debugf("jev %s: pool filtered to %d text candidates", requested, len(filtered))
+		pool = filtered
+	}
 	if len(requestImages) > 0 {
 		pool = r.resolveVisionPool(req.Context(), pool)
 		if filtered := jevVisionPool(pool); len(filtered) > 0 {
@@ -318,6 +326,24 @@ func jevVisionPool(pool []domain.JevCandidate) []domain.JevCandidate {
 		if c.Vision == nil || *c.Vision {
 			out = append(out, c)
 		}
+	}
+	return out
+}
+
+// jevAudioPool drops candidates the backend declares as audio models (`task` in
+// /v1/models — audio.cpp's tts/asr/s2s/diar): they cannot answer a text request.
+// Lazy probe through the shared capability cache; a backend that reports no
+// tasks keeps all of its candidates (fail-open).
+func (r *Router) jevAudioPool(ctx context.Context, pool []domain.JevCandidate) []domain.JevCandidate {
+	out := make([]domain.JevCandidate, 0, len(pool))
+	for _, c := range pool {
+		srv, ok := r.store.GetServer(c.ServerID)
+		if ok && c.TargetModel != "" {
+			if audio, known := r.caps.Audio(ctx, srv, c.TargetModel); known && audio {
+				continue
+			}
+		}
+		out = append(out, c)
 	}
 	return out
 }

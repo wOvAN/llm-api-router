@@ -78,3 +78,33 @@ func TestCapabilitiesCacheNegativeCachesFailure(t *testing.T) {
 		t.Errorf("probe calls = %d, want 1 (negative cache)", calls)
 	}
 }
+
+func TestCapabilitiesCacheAudio(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{"id": "qwen3-tts", "task": "tts"},
+				{"id": "voxtral", "task": "asr"},
+				{"id": "laya"}
+			]
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewCapabilitiesCache()
+	server := &domain.Server{ID: "s1", Name: "s1", URL: srv.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}}
+
+	if a, ok := c.Audio(context.Background(), server, "qwen3-tts"); !ok || !a {
+		t.Errorf("qwen3-tts = %v/%v, want known audio", a, ok)
+	}
+	if a, ok := c.Audio(context.Background(), server, "voxtral"); !ok || !a {
+		t.Errorf("voxtral = %v/%v, want known audio", a, ok)
+	}
+	// A text engine sends no task field: unknown, so the caller keeps the model.
+	if a, ok := c.Audio(context.Background(), server, "laya"); ok || a {
+		t.Errorf("laya = %v/%v, want unknown", a, ok)
+	}
+	if a, ok := c.Audio(context.Background(), server, ""); ok || a {
+		t.Errorf("empty model = %v/%v, want unknown", a, ok)
+	}
+}
