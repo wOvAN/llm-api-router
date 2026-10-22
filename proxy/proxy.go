@@ -1116,6 +1116,12 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// redundant prefix so the two merge into a single /v1.
 	if strings.HasSuffix(targetBase, "/v1") && strings.HasPrefix(req.URL.Path, "/v1") {
 		targetPath = targetBase + req.URL.Path[len("/v1"):]
+	} else if strings.HasSuffix(targetBase, "/v1") {
+		// The inverse: llama.cpp serves TTS (and the STT alias) at the ROOT
+		// (/tts, /audio/transcriptions), so a server URL that carries /v1 for
+		// its chat endpoints must lose it for those paths. Without this a single
+		// llama.cpp server could not serve both chat and audio.
+		targetPath = strings.TrimSuffix(targetBase, "/v1") + req.URL.Path
 	}
 
 	start := time.Now()

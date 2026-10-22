@@ -1644,6 +1644,35 @@ func TestStreamProxyURLDedupV1(t *testing.T) {
 	}
 }
 
+func TestStreamProxyURLRootAudioRoutesStripV1(t *testing.T) {
+	// The inverse of the /v1 dedup: llama.cpp serves TTS at the root, so a
+	// server URL that carries /v1 must lose it for paths that don't start with
+	// /v1 — host/v1 + /tts reaches host/tts, not host/v1/tts.
+	gotPath := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath <- r.URL.Path
+		w.Header().Set("Content-Type", "audio/wav")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("RIFFxxxx"))
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/tts", strings.NewReader(`{"model":"voice-1","input":"hi"}`))
+	w := httptest.NewRecorder()
+
+	if _, err := StreamProxy(req.Context(), backend.URL+"/v1", "key", req, w, "voice-1", "voice-1", nil, false, nil); err != nil {
+		t.Fatalf("unexpected upstream error: %v", err)
+	}
+	select {
+	case p := <-gotPath:
+		if p != "/tts" {
+			t.Errorf("upstream path = %q, want /tts", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend never received the request")
+	}
+}
+
 func TestStreamProxyURLDedupLongBase(t *testing.T) {
 	// Same dedup with a multi-segment base: /api/v1 + /v1/... -> /api/v1/...
 	gotPath := make(chan string, 1)
