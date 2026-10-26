@@ -3,7 +3,7 @@ module llm-api-router/sdktest
 go 1.27
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.66.0
+	github.com/anthropics/anthropic-sdk-go/v2 v2.3.0
 	github.com/openai/openai-go/v3 v3.52.0
 	llm-api-router v0.0.0
 )
@@ -33,8 +33,8 @@ require (
 // The SDK sources come from the .info/ reference clones (gitignored, not part
 // of the build), and the router under test is the parent module.
 replace (
-	github.com/anthropics/anthropic-sdk-go => ../.info/anthropic-sdk-go
+	github.com/anthropics/anthropic-sdk-go/v2 => ../.info/apis/anthropic-sdk-go
 
-	github.com/openai/openai-go/v3 => ../.info/openai-go
+	github.com/openai/openai-go/v3 => ../.info/apis/openai-go
 	llm-api-router => ..
 )
