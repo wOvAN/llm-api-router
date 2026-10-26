@@ -108,3 +108,32 @@ func TestCapabilitiesCacheAudio(t *testing.T) {
 		t.Errorf("empty model = %v/%v, want unknown", a, ok)
 	}
 }
+
+// llama.cpp's listing has no `task` field: a TTS-only checkpoint is recognized by
+// an output modality list without "text", and a model that can both chat and
+// speak keeps its chat candidacy.
+func TestCapabilitiesCacheAudioFromOutputModalities(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{"id": "laya", "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}},
+				{"id": "kokoro-tts", "architecture": {"input_modalities": ["text"], "output_modalities": ["audio"]}},
+				{"id": "omni", "architecture": {"input_modalities": ["text", "audio"], "output_modalities": ["text", "audio"]}}
+			]
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewCapabilitiesCache()
+	server := &domain.Server{ID: "s1", Name: "s1", URL: srv.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}}
+
+	if a, ok := c.Audio(context.Background(), server, "kokoro-tts"); !ok || !a {
+		t.Errorf("kokoro-tts = %v/%v, want known audio", a, ok)
+	}
+	if a, ok := c.Audio(context.Background(), server, "laya"); ok || a {
+		t.Errorf("laya = %v/%v, want unknown", a, ok)
+	}
+	if a, ok := c.Audio(context.Background(), server, "omni"); ok || a {
+		t.Errorf("omni = %v/%v, want kept (it can emit text too)", a, ok)
+	}
+}

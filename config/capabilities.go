@@ -76,9 +76,11 @@ func (c *CapabilitiesCache) Vision(ctx context.Context, srv *domain.Server, mode
 }
 
 // Audio reports whether srv's model is an audio-domain model, as declared by the
-// `task` field of its /v1/models entry (audio.cpp: tts/asr/s2s/diar/...). Text
-// engines omit the field entirely, so known=false is the normal answer for a
-// chat backend and the caller must treat the model as a text candidate.
+// `task` field of its /v1/models entry (audio.cpp: tts/asr/s2s/diar/...) or by an
+// `architecture.output_modalities` list with no `text` in it (llama.cpp: a
+// TTS-only checkpoint). Text engines report neither, so known=false is the normal
+// answer for a chat backend and the caller must treat the model as a text
+// candidate.
 func (c *CapabilitiesCache) Audio(ctx context.Context, srv *domain.Server, model string) (audio bool, known bool) {
 	if c == nil || srv == nil || model == "" {
 		return false, false
@@ -147,7 +149,8 @@ func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapa
 			ID           string `json:"id"`
 			Task         string `json:"task"`
 			Architecture struct {
-				InputModalities *[]string `json:"input_modalities"`
+				InputModalities  *[]string `json:"input_modalities"`
+				OutputModalities *[]string `json:"output_modalities"`
 			} `json:"architecture"`
 			SupportedModalities *[]string `json:"supported_modalities"`
 		} `json:"data"`
@@ -171,6 +174,12 @@ func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapa
 		// (old vLLM, Anthropic) — leave the model unknown, not blindly false.
 		if m.Architecture.InputModalities == nil && m.SupportedModalities == nil {
 			continue
+		}
+		// llama.cpp's listing: a model that can only emit audio (a TTS-only
+		// checkpoint) has no chat completion to serve either. A chat model that
+		// can also speak keeps "text" in the list and stays a candidate.
+		if emits := m.Architecture.OutputModalities; emits != nil && !slices.Contains(*emits, "text") {
+			out.audio[m.ID] = true
 		}
 		seen := containsImageModality(m.Architecture.InputModalities) ||
 			containsImageModality(m.SupportedModalities)
