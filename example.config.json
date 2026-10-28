@@ -138,6 +138,12 @@
   ],
   "active_profile_id": "default",
   "settings": {
-    "always_include_stream_usage": false
+    "always_include_stream_usage": false,
+    "trace": {
+      "enabled": false,
+      "seconds": 300,
+      "models": [],
+      "servers": []
+    }
   }
 }

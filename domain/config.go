@@ -22,6 +22,10 @@ type Settings struct {
 	// clients instead of stripping it. Default (false) strips the injected
 	// usage artifact from the client stream while still tracking it in metrics.
 	AlwaysIncludeStreamUsage bool `json:"always_include_stream_usage,omitempty"`
+
+	// Trace are the startup defaults for the on-demand request trace
+	// (trace.Store holds the live window; it is never persisted).
+	Trace TraceSettings `json:"trace,omitempty"`
 }
 
 // TraceSettings are the startup defaults for the on-demand request trace.

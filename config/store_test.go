@@ -715,3 +715,32 @@ func TestServerProxyURL(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func TestSettingsTraceRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	src := `{"servers":{},"profiles":[{"id":"default","name":"default","rules":[]}],"settings":{"trace":{"enabled":true,"seconds":120,"models":["gpt"],"servers":["s1"]}}}`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tr := store.GetSettings().Trace
+	if !tr.Enabled || tr.Seconds != 120 || len(tr.Models) != 1 || tr.Models[0] != "gpt" || len(tr.Servers) != 1 {
+		t.Fatalf("trace settings = %+v, want the file's values", tr)
+	}
+
+	if err := store.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	reloaded, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("re-NewStore: %v", err)
+	}
+	if got := reloaded.GetSettings().Trace; !got.Enabled || got.Seconds != 120 {
+		t.Errorf("after Save trace settings = %+v, want them persisted", got)
+	}
+}
