@@ -289,6 +289,19 @@ type RouterHeaders struct {
 	KeepAliveIdle time.Duration
 	// Proxy is the server's proxy URL ("" = direct connection). Not a client-visible header.
 	Proxy string
+	// Trace is the per-request trace capture (nil = tracing off). Not a
+	// client-visible header, like Proxy.
+	Trace TraceTap
+}
+
+// TraceTap is the slice of a request trace capture StreamProxy writes into: the
+// response content type at header time, every response chunk after. The proxy
+// deliberately knows nothing about the trace package (no import, no cycle) —
+// the router hands it the capture, and nil means tracing is off so the relay
+// hot path stays a single nil check.
+type TraceTap interface {
+	WriteResponse(p []byte)
+	ResponseContentType(ct string)
 }
 
 // SetRouterHeaders sets eager headers (server info) on the given ResponseWriter.
@@ -325,7 +338,8 @@ type metricsWriter struct {
 	bodyBuffer      *bytes.Buffer
 	contentType     string
 	contentEncoding string
-	injectStatus    bool // set X-Router-Status at WriteHeader (router mode)
+	trace           TraceTap // per-request trace capture (nil = off)
+	injectStatus    bool     // set X-Router-Status at WriteHeader (router mode)
 }
 
 func newMetricsWriter(w http.ResponseWriter, start time.Time) *metricsWriter {
@@ -343,6 +357,16 @@ func (m *metricsWriter) WriteHeader(code int) {
 	m.statusCode = code
 	m.contentType = m.ResponseWriter.Header().Get("Content-Type")
 	m.contentEncoding = m.ResponseWriter.Header().Get("Content-Encoding")
+	if m.trace != nil {
+		// A compressed body is bytes: the relay forwards it as-is and only the
+		// metrics extractor decompresses it, so the trace stubs it (with size +
+		// hash) instead of storing a wall of gzip.
+		if m.contentEncoding != "" && m.contentEncoding != "identity" {
+			m.trace.ResponseContentType("application/" + m.contentEncoding)
+		} else {
+			m.trace.ResponseContentType(m.contentType)
+		}
+	}
 	if m.injectStatus {
 		m.Header().Set("X-Router-Status", strconv.Itoa(code))
 	}
@@ -368,6 +392,9 @@ func (m *metricsWriter) Write(data []byte) (int, error) {
 		}
 	}
 	m.bodyBuffer.Write(data)
+	if m.trace != nil {
+		m.trace.WriteResponse(data)
+	}
 	n, err := m.ResponseWriter.Write(data)
 	m.responseSize += int64(n)
 	return n, err
@@ -1171,6 +1198,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	if rh != nil {
 		SetRouterHeaders(rw, rh)
 		mw.injectStatus = true
+		mw.trace = rh.Trace
 	}
 
 	// Wrap with loop detector to catch backends that get stuck repeating content.

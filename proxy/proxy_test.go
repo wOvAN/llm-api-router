@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"llm-api-router/trace"
 )
 
 func TestRewriteModelInBody(t *testing.T) {
@@ -1824,5 +1826,82 @@ func TestExtractAudioTiming(t *testing.T) {
 	pm = extractUsageFromJSON([]byte(`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2}}`))
 	if pm.AudioDurationMs != 0 || pm.AudioRTF != 0 {
 		t.Errorf("text response must not report audio: %d/%v", pm.AudioDurationMs, pm.AudioRTF)
+	}
+}
+
+func TestStreamProxyTapsTraceCapture(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+	}))
+	defer backend.Close()
+
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = io.NopCloser(req.Body)
+	w := httptest.NewRecorder()
+
+	tr := trace.NewCapture(http.MethodPost, "/v1/chat/completions", "gpt-4", "application/json", []byte(body))
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4",
+		&RouterHeaders{ServerID: "s1", Trace: tr}, false, nil)
+	if err != nil {
+		t.Fatalf("StreamProxy: %v", err)
+	}
+	if pm.ResponseSize == 0 {
+		t.Fatal("proxy recorded no response bytes")
+	}
+	e := tr.Entry()
+	if !strings.Contains(e.Request, "hi") {
+		t.Errorf("captured request = %q, want the prompt text", e.Request)
+	}
+	if !strings.Contains(e.Response, "data: {") {
+		t.Errorf("captured response = %q, want the raw SSE frames", e.Response)
+	}
+	if e.Digest.Text != "hi" {
+		t.Errorf("digest = %+v, want the reassembled stream text", e.Digest)
+	}
+}
+
+func TestStreamProxyTapsBinaryResponseAsStub(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write(bytes.Repeat([]byte{0x10}, 2048))
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/speech", strings.NewReader(`{"model":"tts"}`))
+	req.Body = io.NopCloser(req.Body)
+	w := httptest.NewRecorder()
+	tr := trace.NewCapture(http.MethodPost, "/v1/audio/speech", "tts", "application/json", []byte(`{"model":"tts"}`))
+
+	if _, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "tts", "tts",
+		&RouterHeaders{ServerID: "s1", Trace: tr}, false, nil); err != nil {
+		t.Fatalf("StreamProxy: %v", err)
+	}
+	e := tr.Entry()
+	if !strings.HasPrefix(e.Response, "<audio ") {
+		t.Errorf("captured response = %q, want an audio stub", e.Response)
+	}
+	if strings.Contains(e.Response, "\x10") {
+		t.Error("audio bytes must not reach the trace")
+	}
+}
+
+func TestStreamProxyWithoutTraceIsUnchanged(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hi"}}]}`))
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	req.Body = io.NopCloser(req.Body)
+	w := httptest.NewRecorder()
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
+	if err != nil {
+		t.Fatalf("StreamProxy: %v", err)
+	}
+	if pm.ResponseSize == 0 || pm.StatusCode != http.StatusOK {
+		t.Errorf("metrics = %+v, want a served request", pm)
 	}
 }
