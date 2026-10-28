@@ -237,6 +237,31 @@ func TestSummariesNegativeCachedTokens(t *testing.T) {
 	}
 }
 
+// The two usage conventions nest the cache counters differently: OpenAI's
+// prompt_tokens already contains prompt_tokens_details.cached_tokens, while
+// Anthropic's input_tokens sits next to cache_read_input_tokens. The GUI's
+// Cache hit column divides by this sum, so a double count would halve the
+// ratio for every OpenAI-flavoured backend.
+func TestSummariesTotalInputTokPerConvention(t *testing.T) {
+	s := New(100)
+	s.Add(domain.RequestMetric{
+		Model: "openai-style", ServerID: "s1", StatusCode: 200, APIType: domain.APITypeOpenAI,
+		PromptTokens: 1000, CachedTokens: 1000, CacheCreationTokens: 200,
+	})
+	s.Add(domain.RequestMetric{
+		Model: "anthropic-style", ServerID: "s1", StatusCode: 200, APIType: domain.APITypeAnthropic,
+		PromptTokens: 500, CachedTokens: 300, CacheCreationTokens: 100,
+	})
+
+	summaries := s.Summaries()
+	if got := summaries["openai-style"].TotalInputTok; got != 1000 {
+		t.Errorf("OpenAI TotalInputTok = %d, want 1000 (cached is inside prompt_tokens)", got)
+	}
+	if got := summaries["anthropic-style"].TotalInputTok; got != 900 {
+		t.Errorf("Anthropic TotalInputTok = %d, want 900 (input + cache read + cache write)", got)
+	}
+}
+
 func TestSummariesWeightedAverages(t *testing.T) {
 	s := New(100)
 	s.Add(domain.RequestMetric{

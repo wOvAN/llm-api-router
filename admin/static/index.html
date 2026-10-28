@@ -1317,8 +1317,13 @@ document.getElementById('rule-target-inp').addEventListener('focusout', function
 // --- Metrics ---
 // cacheHitRatio is the group's cache hit read off its token sums: an average of
 // per-request ratios would let one small request outvote a large one.
+// Cache hit is taken from the group's token sums (an average of per-request
+// ratios would let one small request outvote a large one). The denominator is
+// the server's whole input context — the router's total_input_tokens, which
+// knows the two usage conventions: OpenAI's prompt_tokens already contains its
+// cached tokens, Anthropic's input_tokens does not.
 function cacheHitRatio(s) {
-  const denom = (s.total_prompt_tokens || 0) + (s.total_cached_tokens || 0) + (s.total_cache_creation_tokens || 0);
+  const denom = s.total_input_tokens || 0;
   return denom > 0 ? 100 * (s.total_cached_tokens || 0) / denom : 0;
 }
 
@@ -1379,7 +1384,12 @@ async function loadMetrics() {
   const entries = Object.entries(summaries);
   renderSummaries('server-metrics-body', 'sum-server', entries.filter(([key]) => key.startsWith('server:')),
     (key) => key.slice(7));
-  renderSummaries('metrics-body', 'sum-model', entries.filter(([key]) => !key.startsWith('server:') && !key.startsWith('target:')), (key) => key);
+  // Bare keys are incoming models — every other family has its own table, so
+  // none of those prefixes may leak into "Summary by Model". The prefix test is
+  // explicit because incoming models carry ':' themselves (qwen3:32b).
+  renderSummaries('metrics-body', 'sum-model',
+    entries.filter(([key]) => !key.startsWith('server:') && !key.startsWith('target:') && !key.startsWith('class:')),
+    (key) => key);
   // target keys are "target:<server>:<model>" — server first, so the split
   // stays unambiguous even for model names containing ':' (qwen3:32b)
   renderSummaries('class-metrics-body', 'sum-class', entries.filter(([key]) => key.startsWith('class:')),

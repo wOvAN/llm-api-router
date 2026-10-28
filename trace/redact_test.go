@@ -3,6 +3,7 @@ package trace
 import (
 	"bytes"
 	"mime/multipart"
+	"net/textproto"
 	"strings"
 	"testing"
 )
@@ -89,5 +90,55 @@ func TestRedactRequestMultipartAudio(t *testing.T) {
 	}
 	if !strings.Contains(got, `name="model"`) || !strings.Contains(got, "whisper") {
 		t.Error("the model field and part headers must stay readable")
+	}
+}
+
+// A text part is prompt content, not a payload: the JSONL file of a batch
+// upload, an inline JSON tool spec. Stubbing it away deletes the one thing a
+// person opens the trace to read.
+func TestRedactRequestMultipartTextPartIsVerbatim(t *testing.T) {
+	const jsonl = `{"custom_id":"1","body":{"model":"gpt","messages":[]}}`
+	var b bytes.Buffer
+	mw := multipart.NewWriter(&b)
+	part, err := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type": []string{"application/json"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte(jsonl)); err != nil {
+		t.Fatal(err)
+	}
+	file, err := mw.CreateFormFile("file", "clip.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(bytes.Repeat([]byte{0x01}, 2000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got, _ := RedactRequest(b.Bytes(), mw.FormDataContentType())
+	if !strings.Contains(got, jsonl) {
+		t.Errorf("text part must be stored verbatim, got:\n%s", got)
+	}
+	if !strings.Contains(got, "<audio ") {
+		t.Error("the audio part in the same form must still be stubbed")
+	}
+}
+
+// Redaction must not re-serialise: a pretty-printed prompt keeps its layout, and
+// the body the operator reads is the body the client sent.
+func TestRedactRequestKeepsJSONLayout(t *testing.T) {
+	body := "{\n  \"model\": \"opus\",\n  \"messages\": [{\n    \"role\": \"user\",\n    \"content\": \"data:image/png;base64," +
+		strings.Repeat("A", 2000) + "\"\n  }]\n}"
+	got, _ := RedactRequest([]byte(body), "application/json")
+	if strings.Contains(got, strings.Repeat("A", 100)) {
+		t.Error("base64 payload must be replaced by a stub")
+	}
+	if !strings.Contains(got, "\"model\": \"opus\"") || !strings.Contains(got, "\n  }]\n}") {
+		t.Errorf("body re-serialised, layout lost:\n%s", got)
 	}
 }

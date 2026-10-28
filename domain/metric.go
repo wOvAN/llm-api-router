@@ -63,16 +63,21 @@ type RequestMetric struct {
 
 // Summary aggregates metrics for a group (by model, server, etc.).
 type Summary struct {
-	TotalRequests         int     `json:"total_requests"`
-	SuccessCount          int     `json:"success_count"`
-	ErrorCount            int     `json:"error_count"`
-	FallbackCount         int     `json:"fallback_count"`
-	AvgLatencyMs          float64 `json:"avg_latency_ms"`
-	MinLatencyMs          int64   `json:"min_latency_ms"`
-	MaxLatencyMs          int64   `json:"max_latency_ms"`
-	AvgTTFBMs             float64 `json:"avg_ttfb_ms"`
-	TotalBytes            int64   `json:"total_bytes"`
-	TotalPromptTok        int     `json:"total_prompt_tokens"`
+	TotalRequests  int     `json:"total_requests"`
+	SuccessCount   int     `json:"success_count"`
+	ErrorCount     int     `json:"error_count"`
+	FallbackCount  int     `json:"fallback_count"`
+	AvgLatencyMs   float64 `json:"avg_latency_ms"`
+	MinLatencyMs   int64   `json:"min_latency_ms"`
+	MaxLatencyMs   int64   `json:"max_latency_ms"`
+	AvgTTFBMs      float64 `json:"avg_ttfb_ms"`
+	TotalBytes     int64   `json:"total_bytes"`
+	TotalPromptTok int     `json:"total_prompt_tokens"`
+	// TotalInputTok is the whole input context of the group — the cache-hit
+	// denominator. OpenAI's prompt_tokens already contains its cached tokens,
+	// Anthropic's input_tokens does not, so the two conventions can not be
+	// summed into one field without double counting one of them.
+	TotalInputTok         int     `json:"total_input_tokens"`
 	TotalCompleteTok      int     `json:"total_completion_tokens"`
 	TotalTokens           int     `json:"total_tokens"`
 	TotalCachedTok        int     `json:"total_cached_tokens"`

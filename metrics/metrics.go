@@ -112,6 +112,18 @@ func (s *Store) updateSummary(key string, m domain.RequestMetric) {
 	sum.TotalBytes += m.ResponseSize
 
 	sum.TotalPromptTok += m.PromptTokens
+	// Cache-hit denominator: the request's whole input context. The Anthropic
+	// spelling reports cache reads/writes next to input_tokens, the OpenAI
+	// spelling nests them inside prompt_tokens, so only the Anthropic path adds
+	// them (a CachedTokens of -1 means "usage not reported").
+	input := m.PromptTokens
+	if m.APIType == domain.APITypeAnthropic {
+		if m.CachedTokens > 0 {
+			input += m.CachedTokens
+		}
+		input += m.CacheCreationTokens
+	}
+	sum.TotalInputTok += input
 	sum.TotalCompleteTok += m.CompletionTokens
 	sum.TotalTokens += m.TotalTokens
 	if m.CachedTokens >= 0 {

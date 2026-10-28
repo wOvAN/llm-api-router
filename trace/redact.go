@@ -2,7 +2,6 @@ package trace
 
 import (
 	"bytes"
-	"encoding/json"
 	"path"
 	"strings"
 )
@@ -38,49 +37,51 @@ func RedactRequest(body []byte, contentType string) (string, bool) {
 // redactJSON rewrites the binary leaves of a JSON body. A body that is not JSON
 // (plain text, a truncated upload) is returned as-is: redaction is best-effort
 // and must never eat the request it documents.
+//
+// A byte scan, not a parse: the requests this runs on are megabytes of prompt
+// with an image inlined, and unmarshal + re-encode copies the whole thing three
+// times to change two values. Every other byte, layout included, stays as sent.
 func redactJSON(body []byte) string {
-	var v any
-	if err := json.Unmarshal(body, &v); err != nil {
-		return string(body)
-	}
-	if !walkRedact(v) {
-		return string(body)
-	}
-	// An encoder with HTML escaping off, so the stub's `<audio …>` survives
-	// re-serialisation readable (json.Marshal would write it as <audio).
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	cur := 0
+	for i := 0; i < len(body); {
+		if body[i] != '"' {
+			i++
+			continue
+		}
+		keyEnd := skipJSONString(body, i)
+		j := skipSpaceBytes(body, keyEnd)
+		if j >= len(body) || body[j] != ':' {
+			i = keyEnd
+			continue
+		}
+		j = skipSpaceBytes(body, j+1)
+		if j >= len(body) || body[j] != '"' {
+			i = keyEnd
+			continue
+		}
+		valEnd := skipJSONString(body, j)
+		key := string(body[i+1 : keyEnd-1])
+		val := body[j+1 : valEnd-1]
+		if kind, size, raw, ok := binaryString(key, string(val)); ok {
+			buf.Write(body[cur:j])
+			buf.WriteString(`"` + stub(kind, size, raw) + `"`)
+			cur = valEnd
+		}
+		i = valEnd
+	}
+	if buf.Len() == 0 {
 		return string(body)
 	}
-	return strings.TrimRight(buf.String(), "\n")
+	buf.Write(body[cur:])
+	return buf.String()
 }
 
-func walkRedact(v any) bool {
-	changed := false
-	switch t := v.(type) {
-	case map[string]any:
-		for k, val := range t {
-			if s, ok := val.(string); ok {
-				if kind, size, raw, isBin := binaryString(k, s); isBin {
-					t[k] = stub(kind, size, raw)
-					changed = true
-					continue
-				}
-			}
-			if walkRedact(val) {
-				changed = true
-			}
-		}
-	case []any:
-		for _, val := range t {
-			if walkRedact(val) {
-				changed = true
-			}
-		}
+func skipSpaceBytes(b []byte, i int) int {
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r') {
+		i++
 	}
-	return changed
+	return i
 }
 
 // binaryString recognises an inlined binary in a JSON string: a data URL (under
@@ -190,7 +191,9 @@ func splitPart(part []byte) (head, payload []byte, ok bool) {
 }
 
 // partKind names a file part after its Content-Type, falling back to its
-// filename extension, and returns "" for a plain form field like `model`. The
+// filename extension, and returns "" — keep the payload — for a plain form
+// field like `model` and for a text part (a JSONL batch file, an inline tool
+// spec): that content is what a person opens the trace to read. The extension
 // fallback is not paranoia: Go's multipart writer resolves the media type from
 // the host's mime table, so on a host whose /etc/mime.types lacks `.wav` the
 // part arrives as application/octet-stream and the extension is all there is.
@@ -199,19 +202,44 @@ func partKind(head []byte) string {
 	if i := bytes.Index(lower, []byte("content-type:")); i >= 0 {
 		value := string(head[i+len("content-type:"):])
 		value, _, _ = strings.Cut(value, "\n")
-		switch kind := coarseKind(strings.TrimSpace(value)); kind {
+		value = strings.TrimSpace(value)
+		if isTextPart(value, "") {
+			return ""
+		}
+		switch kind := coarseKind(value); kind {
 		case "binary", "octet-stream":
 		default:
 			return kind
 		}
 	}
 	if i := bytes.Index(lower, []byte("filename=")); i >= 0 {
-		if kind := kindForExt(quotedValue(head[i+len("filename="):])); kind != "" {
+		name := quotedValue(head[i+len("filename="):])
+		if isTextPart("", strings.ToLower(path.Ext(name))) {
+			return ""
+		}
+		if kind := kindForExt(name); kind != "" {
 			return kind
 		}
 		return "file"
 	}
 	return ""
+}
+
+// isTextPart reports a part whose payload is text (media type, or filename
+// extension when the media type is missing) — a JSONL batch file, an inline tool
+// spec, a transcript.
+func isTextPart(mediaType, ext string) bool {
+	mt := strings.ToLower(mediaType)
+	if strings.HasPrefix(mt, "text/") || strings.Contains(mt, "json") ||
+		strings.Contains(mt, "xml") || strings.Contains(mt, "yaml") {
+		return true
+	}
+	switch ext {
+	case ".json", ".jsonl", ".txt", ".csv", ".md", ".xml", ".yaml", ".yml", ".srt", ".vtt":
+		return true
+	default:
+		return false
+	}
 }
 
 // kindForExt names a file part after its filename extension.
