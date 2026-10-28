@@ -18,6 +18,7 @@ import (
 	"llm-api-router/metrics"
 	"llm-api-router/pkg/log"
 	"llm-api-router/proxy"
+	"llm-api-router/trace"
 )
 
 // Router handles incoming LLM API requests and routes them to configured backends.
@@ -99,43 +100,10 @@ func clientIP(req *http.Request) string {
 }
 
 // apiEndpointFromPath extracts the specific API endpoint from the request path.
-// Returns a human-readable identifier like "chat", "responses", "messages", etc.
+// The vocabulary lives in trace.EndpointLabel, so metrics, the trace and the
+// GUI describe a request with the same words.
 func apiEndpointFromPath(path string) string {
-	if strings.Contains(path, "/messages") {
-		return "messages"
-	}
-	if strings.Contains(path, "/chat/completions") {
-		return "chat"
-	}
-	if strings.Contains(path, "/responses") {
-		return "responses"
-	}
-	if strings.Contains(path, "/embeddings") {
-		return "embeddings"
-	}
-	if strings.Contains(path, "/audio/speech") {
-		return "speech"
-	}
-	if strings.Contains(path, "/audio/transcriptions") {
-		return "transcriptions"
-	}
-	if strings.Contains(path, "/audio/voices") {
-		return "voices"
-	}
-	if strings.HasSuffix(path, "/tts") {
-		return "tts"
-	}
-	if strings.Contains(path, "/completions") {
-		return "completions"
-	}
-	// Fallback: extract the last path segment after /v1/
-	if _, after, ok := strings.Cut(path, "/v1/"); ok {
-		rest := after
-		if seg, _, _ := strings.Cut(rest, "/"); seg != "" {
-			return seg
-		}
-	}
-	return "unknown"
+	return trace.EndpointLabel(path)
 }
 
 // Handle processes the incoming request.
