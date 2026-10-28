@@ -4,6 +4,11 @@
 // ring dies with the process, so enabling prompt capture is never sticky.
 package trace
 
+import (
+	"crypto/sha256"
+	"fmt"
+)
+
 // Digest is the derived view of a response body: the completion text (stream
 // deltas reassembled), a histogram of the SSE event names seen, and the finish
 // reason. Binary responses carry none of it (see Capture.Entry).
@@ -48,4 +53,14 @@ func truncatePrefix(b []byte, max int) (string, bool) {
 		return string(b), false
 	}
 	return string(b[:max]) + "…[truncated " + itoa(int64(len(b)-max)) + " bytes]", true
+}
+
+// stub renders a redaction placeholder: the kind, the size, and a short hash
+// that identifies the payload across requests.
+func stub(kind string, size int64, raw []byte) string {
+	sum := sha256.Sum256(raw)
+	if len(raw) < sha256.Size {
+		sum = sha256.Sum256(append(append([]byte{}, raw...), make([]byte, sha256.Size-len(raw))...))
+	}
+	return fmt.Sprintf("<%s %s sha256:%x…>", kind, humanBytes(size), sum[:4])
 }
