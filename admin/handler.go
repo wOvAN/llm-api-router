@@ -14,6 +14,7 @@ import (
 	"llm-api-router/metrics"
 	"llm-api-router/pkg/log"
 	"llm-api-router/proxy"
+	"llm-api-router/trace"
 )
 
 // probeClient returns the client used to reach a server's /v1/models probe,
@@ -31,11 +32,12 @@ type Handler struct {
 	store   *config.Store
 	metrics *metrics.Store
 	health  *config.HealthTracker
+	trace   *trace.Store
 }
 
 // NewHandler creates a new admin handler.
-func NewHandler(store *config.Store, m *metrics.Store, health *config.HealthTracker) *Handler {
-	return &Handler{store: store, metrics: m, health: health}
+func NewHandler(store *config.Store, m *metrics.Store, health *config.HealthTracker, tr *trace.Store) *Handler {
+	return &Handler{store: store, metrics: m, health: health, trace: tr}
 }
 
 // ServeHTTP routes admin API requests.
@@ -83,6 +85,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.getRecentRequests(w, req)
 	case path == "/metrics/reset" && req.Method == http.MethodPost:
 		h.resetMetrics(w, req)
+	case path == "/trace" && req.Method == http.MethodGet:
+		h.getTrace(w, req)
+	case path == "/trace/reset" && req.Method == http.MethodPost:
+		h.resetTrace(w, req)
+	case path == "/trace" && req.Method == http.MethodPost:
+		h.setTrace(w, req)
+	case path == "/trace" && req.Method == http.MethodGet:
+		h.getTrace(w, req)
+	case path == "/trace/reset" && req.Method == http.MethodPost:
+		h.resetTrace(w, req)
+	case path == "/trace" && req.Method == http.MethodPost:
+		h.setTrace(w, req)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -454,5 +468,66 @@ func (h *Handler) getRecentRequests(w http.ResponseWriter, req *http.Request) {
 
 func (h *Handler) resetMetrics(w http.ResponseWriter, req *http.Request) {
 	h.metrics.Reset()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
+}
+
+// --- Trace ---
+
+// getTrace returns the live window plus the ring. The list is compact: bodies
+// and the reassembled response text are the expensive fields, so a polling
+// client pays for them per entry (?id=), not per poll.
+func (h *Handler) getTrace(w http.ResponseWriter, req *http.Request) {
+	if id := req.URL.Query().Get("id"); id != "" {
+		entry, ok := h.trace.Get(id)
+		if !ok {
+			writeError(w, http.StatusNotFound, "trace entry not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, entry)
+		return
+	}
+
+	entries := h.trace.List()
+	for i := range entries {
+		entries[i].Request = ""
+		entries[i].Response = ""
+		entries[i].Digest.Text = ""
+	}
+	win := h.trace.Window()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":    win.Enabled,
+		"expires_at": win.ExpiresAt,
+		"models":     win.Models,
+		"servers":    win.Servers,
+		"entries":    entries,
+	})
+}
+
+// setTrace arms or disarms the capture window. The state lives in the trace
+// store only — a live toggle is an action, not a setting — so it is never
+// written to config.json and a restart never restores it.
+func (h *Handler) setTrace(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		Enabled bool     `json:"enabled"`
+		Seconds int      `json:"seconds"`
+		Models  []string `json:"models"`
+		Servers []string `json:"servers"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if body.Enabled {
+		h.trace.Start(body.Seconds, body.Models, body.Servers)
+	} else {
+		h.trace.Stop()
+	}
+	writeJSON(w, http.StatusOK, h.trace.Window())
+}
+
+// resetTrace clears the ring; the live window keeps running (clearing the ring
+// is not switching collection off).
+func (h *Handler) resetTrace(w http.ResponseWriter, req *http.Request) {
+	h.trace.Reset()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
 }

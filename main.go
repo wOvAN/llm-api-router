@@ -88,7 +88,7 @@ func main() {
 	traceStore := trace.New(100, store.GetSettings().Trace)
 
 	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter, quotaTracker, traceStore)
-	adminHandler := admin.NewHandler(store, metricsStore, healthTracker)
+	adminHandler := admin.NewHandler(store, metricsStore, healthTracker, traceStore)
 
 	adminStatic, err := fs.Sub(staticFS, "admin/static")
 	if err != nil {

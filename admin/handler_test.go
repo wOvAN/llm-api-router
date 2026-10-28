@@ -7,13 +7,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"llm-api-router/config"
 	"llm-api-router/domain"
 	"llm-api-router/metrics"
+	"llm-api-router/trace"
 )
 
-func newTestHandler(t *testing.T) (*Handler, *config.Store) {
+func newTestHandler(t *testing.T) (*Handler, *config.Store, *trace.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -22,11 +24,12 @@ func newTestHandler(t *testing.T) (*Handler, *config.Store) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ms := metrics.New(100)
-	return NewHandler(store, ms, nil), store
+	ts := trace.New(100, domain.TraceSettings{})
+	return NewHandler(store, ms, nil, ts), store, ts
 }
 
 func TestListServersEmpty(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/servers", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -45,7 +48,7 @@ func TestListServersEmpty(t *testing.T) {
 }
 
 func TestAddServer(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	body := strings.NewReader(`{"id":"s1","name":"Test","url":"http://localhost:8080","api_types":["openai"]}`)
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/servers", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -66,7 +69,7 @@ func TestAddServer(t *testing.T) {
 }
 
 func TestAddServerDuplicate(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
 
 	body := strings.NewReader(`{"id":"s1","url":"http://other"}`)
@@ -81,7 +84,7 @@ func TestAddServerDuplicate(t *testing.T) {
 }
 
 func TestAddServerMissingID(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	body := strings.NewReader(`{"url":"http://localhost"}`)
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/servers", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -94,7 +97,7 @@ func TestAddServerMissingID(t *testing.T) {
 }
 
 func TestAddServerInvalidJSON(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	body := strings.NewReader(`not json`)
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/servers", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -107,7 +110,7 @@ func TestAddServerInvalidJSON(t *testing.T) {
 }
 
 func TestUpdateServer(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	_ = store.AddServer(&domain.Server{ID: "s1", Name: "Old", URL: "http://old.com"})
 
 	body := strings.NewReader(`{"name":"New","url":"http://new.com","api_types":["openai"]}`)
@@ -130,7 +133,7 @@ func TestUpdateServer(t *testing.T) {
 }
 
 func TestUpdateServerNotFound(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	body := strings.NewReader(`{"name":"New","url":"http://new.com"}`)
 	req := httptest.NewRequest(http.MethodPut, "/admin/api/servers/nonexistent", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -143,7 +146,7 @@ func TestUpdateServerNotFound(t *testing.T) {
 }
 
 func TestDeleteServer(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://test.com"})
 
 	req := httptest.NewRequest(http.MethodDelete, "/admin/api/servers/s1", nil)
@@ -160,7 +163,7 @@ func TestDeleteServer(t *testing.T) {
 }
 
 func TestDeleteServerNotFound(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodDelete, "/admin/api/servers/nonexistent", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -171,7 +174,7 @@ func TestDeleteServerNotFound(t *testing.T) {
 }
 
 func TestListRulesEmpty(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/rules", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -190,7 +193,7 @@ func TestListRulesEmpty(t *testing.T) {
 }
 
 func TestAddRule(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
 
 	body := strings.NewReader(`{"incoming_models":["gpt-4"],"target_model":"gpt-4","server_id":"s1","enabled":true}`)
@@ -210,7 +213,7 @@ func TestAddRule(t *testing.T) {
 }
 
 func TestAddRuleInvalidJSON(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	body := strings.NewReader(`not json`)
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/rules", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -223,7 +226,7 @@ func TestAddRuleInvalidJSON(t *testing.T) {
 }
 
 func TestUpdateRule(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
 	_ = store.AddRule(&domain.RoutingRule{
 		IncomingModels: []string{"old-model"},
@@ -252,7 +255,7 @@ func TestUpdateRule(t *testing.T) {
 }
 
 func TestUpdateRuleInvalidIndex(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	body := strings.NewReader(`{"incoming_models":["m1"],"server_id":"s1"}`)
 	req := httptest.NewRequest(http.MethodPut, "/admin/api/rules/abc", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -265,7 +268,7 @@ func TestUpdateRuleInvalidIndex(t *testing.T) {
 }
 
 func TestUpdateRuleOutOfRange(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	body := strings.NewReader(`{"incoming_models":["m1"],"server_id":"s1"}`)
 	req := httptest.NewRequest(http.MethodPut, "/admin/api/rules/99", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -278,7 +281,7 @@ func TestUpdateRuleOutOfRange(t *testing.T) {
 }
 
 func TestDeleteRule(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	_ = store.AddRule(&domain.RoutingRule{
 		IncomingModels: []string{"m1"},
 		ServerID:       "s1",
@@ -299,7 +302,7 @@ func TestDeleteRule(t *testing.T) {
 }
 
 func TestDeleteRuleOutOfRange(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodDelete, "/admin/api/rules/99", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -310,7 +313,7 @@ func TestDeleteRuleOutOfRange(t *testing.T) {
 }
 
 func TestListProfiles(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}
@@ -338,7 +341,7 @@ func TestListProfiles(t *testing.T) {
 }
 
 func TestAddProfile(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/profiles", strings.NewReader(`{"name":"prod","copy_from_active":false}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -361,7 +364,7 @@ func TestAddProfile(t *testing.T) {
 }
 
 func TestRenameProfile(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}
@@ -384,7 +387,7 @@ func TestRenameProfile(t *testing.T) {
 }
 
 func TestDeleteProfile(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}
@@ -408,7 +411,7 @@ func TestDeleteProfile(t *testing.T) {
 }
 
 func TestActivateProfile(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}
@@ -432,7 +435,7 @@ func TestActivateProfile(t *testing.T) {
 }
 
 func TestRulesWithProfileID(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}
@@ -508,7 +511,7 @@ func TestRulesWithProfileID(t *testing.T) {
 }
 
 func TestGetConfig(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://test.com", APITypes: []domain.APIType{domain.APITypeOpenAI}})
 	_ = store.AddRule(&domain.RoutingRule{
 		IncomingModels: []string{"gpt-4"},
@@ -538,7 +541,7 @@ func TestGetConfig(t *testing.T) {
 }
 
 func TestReloadConfig(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/config/reload", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -557,7 +560,7 @@ func TestReloadConfig(t *testing.T) {
 }
 
 func TestGetMetrics(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/metrics", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -568,7 +571,7 @@ func TestGetMetrics(t *testing.T) {
 }
 
 func TestGetRecentRequests(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/metrics/recent", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -579,7 +582,7 @@ func TestGetRecentRequests(t *testing.T) {
 }
 
 func TestResetMetrics(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/metrics/reset", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -598,7 +601,7 @@ func TestResetMetrics(t *testing.T) {
 }
 
 func TestNotFound(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/nonexistent", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -609,7 +612,7 @@ func TestNotFound(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/servers/s1", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -620,7 +623,7 @@ func TestMethodNotAllowed(t *testing.T) {
 }
 
 func TestGetServerModelsNoServer(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/servers/nonexistent/models", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -631,7 +634,7 @@ func TestGetServerModelsNoServer(t *testing.T) {
 }
 
 func TestTestServerInvalidJSON(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, _, _ := newTestHandler(t)
 	body := strings.NewReader(`not json`)
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/servers/test", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -644,7 +647,7 @@ func TestTestServerInvalidJSON(t *testing.T) {
 }
 
 func TestGetServerModelsInvalidURL(t *testing.T) {
-	h, store := newTestHandler(t)
+	h, store, _ := newTestHandler(t)
 	_ = store.AddServer(&domain.Server{
 		ID:   "s1",
 		URL:  string([]byte{0x7f}),
@@ -657,5 +660,104 @@ func TestGetServerModelsInvalidURL(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("got status %d, want 400", w.Code)
+	}
+}
+
+func TestTraceStartAndStop(t *testing.T) {
+	h, _, ts := newTestHandler(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/trace",
+		strings.NewReader(`{"enabled":true,"seconds":0,"models":["gpt"],"servers":["s1"]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("start = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	if !ts.Armed("gpt", "s1") {
+		t.Fatal("the window must be armed after POST")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/trace", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var state struct {
+		Enabled   bool       `json:"enabled"`
+		ExpiresAt *time.Time `json:"expires_at"`
+		Models    []string   `json:"models"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if !state.Enabled || state.ExpiresAt != nil {
+		t.Errorf("state = %+v, want enabled with no expiry (seconds=0)", state)
+	}
+	if len(state.Models) != 1 || state.Models[0] != "gpt" {
+		t.Errorf("models = %v, want [gpt]", state.Models)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/trace", strings.NewReader(`{"enabled":false}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if ts.Armed("gpt", "s1") {
+		t.Error("enabled=false must disarm the window")
+	}
+}
+
+func TestTraceListIsCompactAndGetByIDIsFull(t *testing.T) {
+	h, _, ts := newTestHandler(t)
+	ts.Add(trace.Entry{ID: "abc123", Model: "gpt", Class: "chat",
+		Request: `{"model":"gpt"}`, Response: "data: {}\n\n",
+		Digest: trace.Digest{Text: "hello", Events: map[string]int{"data": 1}}})
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/trace", nil))
+	var list struct {
+		Entries []trace.Entry `json:"entries"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(list.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(list.Entries))
+	}
+	if list.Entries[0].Request != "" || list.Entries[0].Response != "" || list.Entries[0].Digest.Text != "" {
+		t.Error("the list must stay compact: bodies and the digest text are fetched by id")
+	}
+	if list.Entries[0].Digest.Events["data"] != 1 {
+		t.Error("the event histogram is cheap and must stay in the list")
+	}
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/trace?id=abc123", nil))
+	var full trace.Entry
+	if err := json.NewDecoder(w.Body).Decode(&full); err != nil {
+		t.Fatalf("decode entry: %v", err)
+	}
+	if full.Request == "" || full.Response == "" || full.Digest.Text != "hello" {
+		t.Errorf("full entry = %+v, want the bodies and the digest", full)
+	}
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/trace?id=nope", nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("unknown id = %d, want 404", w.Code)
+	}
+}
+
+func TestTraceResetKeepsWindow(t *testing.T) {
+	h, _, ts := newTestHandler(t)
+	ts.Start(0, nil, nil)
+	ts.Add(trace.Entry{ID: "a"})
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/api/trace/reset", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("reset = %d, want 200", w.Code)
+	}
+	if ts.Len() != 0 {
+		t.Error("reset must clear the ring")
+	}
+	if !ts.Armed("m", "s") {
+		t.Error("clearing the ring must not switch collection off")
 	}
 }
