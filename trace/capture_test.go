@@ -55,7 +55,7 @@ func TestCaptureCapsResponse(t *testing.T) {
 	c := NewCapture("POST", "/v1/chat/completions", "gpt", "application/json", nil)
 	c.ResponseContentType("application/json")
 	chunk := strings.Repeat("x", 128<<10)
-	for range (MaxResponseBytes/(128<<10) + 2) {
+	for range MaxResponseBytes/(128<<10) + 2 {
 		c.WriteResponse([]byte(chunk))
 	}
 	e := c.Entry()
@@ -74,5 +74,14 @@ func TestCaptureWithoutResponseIsEmpty(t *testing.T) {
 	}
 	if e := c.Entry(); e.Response != "" {
 		t.Errorf("response = %q, want empty so the router can fill the error body", e.Response)
+	}
+}
+
+func TestCaptureTextPlainResponseIsVerbatim(t *testing.T) {
+	c := NewCapture("POST", "/v1/chat/completions", "gpt", "application/json", nil)
+	c.ResponseContentType("text/plain; charset=utf-8")
+	c.WriteResponse([]byte("backend exploded"))
+	if e := c.Entry(); e.Response != "backend exploded" {
+		t.Errorf("response = %q, want the plain-text body verbatim (a 4xx body is the point of the entry)", e.Response)
 	}
 }

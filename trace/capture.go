@@ -135,8 +135,12 @@ func (c *Capture) Entry() Entry {
 	return e
 }
 
-// isBinaryType reports a response body that is neither JSON nor SSE.
+// isBinaryType reports a response body that is neither JSON, SSE, nor plain
+// text. The text family matters: a backend's 4xx body arrives as text/plain
+// (net/http's http.Error) and an error page is the single most useful thing in
+// a trace, so it is stored verbatim, not stubbed.
 func isBinaryType(contentType string) bool {
 	ct := strings.ToLower(contentType)
-	return !strings.Contains(ct, "json") && !strings.Contains(ct, "text/event-stream")
+	return !strings.Contains(ct, "json") && !strings.Contains(ct, "text/event-stream") &&
+		!strings.Contains(ct, "text/")
 }

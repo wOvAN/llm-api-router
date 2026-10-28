@@ -73,7 +73,9 @@ func TestRedactRequestMultipartAudio(t *testing.T) {
 	if _, err := part.Write(audio); err != nil {
 		t.Fatal(err)
 	}
-	mw.Close()
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
 	got, _ := RedactRequest(b.Bytes(), mw.FormDataContentType())
 	if !bytes.Contains(b.Bytes(), audio) {

@@ -19,6 +19,7 @@ import (
 	"llm-api-router/metrics"
 	"llm-api-router/pkg/log"
 	"llm-api-router/router"
+	"llm-api-router/trace"
 )
 
 //go:embed admin/static/*
@@ -81,7 +82,12 @@ func main() {
 		return 0, 0
 	})
 
-	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter, quotaTracker)
+	// On-demand request trace: a memory-only ring plus the live capture window,
+	// armed from the config defaults at startup (the admin toggle is never
+	// persisted, so a restart can not leave prompt capture switched on).
+	traceStore := trace.New(100, store.GetSettings().Trace)
+
+	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter, quotaTracker, traceStore)
 	adminHandler := admin.NewHandler(store, metricsStore, healthTracker)
 
 	adminStatic, err := fs.Sub(staticFS, "admin/static")

@@ -29,15 +29,27 @@ type Router struct {
 	rateLimit *config.RateLimiter
 	quota     *config.QuotaTracker
 	caps      *config.CapabilitiesCache
+	trace     *trace.Store
 	jevMu     sync.Mutex                // guards jevCache and jevSticky
 	jevCache  map[string]jevCacheEntry  // jev decision cache (opt-in per rule)
 	jevSticky map[string]jevStickyEntry // last jev decision per conversation
 }
 
 // New creates a new Router.
-func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter, quota *config.QuotaTracker) *Router {
-	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit, quota: quota,
+func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter,
+	quota *config.QuotaTracker, tr *trace.Store) *Router {
+	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit, quota: quota, trace: tr,
 		caps: config.NewCapabilitiesCache(), jevCache: map[string]jevCacheEntry{}, jevSticky: map[string]jevStickyEntry{}}
+}
+
+// reqMeta is what a request *is*, computed once at request start: the
+// classification (always, 0 tokens) and the trace capture (only inside the
+// window). It rides into record so the metric and the trace entry agree.
+type reqMeta struct {
+	class    string
+	features []string
+	capture  *trace.Capture
+	retries  int
 }
 
 // serverAttempt is one proxy target: a backend server plus the model to send it.
@@ -99,13 +111,6 @@ func clientIP(req *http.Request) string {
 	return req.RemoteAddr
 }
 
-// apiEndpointFromPath extracts the specific API endpoint from the request path.
-// The vocabulary lives in trace.EndpointLabel, so metrics, the trace and the
-// GUI describe a request with the same words.
-func apiEndpointFromPath(path string) string {
-	return trace.EndpointLabel(path)
-}
-
 // Handle processes the incoming request.
 func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodGet && req.URL.Path == "/v1/models" {
@@ -137,6 +142,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			log.Errorf("[%s] failed to close request body: %v", req.URL.Path, err)
 		}
 	}()
+
+	// Classification is always on and costs a byte scan: metrics, the trace and
+	// the GUI then describe a request with the same words.
+	meta := &reqMeta{}
+	meta.class, meta.features = trace.Classify(req.URL.Path, req.Header.Get("Content-Type"), body)
 
 	model, err := extractModel(body)
 	if err != nil {
@@ -201,7 +211,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	if jev != nil && jev.Reason == "blocked" {
 		// Opt-in Noul security gate: the decision model rated the request as
 		// near-certain harm intent. Nothing was forwarded upstream.
-		r.record(req, requestStart, model, "", "", proxy.ProxyMetrics{}, http.StatusBadRequest, "blocked by jev security gate", false, apiType, jev)
+		r.record(req, requestStart, model, "", "", proxy.ProxyMetrics{}, http.StatusBadRequest, "blocked by jev security gate", false, apiType, jev, meta)
 		log.Warnf("[%s] model=%q — jev security gate blocked the request", req.URL.Path, model)
 		http.Error(w, "request blocked by security gate", http.StatusBadRequest)
 		return
@@ -210,6 +220,14 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		log.Errorf("[%s] model=%q — rule has no usable backend (jev pool empty or servers missing)", req.URL.Path, model)
 		http.Error(w, "routing rule has no usable backend", http.StatusInternalServerError)
 		return
+	}
+	// On-demand trace: the window is consulted once, here, so a request that
+	// starts inside it is traced to the end even if the window expires
+	// mid-generation. The capture holds the ORIGINAL body (redacted) — before
+	// the stream-usage injection and before per-attempt model rewrites.
+	if r.trace != nil && r.trace.Armed(model, attempts[0].server.ID) {
+		meta.capture = trace.NewCapture(req.Method, req.URL.Path, model, req.Header.Get("Content-Type"), body)
+		w.Header().Set("X-Router-Trace-Id", meta.capture.ID())
 	}
 	if jev != nil {
 		// Observability: what the decision model answered, so a client (and the
@@ -335,6 +353,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			KeepAliveIdle:  srvKeepAlive,
 			Proxy:          srv.ProxyURL(),
 		}
+		if meta.capture != nil {
+			rh.Trace = meta.capture
+		}
 
 		// Retry-before-fallback: on transport (pre-response) errors retry the
 		// same server up to NumRetries times before moving to the next server.
@@ -358,6 +379,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			req.Body = io.NopCloser(bytes.NewReader(rewrittenBody))
 			req.ContentLength = int64(len(rewrittenBody))
 			rh.Retries = retry
+			meta.retries = retry
 
 			pm, err := proxy.StreamProxy(req.Context(), serverURL, srv.APIKey, req, w, targetModel, responseModel, rh, stripStream, ping)
 			if err == nil {
@@ -387,7 +409,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 						req.URL.Path, model, targetModel, srv.Name, pm.StatusCode, http.StatusText(pm.StatusCode), pm.ErrorBody)
 				}
 
-				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType, jev)
+				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType, jev, meta)
 				return
 			}
 
@@ -408,7 +430,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				log.Warnf("[%s] model=%q — client disconnected during proxy (attempt %d/%d)",
 					req.URL.Path, model, i+1, len(attempts))
 				if pm != nil && pm.StatusCode > 0 {
-					r.record(req, requestStart, model, targetModel, srv.ID, *pm, 499, "client disconnected", wasFallback, apiType, jev)
+					r.record(req, requestStart, model, targetModel, srv.ID, *pm, 499, "client disconnected", wasFallback, apiType, jev, meta)
 				}
 				return
 			}
@@ -426,7 +448,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				log.Errorf("[%s] model=%q — mid-stream error on %s (attempt %d/%d): %v",
 					req.URL.Path, model, srv.Name, i+1, len(attempts), err)
 				// Record whatever metrics we have
-				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType, jev)
+				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType, jev, meta)
 				return
 			}
 
@@ -462,7 +484,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	if lastErr != nil {
 		errorBody = lastErr.Error()
 	}
-	r.record(req, requestStart, model, attempts[0].targetModel, attempts[0].server.ID, proxy.ProxyMetrics{}, http.StatusBadGateway, errorBody, len(attempts) > 1, apiType, jev)
+	r.record(req, requestStart, model, attempts[0].targetModel, attempts[0].server.ID, proxy.ProxyMetrics{}, http.StatusBadGateway, errorBody, len(attempts) > 1, apiType, jev, meta)
 
 	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)
 	http.Error(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
@@ -470,7 +492,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 // record stores a request metric; pm fields feed the usage/timing columns.
 // jev is the auto-routing decision (nil on static rules).
-func (r *Router) record(req *http.Request, requestStart time.Time, model, targetModel, serverID string, pm proxy.ProxyMetrics, statusCode int, errorBody string, wasFallback bool, apiType domain.APIType, jev *jevOutcome) {
+func (r *Router) record(req *http.Request, requestStart time.Time, model, targetModel, serverID string, pm proxy.ProxyMetrics, statusCode int, errorBody string, wasFallback bool, apiType domain.APIType, jev *jevOutcome, meta *reqMeta) {
 	m := domain.RequestMetric{
 		Timestamp:             requestStart,
 		Model:                 model,
@@ -499,9 +521,17 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 		AudioDurationMs:       pm.AudioDurationMs,
 		AudioRTF:              pm.AudioRTF,
 		APIType:               apiType,
-		APIEndpoint:           apiEndpointFromPath(req.URL.Path),
+		APIEndpoint:           meta.class,
 		ClientIP:              clientIP(req),
 	}
+	m.Class, m.Features = meta.class, meta.features
+	if wasFallback {
+		m.Features = append(m.Features, "fallback")
+	}
+	if meta.retries > 0 {
+		m.Features = append(m.Features, "retry:"+strconv.Itoa(meta.retries))
+	}
+
 	if jev != nil {
 		m.JevChoice = jev.Choice
 		m.JevConfidence = jev.Confidence
@@ -512,6 +542,28 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 		m.JevScores = jev.Scores
 	}
 	r.metrics.Add(m)
+
+	if meta.capture != nil {
+		e := meta.capture.Entry()
+		e.StatusCode = statusCode
+		e.LatencyMs = m.LatencyMs
+		e.TTFBMs = m.TTFBMs
+		e.ServerID = serverID
+		e.TargetModel = targetModel
+		e.Class = m.Class
+		e.Features = m.Features
+		if jev != nil {
+			e.JevChoice = jev.Choice
+		}
+		// A body that never reached the writer chain (a stream-frame 5xx the
+		// proxy peeked and returned as an error, a transport failure, a client
+		// that hung up mid-stream) is recorded from the proxy's capture, so the
+		// trace shows what the backend actually said.
+		if e.Response == "" && errorBody != "" {
+			e.Response = errorBody
+		}
+		r.trace.Add(e)
+	}
 }
 
 // defaultNumRetries is the effective num_retries for rules that don't set one:

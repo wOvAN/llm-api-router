@@ -94,7 +94,7 @@ func newStack(t *testing.T, backend http.Handler) *stack {
 		t.Fatalf("AddServer: %v", err)
 	}
 
-	r := router.New(st.store, st.ms, nil, nil, nil)
+	r := router.New(st.store, st.ms, nil, nil, nil, nil)
 	st.proxy = httptest.NewServer(http.HandlerFunc(r.Handle))
 	t.Cleanup(st.proxy.Close)
 

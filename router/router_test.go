@@ -10,6 +10,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,16 +22,51 @@ import (
 	"llm-api-router/domain"
 	"llm-api-router/metrics"
 	"llm-api-router/proxy"
+	"llm-api-router/trace"
 )
 
-func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
+func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store, *trace.Store) {
 	t.Helper()
-	store, err := config.NewStore("/nonexistent/path.json")
+	// A writable config path (not "/nonexistent"): the trace fixtures add
+	// servers and rules through the store, which persists on every write.
+	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ms := metrics.New(100)
-	return New(store, ms, nil, nil, nil), store, ms
+	ts := trace.New(100, domain.TraceSettings{})
+	return New(store, ms, nil, nil, nil, ts), store, ms, ts
+}
+
+// addTestRoute wires one incoming model to one backend, with no retries: a
+// failing backend must fall through (or answer) without a 100ms-scale backoff.
+func addTestRoute(t *testing.T, store *config.Store, incoming, url string) {
+	t.Helper()
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: url,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{incoming},
+		ServerID: "s1", TargetModel: incoming, NumRetries: -1, Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+}
+
+func addTestRouteFallback(t *testing.T, store *config.Store, incoming, primaryURL, fallbackURL string) {
+	t.Helper()
+	if err := store.AddServer(&domain.Server{ID: "primary", Name: "primary", URL: primaryURL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: fallbackURL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{incoming},
+		ServerID: "primary", TargetModel: incoming, NumRetries: -1, Enabled: true,
+		Fallbacks: []domain.FallbackEntry{{ServerID: "s1"}}}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
 }
 
 func TestOrderedFallbacks(t *testing.T) {
@@ -128,28 +165,6 @@ func TestAPITypeFromPath(t *testing.T) {
 	}
 }
 
-func TestAPIEndpointFromPath(t *testing.T) {
-	tests := []struct {
-		path string
-		want string
-	}{
-		{"/v1/chat/completions", "chat"},
-		{"/v1/responses", "responses"},
-		{"/v1/messages", "messages"},
-		{"/v1/messages/stream", "messages"},
-		{"/v1/embeddings", "embeddings"},
-		{"/v1/completions", "completions"},
-		{"/v1/unknown", "unknown"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			if got := apiEndpointFromPath(tt.path); got != tt.want {
-				t.Errorf("apiEndpointFromPath(%q) = %q, want %q", tt.path, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestExtractModel(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -226,7 +241,7 @@ func TestExtractModel(t *testing.T) {
 
 func TestListModels(t *testing.T) {
 	t.Run("returns enabled models", func(t *testing.T) {
-		r, store, _ := newTestRouter(t)
+		r, store, _, _ := newTestRouter(t)
 		_ = store.AddRule(&domain.RoutingRule{
 			IncomingModels: []string{"gpt-4", "gpt-4-turbo"},
 			ServerID:       "s1",
@@ -269,7 +284,7 @@ func TestListModels(t *testing.T) {
 	})
 
 	t.Run("no models returns empty list", func(t *testing.T) {
-		r, _, _ := newTestRouter(t)
+		r, _, _, _ := newTestRouter(t)
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 		w := httptest.NewRecorder()
 		r.Handle(w, req)
@@ -284,7 +299,7 @@ func TestListModels(t *testing.T) {
 	})
 
 	t.Run("exposes context_window", func(t *testing.T) {
-		r, store, _ := newTestRouter(t)
+		r, store, _, _ := newTestRouter(t)
 		_ = store.AddRule(&domain.RoutingRule{
 			IncomingModels: []string{"opus"},
 			ServerID:       "s1",
@@ -323,7 +338,7 @@ func TestListModels(t *testing.T) {
 }
 
 func TestHandleMethodNotAllowed(t *testing.T) {
-	r, _, _ := newTestRouter(t)
+	r, _, _, _ := newTestRouter(t)
 
 	methods := []string{http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodOptions}
 	for _, method := range methods {
@@ -340,7 +355,7 @@ func TestHandleMethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleInvalidBody(t *testing.T) {
-	r, _, _ := newTestRouter(t)
+	r, _, _, _ := newTestRouter(t)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`not json`))
 	w := httptest.NewRecorder()
 	r.Handle(w, req)
@@ -351,7 +366,7 @@ func TestHandleInvalidBody(t *testing.T) {
 }
 
 func TestHandleMissingModel(t *testing.T) {
-	r, _, _ := newTestRouter(t)
+	r, _, _, _ := newTestRouter(t)
 	body := strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
 	w := httptest.NewRecorder()
@@ -375,7 +390,7 @@ func TestHandleSystemone(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
 		Name:     "decision-server",
@@ -443,7 +458,7 @@ func TestHandleAudioTranscriptionsMultipart(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID: "s1", Name: "audio", URL: backend.URL,
 		APITypes: []domain.APIType{domain.APITypeOpenAI},
@@ -527,7 +542,7 @@ func TestHandleTTSBinaryPassthrough(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID: "s1", Name: "audio", URL: backend.URL,
 		APITypes: []domain.APIType{domain.APITypeOpenAI},
@@ -568,7 +583,7 @@ func TestHandleAudioVoicesGet(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID: "s1", Name: "audio", URL: backend.URL,
 		APITypes: []domain.APIType{domain.APITypeOpenAI},
@@ -598,7 +613,7 @@ func TestHandleAudioVoicesGet(t *testing.T) {
 }
 
 func TestHandleNoRoutingRule(t *testing.T) {
-	r, _, _ := newTestRouter(t)
+	r, _, _, _ := newTestRouter(t)
 	body := strings.NewReader(`{"model":"unknown-model","messages":[]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
 	w := httptest.NewRecorder()
@@ -610,7 +625,7 @@ func TestHandleNoRoutingRule(t *testing.T) {
 }
 
 func TestHandleServerNotFound(t *testing.T) {
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 	_ = store.AddRule(&domain.RoutingRule{
 		IncomingModels: []string{"gpt-4"},
 		ServerID:       "nonexistent-server",
@@ -628,7 +643,7 @@ func TestHandleServerNotFound(t *testing.T) {
 }
 
 func TestHandleAllBackendsFail(t *testing.T) {
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
@@ -676,7 +691,7 @@ func TestHandleInjectsStreamUsage(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
 		Name:     "test-server",
@@ -746,7 +761,7 @@ func TestHandleResponsesAPI(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
 		Name:     "test-server",
@@ -825,7 +840,7 @@ func TestHandleResponsesAPIStreaming(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
 		Name:     "test-server",
@@ -931,7 +946,7 @@ func TestHandleAnthropicKeepAlive(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
 		Name:     "test-server",
@@ -966,7 +981,7 @@ func TestHandleAnthropicKeepAlive(t *testing.T) {
 }
 
 func TestHandleAnthropicPath(t *testing.T) {
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
@@ -997,7 +1012,7 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 	// 1. Stop immediately — no fallback attempts
 	// 2. NOT mark server unhealthy
 	// 3. NOT record metrics (request was aborted, not completed)
-	_, store, ms := newTestRouter(t)
+	_, store, ms, _ := newTestRouter(t)
 	health := config.NewHealthTracker(store, 0) // no auto-check
 
 	_ = store.AddServer(&domain.Server{
@@ -1023,7 +1038,7 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 	})
 
 	// Create router with health tracker
-	r := New(store, ms, health, nil, nil)
+	r := New(store, ms, health, nil, nil, nil)
 
 	// Simulate client disconnect by cancelling context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1086,7 +1101,7 @@ func TestHandleClientDisconnectRecordsMetrics(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
 		Name:     "test-server",
@@ -1122,7 +1137,7 @@ func TestHandleClientDisconnectRecordsMetrics(t *testing.T) {
 }
 
 func TestMetricsAreRecorded(t *testing.T) {
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
@@ -1167,7 +1182,7 @@ func TestFallbackPreservesActualModel(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "primary",
@@ -1222,7 +1237,7 @@ func TestPrimaryAttemptRewritesModel(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "primary",
@@ -1269,7 +1284,7 @@ func TestNoRewriteWhenModelsMatch(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "primary",
@@ -1311,7 +1326,7 @@ func TestNoRewriteWhenModelsMatch(t *testing.T) {
 func TestFallbackLogsActualModel(t *testing.T) {
 	// Verify that when fallback occurs, the log message includes the actual model
 	// This is a structural test to ensure wasFallback is set correctly in metrics
-	r, store, ms := newTestRouter(t)
+	r, store, ms, _ := newTestRouter(t)
 
 	// Create fallback server that succeeds
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1401,7 +1416,7 @@ func TestMidStreamErrorNoFallback(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "faulty",
@@ -1478,7 +1493,7 @@ func TestRetriesSameServerBeforeFallback(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "flaky",
@@ -1546,7 +1561,7 @@ func TestRetriesExhaustedThenFallsBack(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "dead",
@@ -1617,7 +1632,7 @@ func TestRetriesHeaderOverridesRule(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "flaky",
@@ -1680,11 +1695,11 @@ func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
 	}))
 	defer fallback.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	// Build a router with a real rate limiter (newTestRouter passes nil).
 	rl := config.NewRateLimiter(5, 60*time.Second, 5*time.Minute)
-	r = New(store, r.metrics, nil, rl, nil)
+	r = New(store, r.metrics, nil, rl, nil, nil)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "primary",
@@ -1756,7 +1771,7 @@ func TestQuotaTPMBlocksRoutesToFallback(t *testing.T) {
 	}))
 	defer fallback.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	// Build a router with a quota tracker (newTestRouter passes nil).
 	q := config.NewQuotaTracker()
@@ -1766,7 +1781,7 @@ func TestQuotaTPMBlocksRoutesToFallback(t *testing.T) {
 		}
 		return 0, 0
 	})
-	r = New(store, r.metrics, nil, nil, q)
+	r = New(store, r.metrics, nil, nil, q, nil)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "primary",
@@ -1830,7 +1845,7 @@ func TestRouterObservabilityHeaders(t *testing.T) {
 	}))
 	defer fallback.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "primary",
@@ -1906,7 +1921,7 @@ func TestRouterObservabilityHeadersRetriesRecovered(t *testing.T) {
 	}))
 	defer flaky.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "flaky",
@@ -1960,7 +1975,7 @@ func TestHandleRetriesStreamErrorBody(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
 		Name:     "test-server",
@@ -2009,7 +2024,7 @@ func TestHandleFallbackOnStreamErrorBody(t *testing.T) {
 	}))
 	defer backup.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID:       "dead",
 		Name:     "Dead",
@@ -2073,7 +2088,7 @@ func TestHandleDefaultNumRetries(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	r, store, _ := newTestRouter(t)
+	r, store, _, _ := newTestRouter(t)
 	_ = store.AddServer(&domain.Server{
 		ID:       "s1",
 		Name:     "test-server",
@@ -2102,5 +2117,156 @@ func TestHandleDefaultNumRetries(t *testing.T) {
 	}
 	if got := resp.Header.Get("X-Router-Retries"); got != "2" {
 		t.Errorf("X-Router-Retries = %q, want 2", got)
+	}
+}
+
+func TestHandleTraceDisabledRecordsNothing(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}`))
+	}))
+	defer backend.Close()
+
+	r, store, ms, ts := newTestRouter(t)
+	addTestRoute(t, store, "gpt", backend.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if ts.Len() != 0 {
+		t.Fatalf("trace entries = %d, want 0 with the window off", ts.Len())
+	}
+	if w.Header().Get("X-Router-Trace-Id") != "" {
+		t.Error("a request outside the window must not advertise a trace id")
+	}
+	if ms.Recent()[0].Class != "chat" {
+		t.Errorf("metric class = %q, want chat (classification is always on)", ms.Recent()[0].Class)
+	}
+}
+
+func TestHandleTraceCapturesRequestAndResponse(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"He\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"y\"},\"finish_reason\":\"stop\"}]}\n\n"))
+	}))
+	defer backend.Close()
+
+	r, store, _, ts := newTestRouter(t)
+	addTestRoute(t, store, "gpt", backend.URL)
+	ts.Start(0, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt","stream":true,"messages":[{"role":"user","content":"secret prompt"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer super-secret")
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Header().Get("X-Router-Trace-Id") == "" {
+		t.Fatal("traced response must carry X-Router-Trace-Id")
+	}
+	entries := ts.List()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	e := entries[0]
+	if !strings.Contains(e.Request, "secret prompt") {
+		t.Errorf("request = %q, want the prompt text", e.Request)
+	}
+	if strings.Contains(e.Request, "super-secret") {
+		t.Error("the Authorization header is not part of the trace")
+	}
+	if !strings.Contains(e.Response, "data: {") {
+		t.Errorf("response = %q, want the raw frames", e.Response)
+	}
+	if e.Digest.Text != "Hey" || e.Digest.FinishReason != "stop" {
+		t.Errorf("digest = %+v, want the reassembled stream", e.Digest)
+	}
+	if e.StatusCode != http.StatusOK || e.ServerID == "" || e.Class != "chat" {
+		t.Errorf("entry = %+v, want status/server/class filled", e)
+	}
+	if !slices.Contains(e.Features, "stream") {
+		t.Errorf("features = %v, want stream", e.Features)
+	}
+}
+
+func TestHandleTraceFiltersByModelAndServer(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	r, store, _, ts := newTestRouter(t)
+	addTestRoute(t, store, "gpt", backend.URL)
+	srv, _ := store.GetServer("s1")
+
+	post := func() {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt"}`))
+		req.Header.Set("Content-Type", "application/json")
+		r.Handle(httptest.NewRecorder(), req)
+	}
+	ts.Start(0, []string{"other"}, nil)
+	post()
+	if ts.Len() != 0 {
+		t.Fatal("a model filter must exclude other models")
+	}
+	ts.Start(0, []string{"gpt"}, []string{"other-server"})
+	post()
+	if ts.Len() != 0 {
+		t.Fatal("a server filter must exclude other servers")
+	}
+	ts.Start(0, []string{"gpt"}, []string{srv.ID})
+	post()
+	if ts.Len() != 1 {
+		t.Fatalf("entries = %d, want 1 when both filters match", ts.Len())
+	}
+}
+
+func TestHandleTraceOneEntryPerRequestWithFallback(t *testing.T) {
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer fallback.Close()
+
+	r, store, _, ts := newTestRouter(t)
+	addTestRouteFallback(t, store, "gpt", "http://localhost:1", fallback.URL)
+	ts.Start(0, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.Handle(httptest.NewRecorder(), req)
+
+	entries := ts.List()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want one per request (the capture is per-request, not per-attempt)", len(entries))
+	}
+	if !slices.Contains(entries[0].Features, "fallback") {
+		t.Errorf("features = %v, want the fallback marker", entries[0].Features)
+	}
+}
+
+func TestHandleTraceRecordsErroredAttemptBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "bad request body from backend", http.StatusBadRequest)
+	}))
+	defer backend.Close()
+
+	r, store, _, ts := newTestRouter(t)
+	addTestRoute(t, store, "gpt", backend.URL)
+	ts.Start(0, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.Handle(httptest.NewRecorder(), req)
+
+	e := ts.List()[0]
+	if !strings.Contains(e.Response, "bad request body from backend") {
+		t.Errorf("response = %q, want the backend's 4xx body verbatim", e.Response)
+	}
+	if e.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", e.StatusCode)
 	}
 }

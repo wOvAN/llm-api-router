@@ -958,7 +958,7 @@ func jevTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ms := metrics.New(100)
-	return New(store, ms, nil, nil, nil), store, ms
+	return New(store, ms, nil, nil, nil, nil), store, ms
 }
 
 func addJevServers(t *testing.T, store *config.Store, decisionURL string) {
