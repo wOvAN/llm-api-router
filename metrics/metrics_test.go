@@ -386,3 +386,39 @@ func TestNativeTimingsFallbackToWallClock(t *testing.T) {
 		t.Errorf("DecodeTimeMs = %d, want 800 (latency - TTFB fallback)", got.DecodeTimeMs)
 	}
 }
+
+func TestAddSummariesByRequestClass(t *testing.T) {
+	s := New(100)
+	s.Add(domain.RequestMetric{Model: "gpt", ServerID: "s1", StatusCode: 200, Class: "chat",
+		PromptTokens: 100, CachedTokens: 50, CacheCreationTokens: 50})
+	s.Add(domain.RequestMetric{Model: "gpt", ServerID: "s1", StatusCode: 200, Class: "chat",
+		PromptTokens: 100, CachedTokens: 0})
+	s.Add(domain.RequestMetric{Model: "gpt", ServerID: "s1", StatusCode: 200, Class: "messages",
+		PromptTokens: 10, CachedTokens: -1})
+
+	summaries := s.Summaries()
+	chat, ok := summaries["class:chat"]
+	if !ok {
+		t.Fatalf("summaries %v missing class:chat", keys(summaries))
+	}
+	if chat.TotalRequests != 2 {
+		t.Errorf("requests = %d, want 2", chat.TotalRequests)
+	}
+	// Cache hit is read off the group's token sums by the GUI, so the sums must
+	// be complete: 50 cached out of 200+50+50 prompt-side tokens.
+	if chat.TotalCachedTok != 50 || chat.TotalPromptTok != 200 || chat.TotalCacheCreationTok != 50 {
+		t.Errorf("token sums = cached %d prompt %d new %d, want 50/200/50",
+			chat.TotalCachedTok, chat.TotalPromptTok, chat.TotalCacheCreationTok)
+	}
+	if _, ok := summaries["class:messages"]; !ok {
+		t.Error("every class must get its own summary")
+	}
+}
+
+func keys(m map[string]domain.Summary) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

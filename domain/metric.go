@@ -27,6 +27,12 @@ type RequestMetric struct {
 	APIEndpoint         string    `json:"api_endpoint"`
 	ClientIP            string    `json:"client_ip"`
 
+	// Request shape, classified by heuristic on every request (0 tokens):
+	// the endpoint class plus the signs a byte scan saw (stream, tools:<n>,
+	// images:<n>, …). Aggregated into `class:<label>` summaries.
+	Class    string   `json:"class,omitempty"`
+	Features []string `json:"features,omitempty"`
+
 	PrefillTimeMs         int64   `json:"prefill_time_ms"`
 	DecodeTimeMs          int64   `json:"decode_time_ms"`
 	PrefillTokPerSec      float64 `json:"prefill_tok_per_sec"`

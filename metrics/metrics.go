@@ -76,6 +76,11 @@ func (s *Store) Add(m domain.RequestMetric) {
 		target = m.Model
 	}
 	s.updateSummary("target:"+m.ServerID+":"+target, m)
+	// Requests of the same shape aggregate together (chat vs speech vs …), so
+	// the GUI's table machinery and the cache-hit maths work per class too.
+	if m.Class != "" {
+		s.updateSummary("class:"+m.Class, m)
+	}
 }
 
 func (s *Store) updateSummary(key string, m domain.RequestMetric) {
