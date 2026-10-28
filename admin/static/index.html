@@ -72,6 +72,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   <div class="tab active" onclick="switchTab('servers')">Servers</div>
   <div class="tab" onclick="switchTab('rules')">Routing Rules</div>
   <div class="tab" onclick="switchTab('metrics')">Metrics</div>
+  <div class="tab" id="trace-tab" onclick="switchTab('trace')">Trace</div>
 </div>
 
 <!-- Servers Panel -->
@@ -118,24 +119,54 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   </div>
   <h2>Summary by Server</h2>
   <table>
-    <thead><tr><th class="sortable" data-table="sum-server" data-col="name">Server</th><th class="sortable" data-table="sum-server" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-server" data-col="success_count">OK</th><th class="sortable" data-table="sum-server" data-col="error_count">Errors</th><th class="sortable" data-table="sum-server" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-server" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-server" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-server" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-server" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-server" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-server" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-server" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-server" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-server" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-server" data-col="total_bytes">Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-server" data-col="name">Server</th><th class="sortable" data-table="sum-server" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-server" data-col="success_count">OK</th><th class="sortable" data-table="sum-server" data-col="error_count">Errors</th><th class="sortable" data-table="sum-server" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-server" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-server" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-server" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-server" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-server" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-server" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-server" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-server" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-server" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-server" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-server" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="server-metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Summary by Model</h2>
   <table>
-    <thead><tr><th class="sortable" data-table="sum-model" data-col="name">Model</th><th class="sortable" data-table="sum-model" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-model" data-col="success_count">OK</th><th class="sortable" data-table="sum-model" data-col="error_count">Errors</th><th class="sortable" data-table="sum-model" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-model" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-model" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-model" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-model" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-model" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-model" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-model" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-model" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-model" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-model" data-col="total_bytes">Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-model" data-col="name">Model</th><th class="sortable" data-table="sum-model" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-model" data-col="success_count">OK</th><th class="sortable" data-table="sum-model" data-col="error_count">Errors</th><th class="sortable" data-table="sum-model" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-model" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-model" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-model" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-model" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-model" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-model" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-model" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-model" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-model" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-model" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-model" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Summary by Target Model / Server</h2>
   <table>
-    <thead><tr><th class="sortable" data-table="sum-target" data-col="name">Target Model / Server</th><th class="sortable" data-table="sum-target" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-target" data-col="success_count">OK</th><th class="sortable" data-table="sum-target" data-col="error_count">Errors</th><th class="sortable" data-table="sum-target" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-target" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-target" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-target" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-target" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-target" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-target" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-target" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-target" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-target" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-target" data-col="total_bytes">Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-target" data-col="name">Target Model / Server</th><th class="sortable" data-table="sum-target" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-target" data-col="success_count">OK</th><th class="sortable" data-table="sum-target" data-col="error_count">Errors</th><th class="sortable" data-table="sum-target" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-target" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-target" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-target" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-target" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-target" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-target" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-target" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-target" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-target" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-target" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-target" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="target-metrics-body"></tbody>
+  </table>
+  <h2 style="margin-top:20px;">Summary by Request Class</h2>
+  <table>
+    <thead><tr><th class="sortable" data-table="sum-class" data-col="name">Class</th><th class="sortable" data-table="sum-class" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-class" data-col="success_count">OK</th><th class="sortable" data-table="sum-class" data-col="error_count">Errors</th><th class="sortable" data-table="sum-class" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-class" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-class" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-class" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-class" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-class" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-class" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-class" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-class" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-class" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-class" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-class" data-col="total_bytes">Bytes</th></tr></thead>
+    <tbody id="class-metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Recent Requests</h2>
   <table>
     <thead><tr><th>Time</th><th>Model</th><th>Target</th><th>Server</th><th>API</th><th>Status</th><th>Latency</th><th>Prefill</th><th>Decode</th><th>P tok/s</th><th>D tok/s</th><th>P tok</th><th>D tok</th><th>Cached</th><th>Reasoning</th><th>Cache New</th><th>Size</th><th>Fallback</th><th>Jev</th><th>Client</th></tr></thead>
     <tbody id="recent-body"></tbody>
   </table>
+</div>
+
+<!-- Trace Panel -->
+<div id="panel-trace" class="panel">
+  <div class="btn-row">
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;">Models
+      <input id="trace-models" type="text" placeholder="empty = all" style="width:170px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;">
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;">Servers
+      <input id="trace-servers" type="text" placeholder="empty = all" style="width:130px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;">
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;">Seconds
+      <input id="trace-seconds" type="number" min="0" step="30" value="300" title="0 = until switched off" style="width:70px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;">
+    </label>
+    <button class="primary" onclick="startTrace()">Capture</button>
+    <button onclick="stopTrace()">Stop</button>
+    <button class="danger" onclick="clearTrace()">Clear</button>
+    <button onclick="loadTrace()">↻ Refresh</button>
+    <span id="trace-state" style="font-size:0.8rem;color:#484f58;margin-left:auto;"></span>
+  </div>
+  <table>
+    <thead><tr><th>Time</th><th>Class</th><th>Model</th><th>Target</th><th>Server</th><th>Status</th><th>Latency</th><th>TTFB</th><th>Events</th><th>Features</th><th>Trunc</th><th>Jev</th><th>ID</th></tr></thead>
+    <tbody id="trace-body"></tbody>
+  </table>
+  <p style="font-size:0.75rem;color:#484f58;">Bodies live in memory only (512KB per request/response, last 100 entries) and die with the process. Base64 images and audio uploads are stored as size+hash stubs; prompt text is stored verbatim. Click a row for the request, the reassembled response and the raw frames.</p>
 </div>
 
 <!-- Server Modal -->
@@ -267,7 +298,7 @@ function getCookie(name) {
 }
 
 // --- Sort State ---
-const sortState = { servers: {}, rules: {}, 'sum-server': {}, 'sum-model': {}, 'sum-target': {} };
+const sortState = { servers: {}, rules: {}, 'sum-server': {}, 'sum-model': {}, 'sum-target': {}, 'sum-class': {} };
 function sortKey(table, col) { return 'sort_' + table + '_' + col; }
 function loadSort(table, col) {
   const dir = getCookie(sortKey(table, col));
@@ -318,6 +349,7 @@ function sortData(data, col, dir) {
     else if (col === 'target_model') { va = a.target_model; vb = b.target_model; }
     else if (col === 'server_id') { va = a.server_id; vb = b.server_id; }
     else if (col === 'min_max') { va = a.min_latency_ms; vb = b.min_latency_ms; }
+    else if (col === 'cache_hit') { va = cacheHitRatio(a); vb = cacheHitRatio(b); }
     else { va = a[col]; vb = b[col]; } // summary rows: flat summary JSON fields
     return sortCompare(va, vb) * (dir === 'desc' ? -1 : 1);
   });
@@ -335,6 +367,7 @@ function switchTab(name) {
   // Auto-refresh
   if (metricsInterval) { clearInterval(metricsInterval); metricsInterval = null; }
   if (serversInterval) { clearInterval(serversInterval); serversInterval = null; }
+  if (traceInterval) { clearInterval(traceInterval); traceInterval = null; }
   if (name === 'metrics') {
     loadMetrics();
     metricsInterval = setInterval(loadMetrics, 3000);
@@ -342,6 +375,10 @@ function switchTab(name) {
   if (name === 'servers') {
     loadServers();
     serversInterval = setInterval(loadServers, 5000);
+  }
+  if (name === 'trace') {
+    loadTrace();
+    traceInterval = setInterval(loadTrace, 3000);
   }
 }
 
@@ -1208,13 +1245,14 @@ function getJevCandidates() {
 // --- Init ---
 // Restore sort state from cookies
 function restoreSortState() {
-  const summaryCols = ['name', 'total_requests', 'success_count', 'error_count', 'fallback_count', 'avg_latency_ms', 'min_max', 'avg_prefill_tok_per_sec', 'avg_decode_tok_per_sec', 'total_prompt_tokens', 'total_completion_tokens', 'total_cached_tokens', 'total_reasoning_tokens', 'total_cache_creation_tokens', 'total_bytes'];
+  const summaryCols = ['name', 'total_requests', 'success_count', 'error_count', 'fallback_count', 'avg_latency_ms', 'min_max', 'avg_prefill_tok_per_sec', 'avg_decode_tok_per_sec', 'total_prompt_tokens', 'total_completion_tokens', 'total_cached_tokens', 'total_reasoning_tokens', 'total_cache_creation_tokens', 'total_bytes', 'cache_hit'];
   const tables = {
     servers: ['id', 'name', 'url', 'api_types'],
     rules: ['idx', 'enabled', 'incoming_models', 'target_model', 'server_id'],
     'sum-server': summaryCols,
     'sum-model': summaryCols,
     'sum-target': summaryCols,
+    'sum-class': summaryCols,
   };
   for (const [table, cols] of Object.entries(tables)) {
     for (const col of cols) {
@@ -1277,6 +1315,13 @@ document.getElementById('rule-target-inp').addEventListener('focusout', function
 });
 
 // --- Metrics ---
+// cacheHitRatio is the group's cache hit read off its token sums: an average of
+// per-request ratios would let one small request outvote a large one.
+function cacheHitRatio(s) {
+  const denom = (s.total_prompt_tokens || 0) + (s.total_cached_tokens || 0) + (s.total_cache_creation_tokens || 0);
+  return denom > 0 ? 100 * (s.total_cached_tokens || 0) / denom : 0;
+}
+
 function summaryRow(key, s) {
   const avgLat = s.avg_latency_ms ? s.avg_latency_ms.toFixed(0) + 'ms' : '-';
   const minMax = (s.min_latency_ms || s.max_latency_ms) ? s.min_latency_ms + 'ms / ' + s.max_latency_ms + 'ms' : '-';
@@ -1285,6 +1330,11 @@ function summaryRow(key, s) {
   const promptTok = s.total_prompt_tokens || '-';
   const completeTok = s.total_completion_tokens || '-';
   const cachedTok = s.total_cached_tokens >= 0 ? s.total_cached_tokens : '-';
+  // An explicit label beats a dash: 0 cached is a miss, no usage at all is not
+  // a zero.
+  const cacheHitCell = (s.total_prompt_tokens || s.total_cached_tokens || s.total_cache_creation_tokens)
+    ? (cacheHitRatio(s) > 0 ? cacheHitRatio(s).toFixed(0) + '%' : 'cache miss')
+    : 'usage not reported';
   const reasoningTok = s.total_reasoning_tokens || '-';
   const cacheNewTok = s.total_cache_creation_tokens || '-';
   const bytes = s.total_bytes ? formatBytes(s.total_bytes) : '-';
@@ -1301,6 +1351,7 @@ function summaryRow(key, s) {
     <td>${promptTok}</td>
     <td>${completeTok}</td>
     <td>${cachedTok}</td>
+    <td>${cacheHitCell}</td>
     <td>${reasoningTok}</td>
     <td>${cacheNewTok}</td>
     <td>${bytes}</td>
@@ -1323,7 +1374,7 @@ async function loadMetrics() {
     const tbody = document.getElementById(tbodyId);
     tbody.innerHTML = data.length
       ? data.map(r => summaryRow(r.name, r)).join('')
-      : '<tr><td colspan="15" class="empty">No metrics yet</td></tr>';
+      : '<tr><td colspan="16" class="empty">No metrics yet</td></tr>';
   };
   const entries = Object.entries(summaries);
   renderSummaries('server-metrics-body', 'sum-server', entries.filter(([key]) => key.startsWith('server:')),
@@ -1331,6 +1382,8 @@ async function loadMetrics() {
   renderSummaries('metrics-body', 'sum-model', entries.filter(([key]) => !key.startsWith('server:') && !key.startsWith('target:')), (key) => key);
   // target keys are "target:<server>:<model>" — server first, so the split
   // stays unambiguous even for model names containing ':' (qwen3:32b)
+  renderSummaries('class-metrics-body', 'sum-class', entries.filter(([key]) => key.startsWith('class:')),
+    (key) => key.slice(6));
   renderSummaries('target-metrics-body', 'sum-target', entries.filter(([key]) => key.startsWith('target:')),
     (key) => {
       key = key.slice(7);
@@ -1375,7 +1428,10 @@ async function loadMetrics() {
     const dTokSec = r.decode_tok_per_sec ? r.decode_tok_per_sec.toFixed(1) : '-';
     const pTok = r.prompt_tokens || '-';
     const cTok = r.completion_tokens || '-';
-    const cached = r.cached_tokens >= 0 ? r.cached_tokens : '-';
+    const cached = (r.prompt_tokens || r.completion_tokens) ? (r.cached_tokens >= 0 ? r.cached_tokens : '-') : 'not reported';
+    const klass = r.class
+      ? `<br><span class="tag" style="background:#1a3a3a;color:#39c5cf" title="${escAttr((r.features || []).join(', '))}">${esc(r.class)}</span>`
+      : '';
     const reasoning = r.reasoning_tokens || '-';
     const cacheNew = r.cache_creation_tokens || '-';
     const apiType = r.api_type === 'anthropic'
@@ -1399,7 +1455,7 @@ async function loadMetrics() {
     }
     return `<tr>
       <td>${time}</td>
-      <td>${esc(r.model)}</td>
+      <td>${esc(r.model)}${klass}</td>
       <td>${esc(r.target_model)}</td>
       <td>${esc(r.server_id)}</td>
       <td>${apiCell}</td>
@@ -1451,6 +1507,148 @@ function formatBytes(b) {
   if (b < 1024) return b + 'B';
   if (b < 1048576) return (b / 1024).toFixed(1) + 'KB';
   return (b / 1048576).toFixed(1) + 'MB';
+}
+
+// --- Trace ---
+let traceInterval = null;
+let traceWin = null;
+
+// traceState renders the live window: in the panel, and as a countdown on the
+// tab label so the operator sees "capture is on" from any other tab.
+function traceState() {
+  const on = !!traceWin && traceWin.enabled;
+  const state = document.getElementById('trace-state');
+  const tab = document.getElementById('trace-tab');
+  if (!on) {
+    if (state) state.textContent = 'off — nothing is captured';
+    if (tab) tab.textContent = 'Trace';
+    return;
+  }
+  const scope = [];
+  if ((traceWin.models || []).length) scope.push('models: ' + traceWin.models.join(','));
+  if ((traceWin.servers || []).length) scope.push('servers: ' + traceWin.servers.join(','));
+  let left = 'until stopped';
+  if (traceWin.expires_at) {
+    const s = Math.max(0, Math.round((new Date(traceWin.expires_at).getTime() - Date.now()) / 1000));
+    left = Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's left';
+  }
+  if (state) state.textContent = 'capturing, ' + left + (scope.length ? ' · ' + scope.join(' · ') : ' · everything');
+  if (tab) tab.textContent = left === 'until stopped' ? 'Trace ●' : 'Trace ● ' + left;
+}
+
+async function loadTrace() {
+  const res = await fetch(API + '/trace');
+  if (!res.ok) return;
+  traceWin = await res.json();
+  traceState();
+
+  const body = document.getElementById('trace-body');
+  const openIds = new Set([...body.querySelectorAll('.trace-detail[data-open="1"]')].map(d => d.dataset.id));
+  const entries = (traceWin.entries || []).slice().reverse();
+  if (!entries.length) {
+    body.innerHTML = '<tr><td colspan="13" class="empty">Nothing traced yet</td></tr>';
+    return;
+  }
+  body.innerHTML = entries.map(e => {
+    const time = new Date(e.timestamp).toLocaleTimeString([], { hour12: false });
+    const statusColor = e.status_code >= 200 && e.status_code < 300 ? '#3fb950' : '#f85149';
+    const events = Object.entries((e.digest && e.digest.events) || {}).map(([k, v]) => k + ':' + v).join(' ');
+    const feats = (e.features || []).join(' ');
+    const trunc = [e.request_truncated ? 'req' : '', e.response_truncated ? 'resp' : ''].filter(Boolean).join('+');
+    return `<tr style="cursor:pointer;" onclick="toggleTraceEntry(this,'${escAttr(e.id)}')">
+      <td>${time}</td>
+      <td><span class="tag" style="background:#1a3a3a;color:#39c5cf">${esc(e.class || '-')}</span></td>
+      <td>${esc(e.model)}</td>
+      <td>${esc(e.target_model || '-')}</td>
+      <td>${esc(e.server_id || '-')}</td>
+      <td style="color:${statusColor}">${e.status_code}</td>
+      <td>${e.latency_ms}ms</td>
+      <td>${e.ttfb_ms}ms</td>
+      <td style="font-size:0.75rem;color:#8b949e" title="${escAttr(events)}">${esc(events || '-')}</td>
+      <td style="font-size:0.75rem;color:#8b949e" title="${escAttr(feats)}">${esc(feats || '-')}</td>
+      <td>${esc(trunc || '-')}</td>
+      <td>${esc(e.jev_choice || '-')}</td>
+      <td style="font-family:monospace;font-size:0.8rem;color:#8b949e;">${esc(e.id)}</td>
+    </tr>
+    <tr class="trace-detail" data-id="${escAttr(e.id)}" style="display:none;"><td colspan="13" class="empty">Loading…</td></tr>`;
+  }).join('');
+  for (const id of openIds) {
+    const detail = body.querySelector('.trace-detail[data-id="' + CSS.escape(id) + '"]');
+    if (detail) toggleTraceEntry(detail.previousElementSibling, id);
+  }
+}
+
+// toggleTraceEntry expands (fetching the full entry once) or collapses a row:
+// the compact list carries no bodies, so the body arrives on first expansion.
+async function toggleTraceEntry(row, id) {
+  const detail = row.nextElementSibling;
+  if (!detail || !detail.classList.contains('trace-detail')) return;
+  if (detail.dataset.open === '1') {
+    detail.style.display = 'none';
+    detail.dataset.open = '0';
+    return;
+  }
+  detail.style.display = '';
+  detail.dataset.open = '1';
+  if (detail.dataset.loaded === '1') return;
+  const cell = detail.cells[0];
+  try {
+    const res = await fetch(API + '/trace?id=' + encodeURIComponent(id));
+    if (!res.ok) { cell.textContent = 'Trace entry not found (overwritten by the ring?)'; return; }
+    const e = await res.json();
+    detail.dataset.loaded = '1';
+    let req = e.request || '(empty)';
+    try { req = JSON.stringify(JSON.parse(req), null, 2); } catch {}
+    const d = e.digest || {};
+    const events = Object.entries(d.events || {}).map(([k, v]) =>
+      `<span class="tag" style="background:#1a3a3a;color:#39c5cf">${esc(k)}:${v}</span>`).join('');
+    const pre = 'white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto;font-size:0.75rem;background:#0d1117;padding:8px;border-radius:4px;margin:4px 0 12px;';
+    const title = 'font-size:0.75rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#58a6ff;';
+    cell.style.textAlign = 'left';
+    cell.innerHTML =
+      `<div style="${title}">Request${e.request_truncated ? ' (truncated)' : ''}</div><pre style="${pre}">${esc(req)}</pre>` +
+      `<div style="${title}">Response${e.response_truncated ? ' (truncated)' : ''} · finish ${esc(d.finish_reason || 'n/a')}</div>` +
+      `<div style="margin:4px 0;">${events}</div>` +
+      `<pre style="${pre}">${esc(d.text || '(no text — binary, audio, or a non-text response)')}</pre>` +
+      `<details><summary style="cursor:pointer;color:#8b949e;font-size:0.8rem;">Raw frames (${(e.response || '').length} bytes stored)</summary><pre style="${pre}">${esc(e.response || '(empty)')}</pre></details>`;
+  } catch (err) {
+    cell.textContent = 'failed to load trace entry: ' + err;
+  }
+}
+
+async function startTrace() {
+  const list = (id) => document.getElementById(id).value.split(',').map(s => s.trim()).filter(Boolean);
+  const res = await fetch(API + '/trace', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      enabled: true,
+      seconds: parseInt(document.getElementById('trace-seconds').value, 10) || 0,
+      models: list('trace-models'),
+      servers: list('trace-servers'),
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    alert('Trace start failed: ' + (err.error || res.statusText));
+    return;
+  }
+  await loadTrace();
+}
+
+async function stopTrace() {
+  await fetch(API + '/trace', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: false }),
+  });
+  await loadTrace();
+}
+
+async function clearTrace() {
+  if (!confirm('Clear traced requests?')) return;
+  await fetch(API + '/trace/reset', { method: 'POST' });
+  await loadTrace();
 }
 </script>
 </body>
