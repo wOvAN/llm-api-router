@@ -52,7 +52,12 @@ func truncatePrefix(b []byte, max int) (string, bool) {
 	if len(b) <= max {
 		return string(b), false
 	}
-	return string(b[:max]) + "…[truncated " + itoa(int64(len(b)-max)) + " bytes]", true
+	return string(b[:max]) + truncationMarker(int64(len(b)-max)), true
+}
+
+// truncationMarker is the tail a truncated body carries.
+func truncationMarker(dropped int64) string {
+	return "…[truncated " + itoa(dropped) + " bytes]"
 }
 
 // stub renders a redaction placeholder: the kind, the size, and a short hash
