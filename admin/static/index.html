@@ -1499,8 +1499,10 @@ async function resetMetrics() {
   loadMetrics();
 }
 
-async function copyErrorText(btn) {
-  const text = btn.dataset.err;
+// copyText puts text on the clipboard. The GUI is served over plain http on a
+// LAN host, where navigator.clipboard needs a secure context and is unavailable
+// — the execCommand fallback is what makes copying work there.
+async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
   } catch {
@@ -1511,6 +1513,20 @@ async function copyErrorText(btn) {
     document.execCommand('copy');
     ta.remove();
   }
+}
+
+async function copyErrorText(btn) {
+  await copyText(btn.dataset.err);
+}
+
+// copyBlock copies one traced-entry block (Request / Response / Raw frames).
+// The text is read back from the rendered <pre>, never from an attribute: a
+// body is up to 512KB and the DOM must not hold it twice.
+async function copyBlock(btn, key) {
+  const pre = btn.closest('td').querySelector(`pre[data-copy="${key}"]`);
+  await copyText(pre ? pre.textContent : '');
+  btn.textContent = '✓';
+  setTimeout(() => { btn.textContent = '⧉'; }, 1000);
 }
 
 function formatBytes(b) {
@@ -1645,12 +1661,15 @@ async function toggleTraceEntry(row, id) {
     const pre = 'white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto;font-size:0.75rem;background:#0d1117;padding:8px;border-radius:4px;margin:4px 0 12px;';
     const title = 'font-size:0.75rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#58a6ff;';
     cell.style.textAlign = 'left';
+    // The Raw button lives inside a <summary>, so its click would also toggle
+    // the disclosure — stop the click there.
+    const cp = (key, label) => `<button class="copy-icon" onclick="event.stopPropagation();copyBlock(this,'${key}')" title="Copy ${label} to the clipboard">⧉</button>`;
     cell.innerHTML =
-      `<div style="${title}">Request${e.request_truncated ? ' (truncated)' : ''}</div><pre style="${pre}">${esc(req)}</pre>` +
-      `<div style="${title}">Response${e.response_truncated ? ' (truncated)' : ''} · finish ${esc(d.finish_reason || 'n/a')}</div>` +
+      `<div style="${title}">Request${e.request_truncated ? ' (truncated)' : ''}${cp('req', 'the request')}</div><pre data-copy="req" style="${pre}">${esc(req)}</pre>` +
+      `<div style="${title}">Response${e.response_truncated ? ' (truncated)' : ''} · finish ${esc(d.finish_reason || 'n/a')}${cp('resp', 'the reassembled response')}</div>` +
       `<div style="margin:4px 0;">${events}</div>` +
-      `<pre style="${pre}">${esc(d.text || '(no text — binary, audio, or a non-text response)')}</pre>` +
-      `<details><summary style="cursor:pointer;color:#8b949e;font-size:0.8rem;">Raw frames (${(e.response || '').length} bytes stored)</summary><pre style="${pre}">${esc(e.response || '(empty)')}</pre></details>`;
+      `<pre data-copy="resp" style="${pre}">${esc(d.text || '(no text — binary, audio, or a non-text response)')}</pre>` +
+      `<details><summary style="cursor:pointer;color:#8b949e;font-size:0.8rem;">Raw frames (${(e.response || '').length} bytes stored)${cp('raw', 'the raw frames')}</summary><pre data-copy="raw" style="${pre}">${esc(e.response || '(empty)')}</pre></details>`;
   } catch (err) {
     cell.textContent = 'failed to load trace entry: ' + err;
   }
