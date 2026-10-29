@@ -1546,6 +1546,12 @@ function traceState() {
   if (tab) tab.textContent = left === 'until stopped' ? 'Trace ●' : 'Trace ● ' + left;
 }
 
+// loadTrace refreshes the window state and reconciles the table in place. A
+// full innerHTML rebuild per 3s tick flickers, jumps the page scroll, drops the
+// text selection — and recreates the detail rows, so an expanded entry lost its
+// fetched bodies and re-fetched them on every tick. Rows are keyed by entry id
+// and patched only when their rendered cells changed; the ring appends, so a new
+// entry is the only thing that ever appears in the DOM, and it goes on top.
 async function loadTrace() {
   const res = await fetch(API + '/trace');
   if (!res.ok) return;
@@ -1553,20 +1559,51 @@ async function loadTrace() {
   traceState();
 
   const body = document.getElementById('trace-body');
-  const openIds = new Set([...body.querySelectorAll('.trace-detail[data-open="1"]')].map(d => d.dataset.id));
   const entries = (traceWin.entries || []).slice().reverse();
+
+  const live = new Set(entries.map(e => e.id));
+  for (const row of [...body.children]) {
+    if (!row.dataset.id || !live.has(row.dataset.id)) row.remove();
+  }
   if (!entries.length) {
     body.innerHTML = '<tr><td colspan="13" class="empty">Nothing traced yet</td></tr>';
     return;
   }
-  body.innerHTML = entries.map(e => {
-    const time = new Date(e.timestamp).toLocaleTimeString([], { hour12: false });
-    const statusColor = e.status_code >= 200 && e.status_code < 300 ? '#3fb950' : '#f85149';
-    const events = Object.entries((e.digest && e.digest.events) || {}).map(([k, v]) => k + ':' + v).join(' ');
-    const feats = (e.features || []).join(' ');
-    const trunc = [e.request_truncated ? 'req' : '', e.response_truncated ? 'resp' : ''].filter(Boolean).join('+');
-    return `<tr style="cursor:pointer;" onclick="toggleTraceEntry(this,'${escAttr(e.id)}')">
-      <td>${time}</td>
+
+  const tpl = document.createElement('template');
+  let anchor = body.firstElementChild;
+  for (const e of entries) {
+    if (anchor && anchor.dataset.id === e.id) {
+      const cells = traceCells(e);
+      if (anchor.dataset.sig !== cells) {
+        anchor.dataset.sig = cells;
+        anchor.innerHTML = cells;
+      }
+      const detail = anchor.nextElementSibling;
+      anchor = detail && detail.classList.contains('trace-detail')
+        ? detail.nextElementSibling : detail;
+      continue;
+    }
+    tpl.innerHTML = `<tr data-id="${escAttr(e.id)}" style="cursor:pointer;" onclick="toggleTraceEntry(this,'${escAttr(e.id)}')"></tr>` +
+      `<tr class="trace-detail" data-id="${escAttr(e.id)}" style="display:none;"><td colspan="13" class="empty">Loading…</td></tr>`;
+    const [row, detail] = [...tpl.content.children];
+    const cells = traceCells(e);
+    row.dataset.sig = cells;
+    row.innerHTML = cells;
+    body.insertBefore(row, anchor);
+    body.insertBefore(detail, anchor);
+  }
+}
+
+// traceCells renders one entry's <td>s (the row's own attributes live in
+// loadTrace, so the signature below covers only what a poll can change).
+function traceCells(e) {
+  const time = new Date(e.timestamp).toLocaleTimeString([], { hour12: false });
+  const statusColor = e.status_code >= 200 && e.status_code < 300 ? '#3fb950' : '#f85149';
+  const events = Object.entries((e.digest && e.digest.events) || {}).map(([k, v]) => k + ':' + v).join(' ');
+  const feats = (e.features || []).join(' ');
+  const trunc = [e.request_truncated ? 'req' : '', e.response_truncated ? 'resp' : ''].filter(Boolean).join('+');
+  return `<td>${time}</td>
       <td><span class="tag" style="background:#1a3a3a;color:#39c5cf">${esc(e.class || '-')}</span></td>
       <td>${esc(e.model)}</td>
       <td>${esc(e.target_model || '-')}</td>
@@ -1578,14 +1615,7 @@ async function loadTrace() {
       <td style="font-size:0.75rem;color:#8b949e" title="${escAttr(feats)}">${esc(feats || '-')}</td>
       <td>${esc(trunc || '-')}</td>
       <td>${esc(e.jev_choice || '-')}</td>
-      <td style="font-family:monospace;font-size:0.8rem;color:#8b949e;">${esc(e.id)}</td>
-    </tr>
-    <tr class="trace-detail" data-id="${escAttr(e.id)}" style="display:none;"><td colspan="13" class="empty">Loading…</td></tr>`;
-  }).join('');
-  for (const id of openIds) {
-    const detail = body.querySelector('.trace-detail[data-id="' + CSS.escape(id) + '"]');
-    if (detail) toggleTraceEntry(detail.previousElementSibling, id);
-  }
+      <td style="font-family:monospace;font-size:0.8rem;color:#8b949e;">${esc(e.id)}</td>`;
 }
 
 // toggleTraceEntry expands (fetching the full entry once) or collapses a row:
