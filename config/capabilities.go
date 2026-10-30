@@ -77,9 +77,10 @@ func (c *CapabilitiesCache) Vision(ctx context.Context, srv *domain.Server, mode
 
 // Audio reports whether srv's model is an audio-domain model, as declared by the
 // `task` field of its /v1/models entry (audio.cpp: tts/asr/s2s/diar/...) or by an
-// `architecture.output_modalities` list with no `text` in it (llama.cpp: a
-// TTS-only checkpoint). Text engines report neither, so known=false is the normal
-// answer for a chat backend and the caller must treat the model as a text
+// `architecture.output_modalities` list with no `text` in it (llama.cpp: `["audio"]`
+// for a TTS-only checkpoint, and `["decisions"]` for a decision model — neither can
+// serve a chat completion). Text engines report neither, so known=false is the
+// normal answer for a chat backend and the caller must treat the model as a text
 // candidate.
 func (c *CapabilitiesCache) Audio(ctx context.Context, srv *domain.Server, model string) (audio bool, known bool) {
 	if c == nil || srv == nil || model == "" {
@@ -176,8 +177,9 @@ func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapa
 			continue
 		}
 		// llama.cpp's listing: a model that can only emit audio (a TTS-only
-		// checkpoint) has no chat completion to serve either. A chat model that
-		// can also speak keeps "text" in the list and stays a candidate.
+		// checkpoint) or only decisions (a decision model) has no chat
+		// completion to serve either. A chat model that can also speak keeps
+		// "text" in the list and stays a candidate.
 		if emits := m.Architecture.OutputModalities; emits != nil && !slices.Contains(*emits, "text") {
 			out.audio[m.ID] = true
 		}
