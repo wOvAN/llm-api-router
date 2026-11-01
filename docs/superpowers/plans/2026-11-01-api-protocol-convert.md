@@ -761,6 +761,30 @@ In `Handle`, next to `apiType := apiTypeFromPath(req.URL.Path)` add:
 	convSettings := r.store.GetSettings().Convert
 ```
 
+Two fixes to `convert/dialect.go` ride with this task, both because they only bite once the router calls `Decide` on real paths (they came out of Task 1's review). Add them to `convert/dialect.go` and pin each with a case in `convert/plan_test.go`:
+
+- `count_tokens` is a token counter, not a messages call, and it has no Chat Completions counterpart. Make it dialectless — the first case of `DialectForPath`:
+
+```go
+	if strings.Contains(path, "/count_tokens") {
+		return ""
+	}
+```
+
+  with a test case: a `messages` client on `/v1/messages/count_tokens` against a backend declaring only chat gets identity (`p.Dialect == Messages`, `p.Path == "/v1/messages/count_tokens"`), not a plan onto `/v1/chat/completions`. Without it, Claude Code's token count on a chat-only backend is answered with a completion.
+
+- The identity lookup compares dialects, not path strings — an operator who declares the root-served llama.cpp form (`/chat/completions`, which this router's URL join deliberately supports) must get passthrough, not a refusal naming two paths that mean the same endpoint. In `Decide`, replace `if p.Path == path` with:
+
+```go
+	for _, p := range protocols {
+		if DialectForPath(p.Path) == client {
+			return ident, nil
+		}
+	}
+```
+
+  with a test case: client `Messages` on `/v1/messages`, backend declaring `{path: "/messages"}` → identity with the client's path.
+
 Insert the decision into the attempt loop, immediately **before** `rewrittenBody, err := rewriteAttemptBody(...)` (`router.go:294`), and the body transform immediately **after** it:
 
 ```go
