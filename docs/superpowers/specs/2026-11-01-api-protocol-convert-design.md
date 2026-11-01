@@ -5,6 +5,8 @@
 > прокси (`previous_response_id` не материализуем), никакого `chat ↔ completions`, ничего audio/embeddings.
 > Конверсия включается, когда бэкенд **достаточно** хорошо говорит на диалекте клиента, а не когда строки
 > в `api_types` не совпали.
+> Потерянное поле = 400 по умолчанию; молча выбрасывать разрешает только `settings.convert.drop_params`
+> (позиция LiteLLM: `UnsupportedParamsError` с именем поля, дроп — opt-in).
 
 ## Цель
 
@@ -115,14 +117,40 @@ state-несовместимости, которой **нет ни у одног
   способности): `plan(clientDialect, path, body, server.protocols)`.
 - `rule.convert` / `fallback.convert` / `jev.candidates[].convert`: `"auto"` (по
   способности) | `"off"` (никогда, чистый passthrough) | `"messages>chat"` (принудительно,
-  для отладки и для бэкендов, которые зонд не распознаёт).
+  для бэкендов, которые зонд не распознаёт).
+- Per-request предохранитель `X-Router-Convert: off` (в домашнем стиле `X-Router-Jev: off`).
+  LiteLLM такие переключатели возит в теле запроса; мы не можем: тело запроса конвертером и
+  так переписывается, заголовок — единственное, что доходит до решения о конверсии.
 
-Зонд (опция, `config/capabilities.go` рядом с `CapabilitiesCache`, тот же кеш и fail-open):
-`POST` на эндпоинт с заведомо неполным телом (`{}`) различает «нет роута» (404) и «есть
-роут» (400 с текстом про поле: llama.cpp `'input' is required`). Ответ на
-`{"previous_response_id":"x"}` = 400 с текстом про `previous_response_id` ⇒
-поддержка есть, `state: false`. Дешевле, чем кажется: один запрос на сервер на TTL, как
-vision/audio-проба.
+Настройки:
+
+```json
+"settings": {
+  "convert": {
+    "max_tokens_default": 4096,
+    "drop_params": false,
+    "probe": false,
+    "anthropic_version": "2023-06-01"
+  }
+}
+```
+
+Главный инструмент наблюдения — **сухой прогон**, `POST /admin/api/convert/preview` с телом
+`{path, body, server_id}`: прогоняет `plan()` + `convert.Request` и отдаёт, что уехало бы на
+бэкенд (путь, тело, список потерь), **не трогая бэкенд**. Это ровно LiteLLM
+`POST /utils/transform_request` (`proxy_server.py:12109` → `return_raw_request`) и
+`GET /utils/supported_openai_params` (`:12081`). Дёшево до неприличия: `convert.Request` — чистая
+функция, эндпоинт — её обёртка.
+
+Зонд способностей (`config/capabilities.go` рядом с `CapabilitiesCache`, тот же кеш) —
+**выключен по умолчанию** (`probe: false`) и не входит в фазу 1. `POST {}` различает «нет роута»
+(404) и «есть роут» (400 с текстом про поле: llama.cpp `'input' is required`), а
+`{"previous_response_id":"x"}` выдаёт 400 с текстом про это поле ⇒ поддержка есть, `state: false`.
+Почему это не дефолт: LiteLLM не зондирует ничего (grep по `probe` — только Prisma-watchdog), он
+**объявляет** способность кодом (`get_supported_openai_params`) и показывает её через preview.
+Активный зонд — это настоящий запрос на бэкенд: токены, rate-limit-бюджет, у audio/TTS-эндпоинтов
+— реальный синтез. Preview закрывает ту же потребность (понять, что сломается) без побочного
+эффекта, а `protocols` на сервере закрывает потребность «я знаю, что умеет мой билд».
 
 ## Точка врезки
 
@@ -163,12 +191,12 @@ vision/audio-проба.
 | Канон (`chat`) | `messages` | `responses` | Судьба |
 |---|---|---|---|
 | system-сообщение | top-level `system` (string\|blocks) | `instructions` | lossless; несколько system → конкатенация в один |
-| `max_tokens` (опц.) | `max_tokens` **обязателен** | `max_output_tokens` | chat-клиент без лимита → дефолт из `settings.convert.max_tokens_default`; иначе 400 от бэкенда |
+| `max_tokens` (опц.) | `max_tokens` **обязателен** | `max_output_tokens` | chat-клиент без лимита → `settings.convert.max_tokens_default` (4096). У нас нет таблицы возможностей по моделям (у LiteLLM это costs map: `get_max_tokens(model)`, и лишь при промахе `DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS`), так что 4096 — основной источник, а не последняя защита: переопределение на правиле `rule.convert_max_tokens` обязательный спутник фичи |
 | `stop` | `stop_sequences` | — | в `responses` терять некуда → поле не переводится, ребро `chat↔responses` его теряет |
 | `tools[].function.parameters` | `tools[].input_schema` | `tools[].function` | lossless; имена `/[a-zA-Z0-9_-]{1,64}/` |
 | `tool_calls[].{id,name,arguments}` / role `tool` + `tool_call_id` | `tool_use`(id,name,input) / `tool_result`(tool_use_id) | `function_call`(call_id,name,arguments) / `function_call_output` | lossless, `id` ↔ `call_id` |
 | `parallel_tool_calls` | `tool_choice.disable_parallel_tool_use` | `parallel_tool_calls` | lossless |
-| `reasoning_effort` / `reasoning{effort,summary}` | `thinking{type,budget_tokens}`, блоки `thinking`/`redacted_thinking` с **подписью** | `reasoning{effort,summary}` | **lossy**: effort↔budget_tokens — грубая сетка; подпись Anthropic не воспроизводится ⇒ на конвертированном запросе `thinking` **выключается** и это пишется в notes |
+| `reasoning_effort` / `reasoning{effort,summary}` | `thinking{type,budget_tokens}`, блоки `thinking`/`redacted_thinking` с **подписью** | `reasoning{effort,summary}` | **lossy**: effort↔budget_tokens — грубая сетка; подпись Anthropic не воспроизводится ⇒ запрос с `thinking`/`reasoning` на конвертируемом пути = 400 по умолчанию (просить оператора включить `drop_params`, тогда `thinking=off` в notes). Эмулировать подпись запрещено |
 | `response_format` (`json_schema`) | `output_format` (+`additionalProperties:false`) | `text.format` | lossless с правкой схемы |
 | `image_url{url: data:...}` | `source{type:base64,media_type,data}` | `input_image` | lossless; Anthropic `document`/PDF-блок в chat не помещается → 400 |
 | `usage` (`prompt_tokens`/`completion_tokens`, `prompt_tokens_details.cached_tokens`, `completion_tokens_details.reasoning_tokens`) | `input_tokens`/`output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` | `input_tokens`/`output_tokens` + details | метеринг не трогаем: читается с нативной стороны |
@@ -177,9 +205,23 @@ vision/audio-проба.
 | — | `anthropic-version`, `anthropic-beta` | — | при синтетическом `messages`-запросе `anthropic-version` инжектится (дефолт `2023-06-01`); beta-фичи → notes, не дропаем молча |
 | `metadata.user_id` | `metadata.user_id` | `prompt_cache_key`/`safety_identifier` | jev-sticky уже читает обе ветки (`router/jev.go:545`), менять не нужно |
 
-Запреты v1 (громкий 400, список полей в тексте): Anthropic `document`/PDF в chat; hosted-тулзы
-(`web_search`, `file_search`, `code_interpreter`, `mcp`) при переводе в бэкенд без них;
-коллизия имён тулзов после усечения до 64 байт; `n>1`; `audio`-блоки.
+Политика потерь (позиция LiteLLM, `anthropic/chat/transformation.py:424-432`): поле, у которого нет
+представления в целевом диалекте, по умолчанию **отказывается** — 400 с именем поля и текстом «set
+`settings.convert.drop_params` to drop unsupported params», запрос на апстрим не уходит. Молча
+выбрасывать разрешает только `settings.convert.drop_params: true` (глобально или
+`rule.convert_drop_params`), и тогда каждое выброшенное поле уходит в `ConvertNotes`. Причина, по
+которой дефолт — отказ: тихий дроп `stop`/`tools`/`thinking` даёт клиенту правдоподобный ответ,
+полученный не из того запроса, а это ровно тот класс отказов, ради которого мы отказались от
+стора ответов.
+
+Отдельный класс — то, что в целевом диалекте не выражается **никак**: Anthropic `document`/PDF в
+chat; hosted-тулзы (`web_search`, `file_search`, `code_interpreter`, `mcp`) на бэкенде без них;
+коллизия имён тулзов после усечения до 64 байт; `n>1`; `audio`-блоки. Это 400 всегда, `drop_params`
+их не включает.
+
+Политика отказа касается **запроса**. Ответ маппится по таблице всегда и всегда молча: отказывать
+нельзя, ответ уже у клиента, поэтому несопоставимое имя (`refusal`, `content_filter`) уходит в
+`ConvertNotes`, а не в ошибку.
 
 ## Маппинг полей: `responses` → `chat`
 
@@ -257,16 +299,24 @@ store; send full `input`» (текст лучше чужого `store-disabled`:
 - Регресс дыры, ради которой всё началось: `TestHandleProtocolMismatchConvertsFallback` —
   primary без способности, fallback с ней → 200, `X-Router-Convert` выставлен, метрика
   записана; и `TestHandleProtocolMismatchNoConvert` → 400 нашей формулировки, не 404 бэкенда.
+- Политика потерь: неподдерживаемое поле → 400, в тексте имя поля, hijacked-бэкенд не получил
+  ничего; с `drop_params: true` → запрос ушёл, поле перечислено в `ConvertNotes`.
+- `TestConvertPreview`: сухой прогон через `/admin/api/convert/preview` возвращает путь, тело и
+  потери; отдельный счётчик подтверждает, что на бэкенд не ушло ни одного запроса.
 
 ## Фазы
 
 1. **Каркас без перевода.** Модель способности (`protocols`), `plan()`, `UpstreamEndpoint`/
-   `Convert`/notes, `X-Router-Convert`, громкие 400 вместо 404 бэкенда, `EnsureStreamUsage`
-   переезжает в попытку. Польза: дыра «молча форвардим чужой 404» закрыта, точка врезки
-   существует, наблюдение показывает конверсии (а их пока ноль).
+   `Convert`/notes, `X-Router-Convert` (+ `off`-предохранитель), `settings.convert` со всеми
+   четырьмя полями, `/admin/api/convert/preview`, громкие 400 вместо 404 бэкенда,
+   `EnsureStreamUsage` переезжает в попытку. Польза: дыра «молча форвардим чужой 404» закрыта,
+   точка врезки существует, оператор сухим прогоном видит, что сломается, наблюдение показывает
+   конверсии (а их пока ноль).
 2. **`messages → chat`**: JSON, затем SSE. Это то, ради чего фичу просят (Claude Code против
    OpenAI-only бэкенда).
-3. **`chat → messages`**: обратное направление того же спока.
+3. **`chat → messages`**: обратное направление того же спока, здесь же `max_tokens_default` и
+   `rule.convert_max_tokens` (направление, где Anthropic требует поле, которого у клиента может
+   не быть).
 4. **`responses → chat`** (stateless, `previous_response_id` → 400), `chat → responses` — по
    требованию.
 
@@ -276,8 +326,9 @@ store; send full `input`» (текст лучше чужого `store-disabled`:
   — одна nil-проверка, как `TraceTap`.
 - Конверсия рвёт prompt cache бэкенда (нет `cache_control`/`prompt_cache_key` в другой
   форме) → деградация `Cache hit` должна быть видна, иначе её припишут модели.
-- `thinking` на конвертированном запросе ломает многоходовые tool-циклы (подпись) — поэтому
-  выключается, а не эмулируется.
+- `thinking` на конвертированном запросе ломает многоходовые tool-циклы (подпись Anthropic
+  невоспроизводима) — поэтому по умолчанию отказ, а эмуляция не предусмотрена даже при
+  `drop_params`: дроп должен быть решением оператора, принятым после preview.
 - Строгие клиенты (opencode) валидируют каждое событие: эмиту только события своего диалекта,
   ничего «поверх».
 - `config.cloneRule`/`Store.AddServer`/`UpdateServer` перечисляют поля — новое поле
@@ -286,11 +337,19 @@ store; send full `input`» (текст лучше чужого `store-disabled`:
 - `config.json` не перезаписывается (правило из CLAUDE.md), новая схема описывается в
   `example.config.json`.
 
-## Открытые вопросы
+## Решения, принятые в диалоге
 
-1. Дефолт `max_tokens` для `chat → messages` (Anthropic требует поле): значение в
-   `settings.convert.max_tokens_default`? Какое — 4096, или требовать явную настройку?
-2. Зонд способностей: включённый по умолчанию (как vision/audio-проба) или
-   `settings.convert.probe: true`? Зонд пишет в тот же `CapabilitiesCache`, 10min TTL.
-3. `X-Router-Convert: off` как per-request заголовок-предохранитель (в духе
-   `X-Router-Jev: off`) — нужен сразу в фазе 1?
+1. **`max_tokens` — дефолтом, не отказом**: `settings.convert.max_tokens_default` (4096) +
+   `rule.convert_max_tokens`. У LiteLLM нормальный источник — costs map по модели
+   (`get_max_tokens(model)`), а `DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS` там лишь сеть последней
+   защиты (`constants.py:412`); у нас такой таблицы нет, поэтому 4096 несёт нагрузку, которую у
+   LiteLLM несёт таблица. Отсюда обязательный сосед фичи — переопределение на правиле.
+2. **Способность объявляется, а не зондируется**: `probe: false` по умолчанию, зонд вне фазы 1.
+   Инструмент наблюдения — `POST /admin/api/convert/preview` (сухой прогон, аналог
+   `/utils/transform_request`).
+3. **`X-Router-Convert: off` берём**, вопреки LiteLLM (там per-request переключатели едут в
+   теле запроса): тело запроса конвертером переписывается, заголовок — единственное, что
+   доживает до решения о конверсии.
+4. **Потери = 400 по умолчанию**, дроп только по `drop_params` (LiteLLM-дефолт; в первой
+   редакции этого spec'а было наоборот).
+5. **Mid-stream fallback/регенерация — вне объёма** (см. «Не делаем»).
