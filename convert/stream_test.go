@@ -2,6 +2,7 @@ package convert
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,41 @@ func TestChatToMessagesStreamText(t *testing.T) {
 	// shows cost reads a permanent zero.
 	if !strings.Contains(out, `"input_tokens":7`) {
 		t.Fatalf("input tokens lost:\n%s", out)
+	}
+}
+
+// eventNames lists the emitted frames' event types, in the order a client reads
+// them.
+func eventNames(s string) []string {
+	var out []string
+	for _, ev := range strings.Split(strings.TrimRight(s, "\n"), "\n\n") {
+		line, _, _ := strings.Cut(ev, "\n")
+		out = append(out, strings.TrimPrefix(line, "event: "))
+	}
+	return out
+}
+
+// A chat stream's last frame is `data: [DONE]`, and plenty of backends put no
+// finish_reason anywhere near it (the reason rides on a chunk that carries nothing
+// else, or on none at all). The Anthropic envelope must still open, close every
+// block and close the MESSAGE: message_stop is the stream end's job, so a client
+// that waits for the terminal event never waits forever. Pinned event by event
+// because the shape was otherwise only visible through message_delta.
+func TestChatToMessagesStreamClosesAStreamEndedByDone(t *testing.T) {
+	out := emit(NewChatToMessages(),
+		`{"id":"c1","model":"claude","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"}}]}`,
+		`{"id":"c1","model":"claude","choices":[{"index":0,"delta":{"content":"lo"}}]}`,
+		`[DONE]`)
+
+	want := []string{"message_start", "content_block_start", "content_block_delta",
+		"content_block_delta", "content_block_stop", "message_delta", "message_stop"}
+	if got := eventNames(out); !slices.Equal(got, want) {
+		t.Fatalf("event sequence = %v, want %v:\n%s", got, want, out)
+	}
+	// With no finish_reason the emitter keeps its default reason, and the closing
+	// frame is a restatement of the message it already streamed, not a new one.
+	if !strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Fatalf("a stream with no finish_reason must still report a stop reason:\n%s", out)
 	}
 }
 
