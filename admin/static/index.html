@@ -180,6 +180,12 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
       <label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;"><input type="checkbox" id="server-api-type-openai" checked style="width:auto;"> OpenAI</label>
       <label style="display:inline-flex;align-items:center;gap:4px;"><input type="checkbox" id="server-api-type-anthropic" checked style="width:auto;"> Anthropic</label>
     </label>
+    <label><span>Endpoints нативно (пусто = не объявлено: запросы идут как есть, passthrough, без конвертации)</span>
+      <label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;"><input type="checkbox" id="server-proto-chat" style="width:auto;"> /v1/chat/completions</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;"><input type="checkbox" id="server-proto-messages" style="width:auto;"> /v1/messages</label>
+      <div style="margin-top:4px;"><label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;"><input type="checkbox" id="server-proto-responses" style="width:auto;"> /v1/responses</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;"><input type="checkbox" id="server-proto-completions" style="width:auto;"> /v1/completions</label></div>
+    </label>
     <label><span>API Key</span><input id="server-api-key" type="password" class="api-key-input" placeholder="sk-..."></label>
 
     <div class="group-title">Общие (базовые для всех протоколов)</div>
@@ -402,6 +408,11 @@ async function loadServers() {
       return `<span class="tag ${cls}">${t}</span>`;
     }).join(' ') || '<span style="color:#484f58">(none)</span>';
     const key = s.api_key ? '••••' + s.api_key.slice(-4) : '(none)';
+    // Declared endpoints, next to the protocol tags: `openai` alone does not say
+    // whether the backend serves chat, responses or completions, and that is
+    // exactly what decides whether a request is converted.
+    const endpoints = (s.protocols || []).map(p =>
+      `<span class="tag" style="background:#1f2430;color:#8b949e"${p.state ? ' title="keeps conversation state"' : ''}>${esc(p.path.replace(/^\/v1\//, ''))}</span>`).join(' ');
     const health = s.healthy !== false
       ? '<span class="tag" style="background:#1a3a1a;color:#3fb950">● healthy</span>'
       : '<span class="tag" style="background:#3a1a1a;color:#f85149">● down</span>';
@@ -409,7 +420,7 @@ async function loadServers() {
       <td>${esc(s.id)}</td>
       <td>${esc(s.name)}</td>
       <td>${esc(s.url)}</td>
-      <td>${tags}</td>
+      <td>${tags}${endpoints ? '<br>' + endpoints : ''}</td>
       <td>${health}</td>
       <td>${key}</td>
       <td class="actions">
@@ -429,6 +440,7 @@ function openServerModal(id) {
   document.getElementById('server-url').value = '';
   document.getElementById('server-api-type-openai').checked = true;
   document.getElementById('server-api-type-anthropic').checked = false;
+  setServerProtocols([]);
   document.getElementById('server-openai-url').value = '';
   document.getElementById('server-anthropic-url').value = '';
   document.getElementById('server-proxy').value = '';
@@ -484,7 +496,8 @@ async function testServerConnection() {
 async function saveServer() {
   const id = document.getElementById('server-edit-id').value;
   // Merge onto the fetched server: the form does not render every field
-  // (`protocols`), and a rebuild from the inputs alone would erase them.
+  // (`keep_alive_idle`, a declared protocol's `state` flag), and a rebuild from
+  // the inputs alone would erase them.
   const data = Object.assign({}, editingServer, {
     id: document.getElementById('server-id').value || id,
     name: document.getElementById('server-name').value,
@@ -494,6 +507,7 @@ async function saveServer() {
     proxy: document.getElementById('server-proxy').value,
     proxy_enabled: document.getElementById('server-proxy-enabled').checked,
     api_types: getServerAPITypes(),
+    protocols: getServerProtocols(),
     api_key: document.getElementById('server-api-key').value,
     cooldown_time: parseInt(document.getElementById('server-cooldown').value, 10) || 0,
     tpm_limit: parseInt(document.getElementById('server-tpm').value, 10) || 0,
@@ -523,6 +537,7 @@ async function editServer(id) {
   document.getElementById('server-url').value = s.url;
   document.getElementById('server-api-type-openai').checked = (s.api_types || []).includes('openai');
   document.getElementById('server-api-type-anthropic').checked = (s.api_types || []).includes('anthropic');
+  setServerProtocols(s.protocols);
   document.getElementById('server-openai-url').value = s.openai_url || '';
   document.getElementById('server-anthropic-url').value = s.anthropic_url || '';
   document.getElementById('server-proxy').value = s.proxy || '';
@@ -941,6 +956,30 @@ function getServerAPITypes() {
   if (document.getElementById('server-api-type-openai').checked) types.push('openai');
   if (document.getElementById('server-api-type-anthropic').checked) types.push('anthropic');
   return types;
+}
+// Server.protocols: the endpoints the backend natively serves, which is what the
+// router converts against. Empty = undeclared = passthrough. The `state` flag has
+// no control (nothing reads it at runtime yet), so a save carries it over per
+// path — rebuilding the array from the checkboxes alone would erase a
+// config-declared flag.
+function getServerProtocols() {
+  const declared = {};
+  ((editingServer && editingServer.protocols) || []).forEach(p => { declared[p.path] = p.state === true; });
+  const out = [];
+  [['/v1/chat/completions', 'server-proto-chat'], ['/v1/messages', 'server-proto-messages'],
+   ['/v1/responses', 'server-proto-responses'], ['/v1/completions', 'server-proto-completions']]
+    .forEach(pair => {
+      if (document.getElementById(pair[1]).checked) out.push({path: pair[0], state: declared[pair[0]] === true});
+    });
+  return out;
+}
+function setServerProtocols(protocols) {
+  const on = protocols || [];
+  const has = p => on.some(x => x.path === p);
+  document.getElementById('server-proto-chat').checked = has('/v1/chat/completions');
+  document.getElementById('server-proto-messages').checked = has('/v1/messages');
+  document.getElementById('server-proto-responses').checked = has('/v1/responses');
+  document.getElementById('server-proto-completions').checked = has('/v1/completions');
 }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
