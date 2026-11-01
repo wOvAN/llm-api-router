@@ -935,6 +935,9 @@ const loopDetectionWindow = 20 // number of recent SSE contents to track
 type loopDetector struct {
 	http.ResponseWriter
 	ctx context.Context
+	// anthropic is the CLIENT's dialect (path-keyed, exactly as sendMidStreamError
+	// is): the loop frame it authors must be readable by that client's SDK.
+	anthropic bool
 	// Ring buffer of recent SSE text contents
 	recent        []string
 	index         int
@@ -944,10 +947,11 @@ type loopDetector struct {
 	capturedModel string // backend model name extracted from raw response
 }
 
-func newLoopDetector(w http.ResponseWriter, ctx context.Context) *loopDetector {
+func newLoopDetector(w http.ResponseWriter, ctx context.Context, anthropic bool) *loopDetector {
 	return &loopDetector{
 		ResponseWriter: w,
 		ctx:            ctx,
+		anthropic:      anthropic,
 		recent:         make([]string, loopDetectionWindow),
 	}
 }
@@ -1019,9 +1023,18 @@ func (d *loopDetector) allRecentIdentical() bool {
 
 func (d *loopDetector) sendLoopError() error {
 	// Write through the underlying writer, not d.Write: the detected guard must
-	// not swallow the error frame we are sending to the client.
-	errJSON := `{"choices":[{"finish_reason":"error","delta":{"content":"Generation stopped: model appears to be stuck in a loop."}}]}`
-	event := []byte("data: " + errJSON + "\n\n")
+	// not swallow the error frame we are sending to the client. The frame is a
+	// control event, so it goes out in the CLIENT's dialect, for the reason
+	// spelled out on sendMidStreamError: an Anthropic SDK silently drops a bare
+	// data: frame, which would leave the client a truncated answer and no error.
+	var event string
+	if d.anthropic {
+		event = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\"," +
+			"\"message\":\"Generation stopped: model appears to be stuck in a loop.\"}}\n\n"
+	} else {
+		errJSON := `{"choices":[{"finish_reason":"error","delta":{"content":"Generation stopped: model appears to be stuck in a loop."}}]}`
+		event = "data: " + errJSON + "\n\n"
+	}
 
 	if !d.written {
 		d.written = true
@@ -1031,7 +1044,7 @@ func (d *loopDetector) sendLoopError() error {
 		d.WriteHeader(http.StatusInternalServerError)
 	}
 
-	_, err := d.ResponseWriter.Write(event)
+	_, err := d.ResponseWriter.Write([]byte(event))
 	if flusher, ok := d.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
@@ -1399,7 +1412,9 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	}
 
 	// Wrap with loop detector to catch backends that get stuck repeating content.
-	ld := newLoopDetector(rw, ctx)
+	// Its frame is authored in the client's dialect (the client's path, as for
+	// sendMidStreamError below — a converted attempt's upstream path is not it).
+	ld := newLoopDetector(rw, ctx, strings.Contains(req.URL.Path, "/messages"))
 
 	// Direct the request
 	//

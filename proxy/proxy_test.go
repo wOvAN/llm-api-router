@@ -944,7 +944,7 @@ func TestLoopDetectorNoLoop(t *testing.T) {
 	// Different content should not trigger loop detection
 	recorder := &testResponseWriter{header: make(http.Header)}
 	ctx := context.Background()
-	ld := newLoopDetector(recorder, ctx)
+	ld := newLoopDetector(recorder, ctx, false)
 
 	// Send 25 different contents
 	for i := range 25 {
@@ -964,7 +964,7 @@ func TestLoopDetectorDetectsLoop(t *testing.T) {
 	// Same content repeated should trigger loop detection
 	recorder := &testResponseWriter{header: make(http.Header)}
 	ctx := context.Background()
-	ld := newLoopDetector(recorder, ctx)
+	ld := newLoopDetector(recorder, ctx, false)
 
 	repeated := "data: {\"choices\":[{\"delta\":{\"content\":\" repeated \"}}]}\n"
 	for range loopDetectionWindow + 5 {
@@ -984,7 +984,7 @@ func TestLoopDetectorSendsErrorToClient(t *testing.T) {
 	// The loop error frame must actually reach the client. Regression: the
 	// detected-guard in Write used to swallow the frame sent by sendLoopError.
 	recorder := &testResponseWriter{header: make(http.Header)}
-	ld := newLoopDetector(recorder, context.Background())
+	ld := newLoopDetector(recorder, context.Background(), false)
 
 	repeated := "data: {\"choices\":[{\"delta\":{\"content\":\"echo \"}}]}\n"
 	for range loopDetectionWindow + 1 {
@@ -1031,11 +1031,46 @@ func TestStreamProxyLoopReturnsMidStreamError(t *testing.T) {
 	}
 }
 
-func TestLoopDetectorMixedContent(t *testing.T) {
-	// Mix of different content should not trigger detection
+// The loop frame is a control event, so it belongs to the CLIENT's dialect: an
+// Anthropic SDK dispatches only frames carrying a recognized event: type and
+// silently drops a bare data: chunk, which would leave it a truncated answer with
+// no error — the reason sendMidStreamError is protocol-specific, and the loop
+// detector is the proxy's other author of control frames.
+func TestStreamProxyLoopFrameInClientDialect(t *testing.T) {
+	run := func(path string) string {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			chunk := "data: {\"choices\":[{\"delta\":{\"content\":\"same \"}}]}\n\n"
+			for range loopDetectionWindow + 10 {
+				if _, err := w.Write([]byte(chunk)); err != nil {
+					return
+				}
+			}
+		}))
+		defer backend.Close()
+
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"m"}`))
+		w := httptest.NewRecorder()
+		_, _ = StreamProxy(req.Context(), backend.URL, "key", req, w, "m", "m", nil, false, nil)
+		return w.Body.String()
+	}
+
+	openai := run("/v1/chat/completions")
+	if !strings.Contains(openai, `"finish_reason":"error"`) {
+		t.Fatalf("an OpenAI client must get the data:-framed error chunk: %s", openai)
+	}
+	anthropic := run("/v1/messages")
+	if !strings.HasPrefix(anthropic, "event: error\n") ||
+		!strings.Contains(anthropic, `"type":"error","error":{"type":"api_error"`) {
+		t.Fatalf("an Anthropic SDK drops a bare data: frame, so the loop must arrive as event: error:\n%s", anthropic)
+	}
+}
+
+func TestLoopDetectorMixedContent(t *testing.T) { // Mix of different content should not trigger detection
 	recorder := &testResponseWriter{header: make(http.Header)}
 	ctx := context.Background()
-	ld := newLoopDetector(recorder, ctx)
+	ld := newLoopDetector(recorder, ctx, false)
 
 	// Send varied content
 	for i := range loopDetectionWindow + 10 {

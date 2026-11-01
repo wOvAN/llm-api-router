@@ -318,8 +318,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			break
 		}
 		// Assigned on every attempt so the recorded metric describes the attempt
-		// that served, never an earlier failed one.
+		// that served, never an earlier failed one. stripStream is declared here for
+		// the same reason: it is a per-attempt decision too (set in the injection
+		// block below), and a later attempt must never inherit an earlier one's.
 		meta.upstreamPath, meta.convert, meta.convertNotes, meta.translator = plan.Path, plan.Edge(), nil, nil
+		stripStream := false
 
 		rewrittenBody, err := rewriteAttemptBody(req, body, targetModel)
 		if err != nil {
@@ -352,20 +355,19 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			meta.convertNotes = append(notes, droppedKeys(body, converted)...)
 		}
 
-		// stream_options.include_usage is an OpenAI field: injected into the body
-		// in the dialect this attempt speaks, after any conversion. stripStream
-		// hides the injected usage chunk from the client (unless configured
-		// otherwise).
-		stripStream := false
+		// stream_options.include_usage is an OpenAI field: injected into the body in
+		// the dialect this attempt speaks, after any conversion. stripStream hides
+		// the injected usage chunk from the client (unless configured otherwise) —
+		// except on a converted attempt, where the emitter IS the filter and has to
+		// SEE the chunk: a chat backend reports its prompt tokens only there, and the
+		// Anthropic events must carry them. A frame with no choices makes the emitter
+		// emit nothing, so the client still never sees it. The gate reads this
+		// attempt's plan, never the request-scoped copy.
 		if plan.Dialect == convert.Chat && strings.Contains(plan.Path, "/chat/completions") {
 			var injected bool
 			rewrittenBody, injected = proxy.EnsureStreamUsage(rewrittenBody,
 				r.store.GetSettings().AlwaysIncludeStreamUsage)
-			// On a converted attempt the emitter is the filter, and it has to SEE
-			// the chunk: a chat backend reports its prompt tokens only there, and
-			// the Anthropic events must carry them. A frame with no choices makes
-			// the emitter emit nothing, so the client still never sees it.
-			stripStream = injected && meta.convert == ""
+			stripStream = injected && plan.Edge() == ""
 		}
 
 		// TPM pre-call reservation: hold the declared output budget so

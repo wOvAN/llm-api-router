@@ -53,6 +53,7 @@ type chatToMessages struct {
 	inputTok   int // -1 until a chunk reports usage
 	outputToks int
 	started    bool
+	failed     bool // an upstream error frame ended the message
 }
 
 // toolBlock is one open tool_use block, keyed by the Chat Completions
@@ -73,15 +74,32 @@ func (c *chatToMessages) WriteFrame(frame []byte) [][]byte {
 	c.buf = append(c.buf, frame...)
 	out := c.out[:0]
 	for {
-		i := bytes.Index(c.buf, []byte("\n\n"))
+		i, n := frameEnd(c.buf)
 		if i < 0 {
 			break
 		}
 		out = append(out, c.handle(c.buf[:i])...)
-		c.buf = c.buf[i+2:]
+		c.buf = c.buf[i+n:]
 	}
 	c.out = out
 	return out
+}
+
+// frameEnd returns the index and length of the first SSE frame terminator in b.
+// The relay the emitter is fed by frames on all three of these (and hands the
+// terminator over inside the frame), so a scanner that knows only "\n\n" would
+// buffer a CRLF-framed backend's whole answer and dump it native at stream end.
+func frameEnd(b []byte) (int, int) {
+	if i := bytes.Index(b, []byte("\r\n\r\n")); i >= 0 {
+		return i, 4
+	}
+	if i := bytes.Index(b, []byte("\n\n")); i >= 0 {
+		return i, 2
+	}
+	if i := bytes.Index(b, []byte("\r\r")); i >= 0 {
+		return i, 2
+	}
+	return -1, 0
 }
 
 func (c *chatToMessages) handle(frame []byte) [][]byte {
@@ -97,6 +115,30 @@ func (c *chatToMessages) handle(frame []byte) [][]byte {
 	if bytes.Equal(data, []byte("[DONE]")) {
 		return nil
 	}
+	// A frame the emitter cannot read is not ours to translate: an upstream author's
+	// Anthropic frame, a keep-alive object. Swallowing one would leave the client a
+	// truncated message and no error, so it goes out as it arrived (re-terminated,
+	// because the frame arrives without its blank line).
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(data, &keys) != nil {
+		return reframe(frame)
+	}
+	if c.failed {
+		return nil // an error event is terminal; the rest of the stream is silence
+	}
+	if _, ok := keys["error"]; ok {
+		// A backend's in-stream `error` object is valid JSON with no chunk content,
+		// so it is the frame a parse-only test would forward raw and a naive
+		// classifier would drop. It is the client's dialect's error event, and it
+		// ends the message: no stream-end envelope may follow it.
+		if b, _, err := chatErrorToMessages(data); err == nil {
+			c.failed = true
+			return [][]byte{append(append([]byte("event: error\ndata: "), b...), '\n', '\n')}
+		}
+	}
+	if !isChunkShape(keys) {
+		return reframe(frame)
+	}
 	var chunk struct {
 		ID      string          `json:"id"`
 		Model   string          `json:"model"`
@@ -104,9 +146,7 @@ func (c *chatToMessages) handle(frame []byte) [][]byte {
 		Usage   *cUsage         `json:"usage"`
 	}
 	if json.Unmarshal(data, &chunk) != nil {
-		// Not a Chat Completions chunk (an upstream error frame, say): pass it
-		// through untouched — it is already in the client's dialect.
-		return [][]byte{append(append([]byte{}, frame...), '\n', '\n')}
+		return reframe(frame)
 	}
 	var frames [][]byte
 	if chunk.ID != "" {
@@ -139,6 +179,25 @@ func (c *chatToMessages) handle(frame []byte) [][]byte {
 	// A chunk that carried nothing (a role-only delta, a bare usage chunk) opened no
 	// block: emit nothing rather than an empty Anthropic event.
 	return frames
+}
+
+// reframe re-terminates a frame the emitter forwards untouched (it arrives without
+// its blank line, and the client's parser needs one).
+func reframe(frame []byte) [][]byte {
+	return [][]byte{append(append([]byte{}, frame...), '\n', '\n')}
+}
+
+// isChunkShape reports whether a JSON object carries anything a Chat Completions
+// chunk carries. An object with none of these keys is not a chunk — an
+// Anthropic-shaped frame authored upstream or by the proxy, a keep-alive object —
+// and forwarding it whole is the fail-open answer.
+func isChunkShape(o map[string]json.RawMessage) bool {
+	for _, k := range [...]string{"choices", "id", "model", "usage"} {
+		if _, ok := o[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 type cStreamChoice struct {
@@ -199,7 +258,9 @@ func (c *chatToMessages) text(s, kind string) [][]byte {
 	}
 	var out [][]byte
 	if c.kind != kind {
-		out = append(out, c.close()...)
+		// The prose block changes; a tool call that is still streaming keeps its
+		// block (closing it here would split its arguments across two blocks).
+		out = append(out, c.closeText()...)
 		c.kind, c.open = kind, c.next
 		c.next++
 		out = append(out, frame("content_block_start", map[string]any{"type": "content_block_start",
@@ -335,9 +396,10 @@ func (c *chatToMessages) FinishFrames() [][]byte {
 		out = append(out, c.handle(c.buf)...)
 		c.buf = nil
 	}
-	if !c.started {
-		// A stream that never opened a message gets no Anthropic envelope, but
-		// whatever the tail frame was (a passthrough frame) is not ours to keep.
+	if !c.started || c.failed {
+		// A stream that never opened a message gets no Anthropic envelope, and one
+		// that ended in an upstream error frame gets no normal close — but a tail
+		// frame the relay handed over is not ours to keep in either case.
 		c.out = out
 		return out
 	}

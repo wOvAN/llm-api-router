@@ -202,6 +202,127 @@ func TestChatToMessagesStreamParallelToolCalls(t *testing.T) {
 	}
 }
 
+// A backend can answer 200 and then put its OWN error object in the stream
+// (vLLM/llama.cpp do it, and a proxy in front of the model does it): the payload is
+// valid JSON, so an emitter that only forwards what fails to PARSE swallows it and
+// the client gets a truncated answer closed as a normal end_turn, with no error at
+// all. It is foreign content in the client's stream, so it goes out as Anthropic's
+// error event — and it is terminal, so the normal close must not follow it.
+func TestChatToMessagesStreamForwardsAnUpstreamErrorChunk(t *testing.T) {
+	run := func(prefix string) string {
+		s := NewChatToMessages()
+		var out strings.Builder
+		if prefix != "" {
+			for _, f := range s.WriteFrame([]byte("data: " + prefix + "\n\n")) {
+				out.Write(f)
+			}
+		}
+		for _, f := range s.WriteFrame([]byte("data: {\"error\":{\"type\":\"server_error\"," +
+			"\"message\":\"worker died\"}}\n\n")) {
+			out.Write(f)
+		}
+		for _, f := range s.FinishFrames() {
+			out.Write(f)
+		}
+		return out.String()
+	}
+
+	for _, tc := range []struct{ name, prefix string }{
+		{"after a delta", `{"choices":[{"index":0,"delta":{"content":"par"}}]}`},
+		{"as the first frame", ``},
+	} {
+		got := run(tc.prefix)
+		i := strings.Index(got, "event: error")
+		if i < 0 {
+			t.Fatalf("%s: the upstream error frame was swallowed:\n%s", tc.name, got)
+		}
+		if !strings.Contains(got[i:], `"type":"error"`) ||
+			!strings.Contains(got[i:], `"type":"server_error"`) ||
+			!strings.Contains(got[i:], `"message":"worker died"`) {
+			t.Fatalf("%s: the upstream error is not in the client's spelling:\n%s", tc.name, got)
+		}
+		if strings.Contains(got[i:], "message_stop") || strings.Contains(got[i:], `"text":"par"`) {
+			t.Fatalf("%s: an error frame is terminal, nothing may follow it:\n%s", tc.name, got[i:])
+		}
+	}
+}
+
+// A JSON object with none of a Chat Completions chunk's keys is not ours to
+// translate — an upstream-authored Anthropic frame, a keep-alive object — so it
+// goes through untouched instead of being parsed into nothing and emitted as
+// nothing.
+func TestChatToMessagesStreamForwardsAFrameThatIsNotAChunk(t *testing.T) {
+	s := NewChatToMessages()
+	got := s.WriteFrame([]byte("data: {\"type\":\"content_block_delta\",\"index\":0}\n\n"))
+	if len(got) != 1 || !strings.Contains(string(got[0]), `"type":"content_block_delta"`) {
+		t.Fatalf("a foreign JSON frame was swallowed: %q", got)
+	}
+}
+
+// The relay frames on "\n\n", "\r\n\r\n" and "\r\r" and hands the terminator to the
+// translator inside the frame, and it flushes per frame so the client sees events as
+// they are produced. A scanner that knows only "\n\n" buffers a CRLF-framed
+// backend's whole answer and emits it once at stream end — right answer, wrong
+// timing: every token of the generation arrives in one lump after it finished.
+func TestChatToMessagesStreamAcceptsCRLFFraming(t *testing.T) {
+	for _, sep := range []string{"\r\n\r\n", "\r\r"} {
+		s := NewChatToMessages()
+		first := s.WriteFrame([]byte("data: {\"id\":\"c1\",\"choices\":" +
+			"[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}" + sep))
+		if len(first) == 0 {
+			t.Fatalf("frames framed with %q were buffered instead of emitted", sep)
+		}
+		var out strings.Builder
+		for _, f := range first {
+			out.Write(f)
+		}
+		for _, f := range s.WriteFrame([]byte("data: {\"id\":\"c1\",\"choices\":" +
+			"[{\"index\":0,\"delta\":{\"content\":\" there\"},\"finish_reason\":\"stop\"}]}" + sep)) {
+			out.Write(f)
+		}
+		for _, f := range s.FinishFrames() {
+			out.Write(f)
+		}
+		got := out.String()
+		if !strings.Contains(got, "event: message_start") ||
+			!strings.Contains(got, `"text":"Hi"`) || !strings.Contains(got, `"text":" there"`) {
+			t.Fatalf("frames framed with %q were not translated:\n%s", sep, got)
+		}
+		if strings.Contains(got, "data: {\"id\"") {
+			t.Fatalf("native frames forwarded to the client:\n%s", got)
+		}
+	}
+}
+
+// llama.cpp and friends stream `content` in the same delta as `tool_calls`, so a
+// text delta can land between two argument fragments of a call that is still
+// streaming. It closes the prose block, not the call's block: closing every open
+// block would end the tool_use block mid-arguments and re-open it under a
+// synthetic id, splitting the JSON the client has to parse.
+func TestChatToMessagesStreamContentBetweenToolArgumentsKeepsTheBlock(t *testing.T) {
+	out := emit(NewChatToMessages(),
+		`{"choices":[{"index":0,"delta":{"content":"Sure"}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1",`+
+			`"function":{"name":"fetch","arguments":"{\"u\":"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"content":" now"}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,`+
+			`"function":{"arguments":"1}"}}]},"finish_reason":"tool_calls"}]}`)
+
+	if got := strings.Count(out, `"type":"tool_use"`); got != 1 {
+		t.Fatalf("the call was split across %d tool_use blocks:\n%s", got, out)
+	}
+	if !strings.Contains(out, `"id":"call_1","input":{},"name":"fetch"`) {
+		t.Fatalf("the call's id/name were lost:\n%s", out)
+	}
+	// Prose and arguments each stayed in their own block, in order.
+	if !strings.Contains(out, `"text":"Sure"`) || !strings.Contains(out, `"text":" now"`) {
+		t.Fatalf("the prose was lost:\n%s", out)
+	}
+	if strings.Count(out, `"partial_json"`) != 2 {
+		t.Fatalf("argument fragments did not both reach the call's block:\n%s", out)
+	}
+}
+
 func TestNewStreamIdentityArmsNothing(t *testing.T) {
 	if s, ok := NewStream(Plan{From: Chat, Dialect: Chat}); ok || s != nil {
 		t.Fatal("an identity plan must arm no translator (hot path pays nothing)")
