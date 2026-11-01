@@ -276,6 +276,10 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
 <script>
 const API = '/admin/api';
 
+// The last server object the edit form was opened with, so a save keeps the
+// fields the form does not render (`protocols`, and whatever comes after it).
+let editingServer = null;
+
 // --- Version ---
 async function loadVersion() {
   try {
@@ -417,6 +421,7 @@ async function loadServers() {
 }
 
 function openServerModal(id) {
+  if (!id) editingServer = null;
   document.getElementById('server-edit-id').value = id || '';
   document.getElementById('server-modal-title').textContent = id ? 'Edit Server' : 'Add Server';
   document.getElementById('server-id').value = '';
@@ -478,7 +483,9 @@ async function testServerConnection() {
 
 async function saveServer() {
   const id = document.getElementById('server-edit-id').value;
-  const data = {
+  // Merge onto the fetched server: the form does not render every field
+  // (`protocols`), and a rebuild from the inputs alone would erase them.
+  const data = Object.assign({}, editingServer, {
     id: document.getElementById('server-id').value || id,
     name: document.getElementById('server-name').value,
     url: document.getElementById('server-url').value,
@@ -491,7 +498,7 @@ async function saveServer() {
     cooldown_time: parseInt(document.getElementById('server-cooldown').value, 10) || 0,
     tpm_limit: parseInt(document.getElementById('server-tpm').value, 10) || 0,
     rpm_limit: parseInt(document.getElementById('server-rpm').value, 10) || 0,
-  };
+  });
   const method = id ? 'PUT' : 'POST';
   const url = id ? API + '/servers/' + encodeURIComponent(data.id) : API + '/servers';
   const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
@@ -509,6 +516,7 @@ async function editServer(id) {
   const servers = await res.json();
   const s = servers.find(s => s.id === id);
   if (!s) return;
+  editingServer = s;
   openServerModal(id);
   document.getElementById('server-id').value = s.id;
   document.getElementById('server-name').value = s.name;
@@ -1442,15 +1450,23 @@ async function loadMetrics() {
     const klass = r.class
       ? `<br><span class="tag" style="background:#1a3a3a;color:#39c5cf" title="${escAttr((r.features || []).join(', '))}">${esc(r.class)}</span>`
       : '';
+    // Protocol conversion: what the backend was actually asked for, and what the
+    // translation had to drop along the way.
+    let convertNote = '';
+    if (r.convert) {
+      const parts = ['backend ' + (r.upstream_endpoint || '')];
+      (r.convert_notes || []).forEach(n => parts.push(n));
+      convertNote = `<br><span class="tag" style="background:#3a2a1a;color:#ffa657" title="${escAttr(parts.join(' · '))}">${esc(r.convert)}</span>`;
+    }
     const reasoning = r.reasoning_tokens || '-';
     const cacheNew = r.cache_creation_tokens || '-';
     const apiType = r.api_type === 'anthropic'
       ? '<span class="tag" style="background:#2d1b4e;color:#d2a8ff">anthropic</span>'
       : '<span class="tag" style="background:#1a3a2a;color:#3fb950">openai</span>';
     const apiEndpoint = r.api_endpoint || '';
-    const apiCell = apiEndpoint
+    const apiCell = (apiEndpoint
       ? `${apiType}<br><span style="font-size:0.75rem;color:#8b949e">${esc(apiEndpoint)}</span>`
-      : apiType;
+      : apiType) + convertNote;
     // Show native timings if available (llama-server `timings` or vLLM `metrics`)
     let nativeNote = '';
     const nativeParts = [];

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -132,5 +133,37 @@ func TestConvertPreviewJevRuleIsRefused(t *testing.T) {
 	msg, _ := out["error"].(string)
 	if !strings.Contains(msg, "jev") || strings.Contains(msg, "not found") {
 		t.Fatalf("refusal must name the reason: %v", out["error"])
+	}
+}
+
+// The GUI is embedded HTML: the only cheap assertion is that the fields the tag
+// renders are read. A dropped field shows up as a silently missing tag.
+func TestGUIShowsConversion(t *testing.T) {
+	b, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read gui: %v", err)
+	}
+	src := string(b)
+	for _, want := range []string{"r.convert", "r.upstream_endpoint", "r.convert_notes"} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("gui never reads %q", want)
+		}
+	}
+}
+
+// The server form builds its PUT payload field by field, so every field it does
+// not render is erased on save: declaring protocols in config.json and then
+// renaming the server in the GUI silently reverts it to undeclared (passthrough).
+// The fix is a merge, so the fields the form does not manage ride along.
+func TestGUIServerFormPreservesUnmanagedFields(t *testing.T) {
+	b, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read gui: %v", err)
+	}
+	src := string(b)
+	for _, want := range []string{"editingServer = s", "editingServer = null", "Object.assign({}, editingServer"} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("gui server form drops unmanaged fields (missing %q)", want)
+		}
 	}
 }
