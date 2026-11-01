@@ -49,8 +49,11 @@ func postPreview(t *testing.T, h *Handler, body string) map[string]any {
 
 // The preview names the endpoint and dialect a request would be planned onto.
 func TestConvertPreviewNamesDialectAndEndpoint(t *testing.T) {
+	// The fixture deliberately omits max_tokens (Anthropic requires it, the
+	// router injects its configured default): the preview must apply the same
+	// defaults as a real request and report what it injected.
 	out := postPreview(t, newPreviewHandler(t, ""),
-		`{"model":"claude","path":"/v1/messages","body":{"model":"claude","max_tokens":10,`+
+		`{"model":"claude","path":"/v1/messages","body":{"model":"claude",`+
 			`"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}}`)
 	if out["upstream_path"] != "/v1/chat/completions" {
 		t.Fatalf("upstream_path = %v, want /v1/chat/completions", out["upstream_path"])
@@ -58,10 +61,35 @@ func TestConvertPreviewNamesDialectAndEndpoint(t *testing.T) {
 	if out["convert"] != "messages>chat" {
 		t.Fatalf("convert = %v, want messages>chat", out["convert"])
 	}
-	// The body transform lands in Task 6; until then the plan is reported and the
-	// refusal explains the missing spoke.
-	if out["request"] == nil && out["code"] == nil {
-		t.Fatalf("preview reported neither a body nor a refusal: %v", out)
+	reqMap, ok := out["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("preview returned no translated body: %v", out)
+	}
+	if reqMap["max_tokens"] != float64(4096) {
+		t.Fatalf("preview must apply the same defaults as the router: %v", out["request"])
+	}
+	notes, _ := out["notes"].([]any)
+	if len(notes) != 1 {
+		t.Fatalf("the injected budget must be reported: %v", out["notes"])
+	}
+}
+
+// convert: "off" on a chat-declared backend is passthrough: the preview answers
+// 200, echoes the client's body back untouched, and names no conversion edge.
+func TestConvertPreviewIdentityEchoesBody(t *testing.T) {
+	body := `{"model":"claude","messages":[{"role":"user","content":"hi"}]}`
+	out := postPreview(t, newPreviewHandler(t, "off"),
+		`{"model":"claude","path":"/v1/chat/completions","body":`+body+`}`)
+	reqMap, ok := out["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("identity preview must echo the body: %v", out)
+	}
+	msgs, _ := reqMap["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("identity preview must not touch the body: %v", out["request"])
+	}
+	if _, has := out["convert"]; has {
+		t.Fatalf("an identity plan must not name a conversion: %v", out)
 	}
 }
 
