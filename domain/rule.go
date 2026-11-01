@@ -26,6 +26,10 @@ type RoutingRule struct {
 	Router string `json:"router,omitempty"`
 	// Jev is the auto-routing config, used when Router == "jev".
 	Jev *JevRouter `json:"jev,omitempty"`
+	// Convert overrides protocol conversion on this rule's primary attempt:
+	// ""/"auto" (decide by the target's declared protocols), "off" (never
+	// convert), or an explicit "messages>chat".
+	Convert string `json:"convert,omitempty"`
 }
 
 // IsJev reports whether the rule routes via a decision model.
@@ -93,6 +97,10 @@ type JevCandidate struct {
 	Vision *bool `json:"vision,omitempty"`
 	// Enabled toggles the candidate. nil = enabled.
 	Enabled *bool `json:"enabled,omitempty"`
+	// Convert overrides protocol conversion on this candidate: ""/"auto" (decide by
+	// the target's declared protocols), "off" (never convert), or an explicit
+	// "messages>chat".
+	Convert string `json:"convert,omitempty"`
 }
 
 // IsEnabled reports whether the candidate is in the pool.

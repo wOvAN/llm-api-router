@@ -24,6 +24,7 @@
       "anthropic_url": "localhost:8080/anthropic/v1",
       "api_key": "",
       "api_types": ["openai", "anthropic"],
+      "protocols": [{ "path": "/v1/chat/completions" }, { "path": "/v1/messages" }],
       "cooldown_time": 120,
       "tpm_limit": 100000,
       "rpm_limit": 60
@@ -144,6 +145,12 @@
       "seconds": 300,
       "models": [],
       "servers": []
+    },
+    "convert": {
+      "max_tokens_default": 4096,
+      "drop_params": false,
+      "probe": false,
+      "anthropic_version": "2023-06-01"
     }
   }
 }

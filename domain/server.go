@@ -33,6 +33,11 @@ type Server struct {
 	ProxyEnabled *bool     `json:"proxy_enabled,omitempty"`
 	APIKey       string    `json:"api_key"`
 	APITypes     []APIType `json:"api_types"`
+	// Protocols declares the endpoints this backend natively serves, which is what
+	// decides whether a request has to be converted (see convert.Decide). Empty
+	// means "undeclared": the router keeps its passthrough behavior, so a config
+	// written before this field exists never changes behavior.
+	Protocols []ServerProtocol `json:"protocols,omitempty"`
 	// CooldownTime overrides the rate-limiter cooldown duration for this server
 	// (seconds). 0 = use the global default.
 	CooldownTime int64 `json:"cooldown_time,omitempty"`
@@ -87,6 +92,10 @@ type FallbackEntry struct {
 	// Priority orders fallbacks: lower number is tried first. 0 = unset, which
 	// sorts after all prioritized fallbacks (original list order kept among ties).
 	Priority int `json:"priority,omitempty"`
+	// Convert overrides protocol conversion on this fallback: ""/"auto" (decide by
+	// the target's declared protocols), "off" (never convert), or an explicit
+	// "messages>chat".
+	Convert string `json:"convert,omitempty"`
 }
 
 // IsEnabled reports whether the fallback is active. A nil Enabled means enabled.

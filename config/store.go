@@ -124,6 +124,8 @@ func (s *Store) GetConfig() *domain.Config {
 		srvCopy := *srv
 		srvCopy.APITypes = make([]domain.APIType, len(srv.APITypes))
 		copy(srvCopy.APITypes, srv.APITypes)
+		srvCopy.Protocols = make([]domain.ServerProtocol, len(srv.Protocols))
+		copy(srvCopy.Protocols, srv.Protocols)
 		cfg.Servers[id] = &srvCopy
 	}
 
@@ -193,8 +195,11 @@ func (s *Store) AddServer(srv *domain.Server) error {
 	}
 	apis := make([]domain.APIType, len(srv.APITypes))
 	copy(apis, srv.APITypes)
+	protos := make([]domain.ServerProtocol, len(srv.Protocols))
+	copy(protos, srv.Protocols)
 	added := *srv
 	added.APITypes = apis
+	added.Protocols = protos
 	s.config.Servers[srv.ID] = &added
 	return s.save()
 }
@@ -209,9 +214,12 @@ func (s *Store) UpdateServer(id string, srv *domain.Server) error {
 	}
 	apis := make([]domain.APIType, len(srv.APITypes))
 	copy(apis, srv.APITypes)
+	protos := make([]domain.ServerProtocol, len(srv.Protocols))
+	copy(protos, srv.Protocols)
 	updated := *srv
 	updated.ID = id
 	updated.APITypes = apis
+	updated.Protocols = protos
 	s.config.Servers[id] = &updated
 	return s.save()
 }
@@ -477,6 +485,7 @@ func cloneRule(rule *domain.RoutingRule) *domain.RoutingRule {
 		Enabled:       rule.Enabled,
 		ContextWindow: rule.ContextWindow,
 		Router:        rule.Router,
+		Convert:       rule.Convert,
 	}
 	if rule.Jev != nil {
 		jev := *rule.Jev

@@ -26,6 +26,8 @@ type Settings struct {
 	// Trace are the startup defaults for the on-demand request trace
 	// (trace.Store holds the live window; it is never persisted).
 	Trace TraceSettings `json:"trace,omitempty"`
+
+	Convert ConvertSettings `json:"convert,omitempty"`
 }
 
 // TraceSettings are the startup defaults for the on-demand request trace.
@@ -37,4 +39,33 @@ type TraceSettings struct {
 	Seconds int      `json:"seconds,omitempty"`
 	Models  []string `json:"models,omitempty"`
 	Servers []string `json:"servers,omitempty"`
+}
+
+// ConvertSettings are the global conversion knobs. MaxTokensDefault is the output
+// budget injected into a converted Anthropic request whose client sent none
+// (Anthropic requires the field, OpenAI clients do not send it); the default 4096
+// is LiteLLM's DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS. DropParams turns the default
+// refusal (a 400 naming the field) into a silent drop recorded in
+// RequestMetric.ConvertNotes. Probe is reserved for the capability probe (out of
+// scope here); AnthropicVersion is the anthropic_version a synthesized Anthropic
+// request carries (phase 3).
+type ConvertSettings struct {
+	MaxTokensDefault int    `json:"max_tokens_default,omitempty"`
+	DropParams       bool   `json:"drop_params,omitempty"`
+	Probe            bool   `json:"probe,omitempty"`
+	AnthropicVersion string `json:"anthropic_version,omitempty"`
+}
+
+func (c ConvertSettings) MaxTokens() int {
+	if c.MaxTokensDefault <= 0 {
+		return 4096
+	}
+	return c.MaxTokensDefault
+}
+
+func (c ConvertSettings) Version() string {
+	if c.AnthropicVersion == "" {
+		return "2023-06-01"
+	}
+	return c.AnthropicVersion
 }

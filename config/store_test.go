@@ -744,3 +744,73 @@ func TestSettingsTraceRoundTrips(t *testing.T) {
 		t.Errorf("after Save trace settings = %+v, want them persisted", got)
 	}
 }
+
+func TestServerProtocolsAndRuleConvertSurviveClone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s.AddServer(&domain.Server{ID: "s1", Name: "n", URL: "http://h:8080/v1",
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	got, ok := s.GetServer("s1")
+	if !ok || len(got.Protocols) != 1 || got.Protocols[0].Path != "/v1/chat/completions" {
+		t.Fatalf("AddServer dropped Protocols: %+v", got)
+	}
+	// The stored slice must be a copy: AddServer/UpdateServer take the caller's
+	// pointer, so mutating the caller's slice must not reach the store.
+	src := []domain.ServerProtocol{{Path: "/v1/messages", State: true}}
+	if err := s.UpdateServer("s1", &domain.Server{ID: "s1", Name: "n", URL: "http://h:8080/v1",
+		Protocols: src}); err != nil {
+		t.Fatalf("UpdateServer: %v", err)
+	}
+	src[0].Path = "/tampered"
+	got, _ = s.GetServer("s1")
+	if got.Protocols[0].Path != "/v1/messages" {
+		t.Fatalf("UpdateServer aliased the caller's slice: %+v", got.Protocols)
+	}
+
+	if err := s.AddRule(&domain.RoutingRule{IncomingModels: []string{"m"}, ServerID: "s1",
+		Convert: "messages>chat", Enabled: true,
+		Fallbacks: []domain.FallbackEntry{{ServerID: "s2", Convert: "off"}}}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	r, ok := s.GetRuleByModel("m")
+	if !ok || r.Convert != "messages>chat" {
+		t.Fatalf("cloneRule dropped rule Convert: %+v", r)
+	}
+	if len(r.Fallbacks) != 1 || r.Fallbacks[0].Convert != "off" {
+		t.Fatalf("cloneRule dropped fallback Convert: %+v", r.Fallbacks)
+	}
+	// The new fields must survive the round trip through the config file.
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var persisted domain.Config
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("config is not valid JSON: %v", err)
+	}
+	if p := persisted.Servers["s1"]; p == nil || len(p.Protocols) != 1 {
+		t.Fatalf("Protocols not persisted: %s", raw)
+	}
+}
+
+func TestConvertSettingsDefaults(t *testing.T) {
+	var c domain.ConvertSettings
+	if c.MaxTokens() != 4096 {
+		t.Fatalf("MaxTokens() = %d, want the 4096 default", c.MaxTokens())
+	}
+	if c.Version() != "2023-06-01" {
+		t.Fatalf("Version() = %q, want the anthropic default", c.Version())
+	}
+	c = domain.ConvertSettings{MaxTokensDefault: 1024, AnthropicVersion: "2024-10-22"}
+	if c.MaxTokens() != 1024 || c.Version() != "2024-10-22" {
+		t.Fatalf("explicit values must win: %+v", c)
+	}
+}
