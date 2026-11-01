@@ -10,6 +10,14 @@ const (
 	APITypeAnthropic APIType = "anthropic"
 )
 
+// ServerProtocol declares one endpoint a backend serves. State records whether the
+// backend keeps server-side conversation state (`previous_response_id`), which no
+// local engine does by default; the router never assumes it.
+type ServerProtocol struct {
+	Path  string `json:"path"`
+	State bool   `json:"state,omitempty"`
+}
+
 // Server defines an LLM inference backend.
 type Server struct {
 	ID           string `json:"id"`

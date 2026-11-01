@@ -1,0 +1,86 @@
+package convert
+
+import (
+	"fmt"
+	"strings"
+
+	"llm-api-router/domain"
+)
+
+// Plan is the per-attempt decision: which dialect and path this attempt speaks,
+// and which dialect it is translating from.
+type Plan struct {
+	From    Dialect
+	Dialect Dialect
+	Path    string
+	Forced  bool // `convert` named the edge explicitly
+}
+
+// Options are the conversion knobs (see domain.ConvertSettings). The router builds
+// them from settings once per request; AnthropicVersion is used by the inverse
+// spoke (phase 3).
+type Options struct {
+	MaxTokens        int
+	DropParams       bool
+	AnthropicVersion string
+}
+
+// Decide picks the upstream dialect for one attempt.
+//
+// A backend that declares no protocols keeps today's behavior exactly: the
+// client's own path, no translation. Otherwise the client's endpoint is looked up
+// in the declaration; a backend that does not serve it is planned onto the one
+// dialect the backend does serve, for the edges this build implements
+// (messages→chat). Anything else is a refusal, never a guess.
+//
+// forced is rule/fallback/candidate `convert`: "auto" (or "") decides by the
+// declaration, "off" forces passthrough, "messages>chat" names the edge.
+func Decide(client Dialect, path string, protocols []domain.ServerProtocol, forced string) (Plan, error) {
+	ident := Plan{From: client, Dialect: client, Path: path}
+	if forced == "off" || client == "" || path == "" {
+		return ident, nil
+	}
+	if forced != "" && forced != "auto" {
+		from, to, ok := strings.Cut(forced, ">")
+		if !ok || Dialect(from) != client {
+			return Plan{}, &Error{Code: CodeNoDialect, Msg: fmt.Sprintf(
+				"convert %q does not apply to a %s request", forced, client)}
+		}
+		if from == string(Messages) && to == string(Chat) {
+			return Plan{From: client, Dialect: Chat, Path: PathFor(Chat), Forced: true}, nil
+		}
+		return Plan{}, &Error{Code: CodeNoDialect, Msg: fmt.Sprintf(
+			"conversion %s is not supported", forced)}
+	}
+	if client == Legacy {
+		// /v1/completions wants a rendered prompt: the chat template lives in the
+		// backend's tokenizer, which the proxy does not have.
+		return Plan{}, &Error{Code: CodeNoDialect, Field: "path", Msg: "converting /v1/completions is not supported: the chat template is applied by the backend"}
+	}
+	if len(protocols) == 0 {
+		return ident, nil
+	}
+	for _, p := range protocols {
+		if p.Path == path {
+			return ident, nil
+		}
+	}
+	if client == Messages {
+		for _, p := range protocols {
+			if DialectForPath(p.Path) == Chat {
+				return Plan{From: client, Dialect: Chat, Path: p.Path}, nil
+			}
+		}
+	}
+	return Plan{}, &Error{Code: CodeNoDialect, Msg: fmt.Sprintf(
+		"backend serves %s, not %s and no conversion exists for it",
+		strings.Join(declaredPaths(protocols), ", "), path)}
+}
+
+func declaredPaths(protocols []domain.ServerProtocol) []string {
+	out := make([]string, 0, len(protocols))
+	for _, p := range protocols {
+		out = append(out, p.Path)
+	}
+	return out
+}
