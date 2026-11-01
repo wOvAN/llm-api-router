@@ -25,6 +25,22 @@ type Options struct {
 	AnthropicVersion string
 }
 
+// Edge names the conversion this plan performs, e.g. "messages>chat"; "" for an
+// identity (or dialectless) plan, which is what the report sites key on.
+func (p Plan) Edge() string {
+	if p.Dialect == p.From || p.From == "" {
+		return ""
+	}
+	return string(p.From) + ">" + string(p.Dialect)
+}
+
+// OptionsFrom builds the conversion knobs from the persisted settings. One
+// construction site so the router and the admin preview can never disagree
+// about the defaults.
+func OptionsFrom(s domain.ConvertSettings) Options {
+	return Options{MaxTokens: s.MaxTokens(), DropParams: s.DropParams, AnthropicVersion: s.Version()}
+}
+
 // Decide picks the upstream dialect for one attempt.
 //
 // A backend that declares no protocols keeps today's behavior exactly: the
@@ -99,6 +115,5 @@ func Request(p Plan, body []byte, o Options) ([]byte, []string, error) {
 	if p.From == Messages && p.Dialect == Chat {
 		return MessagesToChat(body, o)
 	}
-	return nil, nil, &Error{Code: CodeNoDialect, Msg: "conversion " + string(p.From) + ">" +
-		string(p.Dialect) + " is not supported"}
+	return nil, nil, &Error{Code: CodeNoDialect, Msg: "conversion " + p.Edge() + " is not supported"}
 }

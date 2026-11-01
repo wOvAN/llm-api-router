@@ -58,8 +58,8 @@ func convertPreviewFor(store *config.Store, model, path string, body json.RawMes
 		return map[string]any{"error": err.Error(), "code": codeOf(err)}, http.StatusOK
 	}
 	out := map[string]any{"from": client, "dialect": plan.Dialect, "upstream_path": plan.Path}
-	if plan.Dialect != plan.From && plan.From != "" {
-		out["convert"] = string(plan.From) + ">" + string(plan.Dialect)
+	if edge := plan.Edge(); edge != "" {
+		out["convert"] = edge
 	}
 	translated, notes, err := convert.Request(plan, body, convertOptions(store))
 	if err != nil {
@@ -73,12 +73,11 @@ func convertPreviewFor(store *config.Store, model, path string, body json.RawMes
 	return out, http.StatusOK
 }
 
-// convertOptions resolves the conversion knobs the same way the router does, so a
-// preview and a real request can never disagree about the defaults.
+// convertOptions resolves the conversion knobs from the single construction site
+// (convert.OptionsFrom), so a preview and a real request can never disagree
+// about the defaults.
 func convertOptions(store *config.Store) convert.Options {
-	cs := store.GetSettings().Convert
-	return convert.Options{MaxTokens: cs.MaxTokens(), DropParams: cs.DropParams,
-		AnthropicVersion: cs.Version()}
+	return convert.OptionsFrom(store.GetSettings().Convert)
 }
 
 func codeOf(err error) string {

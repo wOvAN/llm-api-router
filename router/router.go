@@ -316,10 +316,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		}
 		// Assigned on every attempt so the recorded metric describes the attempt
 		// that served, never an earlier failed one.
-		meta.upstreamPath, meta.convert, meta.convertNotes = plan.Path, "", nil
-		if plan.Dialect != plan.From && plan.From != "" {
-			meta.convert = string(plan.From) + ">" + string(plan.Dialect)
-		}
+		meta.upstreamPath, meta.convert, meta.convertNotes = plan.Path, plan.Edge(), nil
 
 		rewrittenBody, err := rewriteAttemptBody(req, body, targetModel)
 		if err != nil {
