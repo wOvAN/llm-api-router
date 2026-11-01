@@ -991,3 +991,117 @@ func boolInt(b bool) int {
 	}
 	return 0
 }
+
+// A jev pool may mix dialects: the candidate's own `convert` plans it, so one pool
+// can span an Anthropic-only and an OpenAI-only backend for one Anthropic client.
+// The candidate declares no protocols and carries the explicit edge, which is what
+// pins JevCandidate.Convert being read by `jevAttempts`.
+func TestHandleJevCandidateConverts(t *testing.T) {
+	decision := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"model":{"type":"choice","choice":"big","confidence":0.9}},` +
+			`"usage":{"input_tokens":5,"output_tokens":1}}`))
+	}))
+	defer decision.Close()
+	var gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"id":"c","model":"big","choices":[{"index":0,` +
+			`"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer backend.Close()
+
+	r, store, _, _ := newTestRouter(t)
+	servers := []*domain.Server{
+		{ID: "d", Name: "d", URL: decision.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}},
+		{ID: "b", Name: "b", URL: backend.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}},
+	}
+	for _, srv := range servers {
+		if err := store.AddServer(srv); err != nil {
+			t.Fatalf("AddServer %s: %v", srv.ID, err)
+		}
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"}, Enabled: true,
+		Router: domain.RouterJev, Jev: &domain.JevRouter{ServerID: "d", DefaultTier: 0,
+			Candidates: []domain.JevCandidate{{ServerID: "b", TargetModel: "big", Tier: 0,
+				Convert: "messages>chat"}}}}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Result().StatusCode, w.Body.String())
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("jev candidate path = %q, want the converted endpoint", gotPath)
+	}
+}
+
+// A refusal is per attempt, so a pool may contain a candidate that cannot serve
+// the client's dialect at all: it is skipped without being contacted, and the next
+// tier answers. (With `convert: off` the same candidate is passed through and
+// rides its own 404 to the client — off is today's behavior, not a refusal.)
+func TestHandleJevCandidateRefusalFallsToNextTier(t *testing.T) {
+	decision := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"model":{"type":"choice","choice":"weak","confidence":0.9}},` +
+			`"usage":{"input_tokens":5,"output_tokens":1}}`))
+	}))
+	defer decision.Close()
+	var weakHits, strongHits int
+	// The jev pool probes each candidate's /v1/models (capabilities cache): a
+	// capability probe is not a routed request, only a generation counts.
+	weak := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			weakHits++
+		}
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer weak.Close()
+	strong := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			strongHits++
+		}
+		_, _ = w.Write([]byte(`{"type":"message","role":"assistant","content":[],"model":"strong"}`))
+	}))
+	defer strong.Close()
+
+	r, store, _, _ := newTestRouter(t)
+	for _, srv := range []*domain.Server{
+		{ID: "d", Name: "d", URL: decision.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}},
+		{ID: "weak", Name: "weak", URL: weak.URL,
+			APITypes:  []domain.APIType{domain.APITypeOpenAI},
+			Protocols: []domain.ServerProtocol{{Path: "/v1/responses"}}},
+		{ID: "strong", Name: "strong", URL: strong.URL,
+			APITypes: []domain.APIType{domain.APITypeAnthropic}},
+	} {
+		if err := store.AddServer(srv); err != nil {
+			t.Fatalf("AddServer %s: %v", srv.ID, err)
+		}
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"}, Enabled: true,
+		Router: domain.RouterJev, Jev: &domain.JevRouter{ServerID: "d", DefaultTier: 0,
+			Candidates: []domain.JevCandidate{
+				{ServerID: "weak", TargetModel: "weak", Tier: 0},
+				{ServerID: "strong", TargetModel: "strong", Tier: 1},
+			}}}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Result().StatusCode, w.Body.String())
+	}
+	if weakHits != 0 {
+		t.Fatalf("the refusing candidate got %d requests, want 0", weakHits)
+	}
+	if strongHits != 1 {
+		t.Fatalf("the next tier must serve the request, strongHits=%d", strongHits)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"llm-api-router/config"
 	"llm-api-router/domain"
@@ -110,6 +111,164 @@ func TestHandleProtocolMismatchRefusesWithOur400(t *testing.T) {
 	rec := ms.Recent()
 	if len(rec) != 1 || rec[0].StatusCode != http.StatusBadRequest {
 		t.Fatalf("the refusal must be recorded: %+v", rec)
+	}
+}
+
+// The hole the feature exists for: a rule whose primary cannot serve the client's
+// dialect and whose fallback can. Before the converter the primary's 404 was
+// forwarded as-is (4xx is not an error), the fallback was never tried, and the
+// rule looked healthy.
+func TestHandleProtocolMismatchConvertsFallback(t *testing.T) {
+	var primaryHits int
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits++
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer primary.Close()
+	var fbPath string
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fbPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"id":"c","model":"claude","choices":[{"index":0,` +
+			`"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer fallback.Close()
+
+	r, store, ms, _ := newTestRouter(t)
+	if err := store.AddServer(&domain.Server{ID: "primary", Name: "primary", URL: primary.URL,
+		APITypes:  []domain.APIType{domain.APITypeOpenAI},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/responses"}}}); err != nil {
+		t.Fatalf("AddServer primary: %v", err)
+	}
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: fallback.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+		t.Fatalf("AddServer s1: %v", err)
+	}
+	// The fallback declares no protocols, so only its own `convert` can plan it
+	// onto chat — which is what pins FallbackEntry.Convert being read.
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"}, ServerID: "primary",
+		TargetModel: "claude", NumRetries: -1, Enabled: true,
+		Fallbacks: []domain.FallbackEntry{{ServerID: "s1", Convert: "messages>chat"}}}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Result().StatusCode, w.Body.String())
+	}
+	if primaryHits != 0 {
+		t.Fatalf("the refusing primary got %d requests, want 0", primaryHits)
+	}
+	if fbPath != "/v1/chat/completions" {
+		t.Fatalf("fallback path = %q", fbPath)
+	}
+	if h := w.Result().Header.Get("X-Router-Convert"); h != "messages>chat" {
+		t.Fatalf("X-Router-Convert = %q", h)
+	}
+	rec := ms.Recent()
+	if len(rec) != 1 || rec[0].ServerID != "s1" || rec[0].Convert != "messages>chat" {
+		t.Fatalf("the metric must describe the serving attempt: %+v", rec)
+	}
+}
+
+// A refusal is not a transport failure: no health mark (the server was never
+// contacted), no rate-limit failure, no quota charge. A rule with one bad
+// protocol declaration must not take a healthy backend out of rotation, and a
+// request that was never sent must not be metered as if it had been.
+func TestHandleRefusalLeavesHealthClean(t *testing.T) {
+	var hits int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	defer backend.Close()
+
+	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	health := config.NewHealthTracker(store, time.Hour)
+	rateLimit := config.NewRateLimiter(5, 60*time.Second, 5*time.Minute)
+	quota := config.NewQuotaTracker()
+	r := New(store, metrics.New(100), health, rateLimit, quota, trace.New(100, domain.TraceSettings{}))
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: backend.URL,
+		APITypes:  []domain.APIType{domain.APITypeOpenAI},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"r"}, ServerID: "s1",
+		TargetModel: "r", NumRetries: -1, Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	health.Start() // marks the existing servers healthy; interval keeps it idle
+	defer health.Stop()
+	if !health.IsHealthy("s1") {
+		t.Fatalf("fixture: s1 starts unhealthy")
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"r","input":"hi"}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusBadRequest || hits != 0 {
+		t.Fatalf("status %d, hits %d: %s", w.Result().StatusCode, hits, w.Body.String())
+	}
+	if !health.IsHealthy("s1") {
+		t.Fatal("a refusal must not mark a server unhealthy — it was never contacted")
+	}
+	if n := rateLimit.FailureCount("s1"); n != 0 {
+		t.Fatalf("a refusal must not count as a rate-limit failure, got %d", n)
+	}
+	if skip := rateLimit.ShouldSkip("s1"); skip {
+		t.Fatal("a refusal must not put a server into cooldown")
+	}
+	if tokens, requests := quota.Usage("s1"); tokens != 0 || requests != 0 {
+		t.Fatalf("a refusal must not charge quota, got tokens=%d requests=%d", tokens, requests)
+	}
+}
+
+// The mixed sequence: an earlier attempt reaches the proxy (its eager headers are
+// on the writer's header map), the LAST attempt refuses. Nothing was sent for the
+// refusing attempt, so its 400 must not carry the earlier attempt's conversion —
+// the refusal tail reports no conversion, in the headers and in the metric alike,
+// exactly like the single-attempt refusal.
+func TestHandleRefusalTailReportsNoConversion(t *testing.T) {
+	converted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	convertedURL := converted.URL
+	converted.Close() // hijacked + closed: instant transport error after the eager headers
+	refuser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	refuserURL := refuser.URL
+	refuser.Close() // refused: never reached, so it must also see nothing
+
+	r, store, ms, _ := newTestRouter(t)
+	if err := store.AddServer(&domain.Server{ID: "chatty", Name: "chatty", URL: convertedURL,
+		APITypes:  []domain.APIType{domain.APITypeOpenAI},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer chatty: %v", err)
+	}
+	if err := store.AddServer(&domain.Server{ID: "responder", Name: "responder", URL: refuserURL,
+		APITypes:  []domain.APIType{domain.APITypeOpenAI},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/responses"}}}); err != nil {
+		t.Fatalf("AddServer responder: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"},
+		ServerID: "chatty", TargetModel: "claude", NumRetries: -1, Enabled: true,
+		Fallbacks: []domain.FallbackEntry{{ServerID: "responder"}}}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400: %s", res.StatusCode, w.Body.String())
+	}
+	if got := res.Header.Get("X-Router-Convert"); got != "" {
+		t.Fatalf("the refusal carries the failed attempt's conversion: X-Router-Convert=%q", got)
+	}
+	rec := ms.Recent()
+	if len(rec) != 1 || rec[0].Convert != "" || rec[0].UpstreamEndpoint != "" {
+		t.Fatalf("the refusal metric must describe no conversion: %+v", rec)
 	}
 }
 

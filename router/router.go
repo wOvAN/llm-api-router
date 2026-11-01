@@ -573,6 +573,15 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if refusal != nil {
+		// Nothing was sent for the refusing attempt, so it served nothing: reset
+		// the per-attempt plan fields (an earlier attempt that reached the proxy
+		// filled them, and its eager headers sit on the same writer map) and
+		// delete the convert headers. The refusal is reported the same way the
+		// single-attempt refusal is — no conversion, no upstream endpoint — in
+		// the headers and the metric alike.
+		meta.upstreamPath, meta.convert, meta.convertNotes, meta.translator = "", "", nil, nil
+		w.Header().Del("X-Router-Convert")
+		w.Header().Del("X-Router-Convert-Notes")
 		r.record(req, requestStart, model, attempts[0].targetModel, attempts[0].server.ID,
 			proxy.ProxyMetrics{}, http.StatusBadRequest, refusal.Error(),
 			len(attempts) > 1, apiType, jev, meta)
