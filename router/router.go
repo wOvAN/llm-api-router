@@ -247,16 +247,6 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("X-Router-Jev-Reason", jev.Reason)
 	}
 
-	// Inject stream_options.include_usage for OpenAI streaming chat completions so
-	// backends report token usage even when the client didn't opt in. stripStream
-	// hides the injected usage chunk from the client (unless configured otherwise).
-	stripStream := false
-	if apiType == domain.APITypeOpenAI && strings.Contains(req.URL.Path, "/chat/completions") {
-		alwaysInclude := r.store.GetSettings().AlwaysIncludeStreamUsage
-		var injected bool
-		body, injected = proxy.EnsureStreamUsage(body, alwaysInclude)
-		stripStream = injected
-	}
 	// SSE heartbeats keep streams alive when the backend pauses between tokens
 	// (slow/thinking inference) — clients otherwise trip read timeouts
 	// ("waiting for api responses", "api timeout"). Anthropic clients expect the
@@ -336,6 +326,18 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			log.Errorf("[%s] failed to rewrite model %q -> %q: %v", req.URL.Path, model, targetModel, err)
 			http.Error(w, fmt.Sprintf("failed to rewrite model: %v", err), http.StatusInternalServerError)
 			return
+		}
+
+		// stream_options.include_usage is an OpenAI field: injected into the body
+		// in the dialect this attempt speaks, after any conversion. stripStream
+		// hides the injected usage chunk from the client (unless configured
+		// otherwise).
+		stripStream := false
+		if plan.Dialect == convert.Chat && strings.Contains(plan.Path, "/chat/completions") {
+			var injected bool
+			rewrittenBody, injected = proxy.EnsureStreamUsage(rewrittenBody,
+				r.store.GetSettings().AlwaysIncludeStreamUsage)
+			stripStream = injected
 		}
 
 		// TPM pre-call reservation: hold the declared output budget so

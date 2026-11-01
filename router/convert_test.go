@@ -227,3 +227,56 @@ func TestHandleConvertHeadersDoNotLeakAcrossAttempts(t *testing.T) {
 		t.Fatalf("X-Router-Convert = %q, want absent: the serving backend declares nothing", got)
 	}
 }
+
+// stream_options is an OpenAI field: it must follow the dialect decision, not the
+// client's path. An Anthropic request on an Anthropic backend must arrive with no
+// stream_options in the body.
+func TestHandleAnthropicStreamGetsNoStreamOptions(t *testing.T) {
+	var gotBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"id":"m1","type":"message","role":"assistant","content":[],"model":"claude"}`))
+	}))
+	defer backend.Close()
+
+	r, store, _, _ := newTestRouter(t)
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: backend.URL,
+		APITypes:  []domain.APIType{domain.APITypeAnthropic},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/messages"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"}, ServerID: "s1",
+		TargetModel: "claude", NumRetries: -1, Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"claude","max_tokens":10,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	r.Handle(httptest.NewRecorder(), req)
+
+	if strings.Contains(gotBody, "stream_options") {
+		t.Fatalf("OpenAI stream_options leaked into an Anthropic request: %s", gotBody)
+	}
+}
+
+// The mirror case: an OpenAI streaming request on a chat backend keeps the
+// injection, now decided per attempt.
+func TestHandleChatStreamStillInjectsUsage(t *testing.T) {
+	var gotBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"id":"c1","model":"m","choices":[]}`))
+	}))
+	defer backend.Close()
+
+	r, store, _, _ := newTestRouter(t)
+	addTestRoute(t, store, "m", backend.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	r.Handle(httptest.NewRecorder(), req)
+
+	if !strings.Contains(gotBody, `"include_usage":true`) {
+		t.Fatalf("injection lost: %s", gotBody)
+	}
+}
