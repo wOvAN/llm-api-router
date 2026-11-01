@@ -77,3 +77,32 @@ func TestConvertPreviewReportsRefusals(t *testing.T) {
 		t.Fatalf("refusal must name what the backend serves: %v", out["error"])
 	}
 }
+
+// A jev rule has no primary server — its backends are the decision server and the
+// candidate pool, which the preview does not resolve. That is an answer too, never
+// a 404 naming an empty server id.
+func TestConvertPreviewJevRuleIsRefused(t *testing.T) {
+	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "n", URL: "http://127.0.0.1:1/v1",
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"jevr"}, Enabled: true,
+		Router: domain.RouterJev,
+		Jev: &domain.JevRouter{ServerID: "s1", Candidates: []domain.JevCandidate{
+			{ServerID: "s1", TargetModel: "claude", Tier: 1}}}}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	out := postPreview(t, NewHandler(store, nil, nil, nil),
+		`{"model":"jevr","path":"/v1/messages","body":{"model":"jevr","max_tokens":10,"messages":[]}}`)
+	if out["code"] != "jev_unsupported" {
+		t.Fatalf("a jev rule must be answered with a code, not a 4xx: %v", out)
+	}
+	msg, _ := out["error"].(string)
+	if !strings.Contains(msg, "jev") || strings.Contains(msg, "not found") {
+		t.Fatalf("refusal must name the reason: %v", out["error"])
+	}
+}

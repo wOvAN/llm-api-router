@@ -39,6 +39,15 @@ func convertPreviewFor(store *config.Store, model, path string, body json.RawMes
 	if !ok {
 		return map[string]any{"error": "no routing rule for model " + model}, http.StatusNotFound
 	}
+	if rule.IsJev() {
+		// A jev rule has no primary server: its backends are the decision server and
+		// the candidate pool, per-request. Previewing that needs a pool selector
+		// (the GUI task), so say what the preview covers instead of 404-ing an empty id.
+		return map[string]any{
+			"error": "jev rules route per candidate; this preview plans the primary attempt only",
+			"code":  "jev_unsupported",
+		}, http.StatusOK
+	}
 	srv, ok := store.GetServer(rule.ServerID)
 	if !ok {
 		return map[string]any{"error": "server " + rule.ServerID + " not found"}, http.StatusNotFound
