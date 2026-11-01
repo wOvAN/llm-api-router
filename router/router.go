@@ -361,7 +361,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			var injected bool
 			rewrittenBody, injected = proxy.EnsureStreamUsage(rewrittenBody,
 				r.store.GetSettings().AlwaysIncludeStreamUsage)
-			stripStream = injected
+			// On a converted attempt the emitter is the filter, and it has to SEE
+			// the chunk: a chat backend reports its prompt tokens only there, and
+			// the Anthropic events must carry them. A frame with no choices makes
+			// the emitter emit nothing, so the client still never sees it.
+			stripStream = injected && meta.convert == ""
 		}
 
 		// TPM pre-call reservation: hold the declared output budget so

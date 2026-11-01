@@ -2,6 +2,7 @@ package convert
 
 import (
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -27,6 +28,26 @@ type aRequest struct {
 	OutputFormat  json.RawMessage `json:"output_format"`
 	Thinking      json.RawMessage `json:"thinking"`
 	Metadata      *aMetadata      `json:"metadata"`
+}
+
+// DecodedRequestKeys is aRequest's key set, derived from its own json tags: the
+// top-level fields MessagesToChat handles, each one mapped, folded, renamed or
+// reported. A spoke marshals a whitelist, so a client key OUTSIDE this set leaves
+// with nothing to say so — which is what the router's `keys:<n>dropped` note
+// counts. It is derived, not transcribed, so a new field on the decoder is
+// accounted for the moment it exists.
+var DecodedRequestKeys = decodedRequestKeys()
+
+func decodedRequestKeys() map[string]bool {
+	typ := reflect.TypeOf(aRequest{})
+	out := make(map[string]bool, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+		if name != "" && name != "-" {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 type aMetadata struct {

@@ -8,17 +8,22 @@ import (
 )
 
 // responseTranslator adapts convert's response direction to the shape
-// proxy.StreamTranslator expects. Here it translates non-streamed JSON bodies;
-// Task 8 gives it the stream emitter.
+// proxy.StreamTranslator expects: the stream emitter for an SSE answer, the JSON
+// translator for a buffered one. A pair with no emitter forwards frames untouched.
 type responseTranslator struct {
-	plan  convert.Plan
-	notes []string
+	plan   convert.Plan
+	stream convert.Stream
+	notes  []string
 }
 
 var _ proxy.StreamTranslator = (*responseTranslator)(nil)
 
 func newResponseTranslator(p convert.Plan) *responseTranslator {
-	return &responseTranslator{plan: p}
+	t := &responseTranslator{plan: p}
+	if s, ok := convert.NewStream(p); ok {
+		t.stream = s
+	}
+	return t
 }
 
 func (t *responseTranslator) TranslateJSON(body []byte) ([]byte, error) {
@@ -30,39 +35,45 @@ func (t *responseTranslator) TranslateJSON(body []byte) ([]byte, error) {
 	return b, nil
 }
 
-// The SSE path is Task 8's: a frame is forwarded untouched, which is also the
-// right answer for a pair with no stream emitter.
-func (t *responseTranslator) WriteFrame(frame []byte) [][]byte { return [][]byte{frame} }
+func (t *responseTranslator) WriteFrame(frame []byte) [][]byte {
+	if t.stream == nil {
+		return [][]byte{frame}
+	}
+	return t.stream.WriteFrame(frame)
+}
 
-func (t *responseTranslator) FinishFrames() [][]byte { return nil }
+func (t *responseTranslator) FinishFrames() [][]byte {
+	if t.stream == nil {
+		return nil
+	}
+	return t.stream.FinishFrames()
+}
 
-func (t *responseTranslator) Notes() []string { return t.notes }
-
-// convertedRequestKeys are the top-level fields the request spoke decodes — the
-// json tags of its own request struct. A spoke marshals a whitelist, so a key it
-// never decodes vanishes with nothing to say so: no note, no refusal. The spec
-// forbids silent loss, and a refusal would 400 real traffic on every field the
-// providers ship next month (leaving `convert: off` as the only escape), so the
-// routed path counts them: `keys:<n>dropped`.
-//
-// The list is the spoke's decoder set, not a guess at what clients send: a key on
-// it is a key the spoke handled — mapped straight through (present on the way out,
-// so never counted), folded into another key (`system` into `messages`), renamed
-// (`stop_sequences` into `stop`), or dropped under a `field=dropped` note. Counting
-// it would report the plain system prompt of every Anthropic client as a loss. Keep
-// it in sync with the spoke's request struct: a field missing here reads as a loss,
-// a field listed here that the spoke stops decoding goes silent again.
-var convertedRequestKeys = map[string]bool{
-	"model": true, "system": true, "messages": true, "max_tokens": true,
-	"stop_sequences": true, "temperature": true, "top_p": true, "top_k": true,
-	"stream": true, "tools": true, "tool_choice": true, "output_format": true,
-	"thinking": true, "metadata": true,
+func (t *responseTranslator) Notes() []string {
+	if t.stream == nil {
+		return t.notes
+	}
+	return append(t.notes, t.stream.Notes()...)
 }
 
 // droppedKeys compares what the client sent against what the backend will see and
-// reports the keys that left with no per-field note to explain them. The preview
-// path (admin, which calls convert.Request directly) reports no such note: it shows
-// the client its own fields, one by one, and has no routed attempt to account for.
+// reports the keys that left with no per-field note to explain them. A spoke
+// marshals a whitelist, so a key it never decodes vanishes with nothing to say so:
+// no note, no refusal. The spec forbids silent loss, and a refusal would 400 real
+// traffic on every field the providers ship next month (leaving `convert: off` as
+// the only escape), so the routed path counts them: `keys:<n>dropped`.
+//
+// The baseline is the spoke's own decoder set (`convert.DecodedRequestKeys`,
+// derived from its request struct, so the two cannot drift): a key on it is a key
+// the spoke handled — mapped straight through (present on the way out, so never
+// counted), folded into another key (`system` into `messages`), renamed
+// (`stop_sequences` into `stop`), or dropped under a `field=dropped` note. Counting
+// it would report the plain system prompt of every Anthropic client as a loss, and
+// make the operator count a field twice.
+//
+// The preview path (admin, which calls convert.Request directly) reports no such
+// note: it shows the client its own fields, one by one, and has no routed attempt
+// to account for.
 func droppedKeys(in, out []byte) []string {
 	inKeys, outKeys := keySet(in), keySet(out)
 	if inKeys == nil {
@@ -70,7 +81,7 @@ func droppedKeys(in, out []byte) []string {
 	}
 	n := 0
 	for k := range inKeys {
-		if _, kept := outKeys[k]; kept || convertedRequestKeys[k] {
+		if _, kept := outKeys[k]; kept || convert.DecodedRequestKeys[k] {
 			continue
 		}
 		n++
