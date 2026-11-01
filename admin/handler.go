@@ -91,6 +91,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.resetTrace(w, req)
 	case path == "/trace" && req.Method == http.MethodPost:
 		h.setTrace(w, req)
+	case path == "/convert/preview" && req.Method == http.MethodPost:
+		h.convertPreview(w, req)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}

@@ -89,3 +89,15 @@ func declaredPaths(protocols []domain.ServerProtocol) []string {
 	}
 	return out
 }
+
+// Request translates a request body for a plan. Identity plans return the body
+// untouched. The notes list what a deliberate drop cost. Every non-identity edge
+// this build does not implement is a refusal (the messages→chat spoke lands in
+// the next step).
+func Request(p Plan, body []byte, o Options) ([]byte, []string, error) {
+	if p.Dialect == p.From || p.From == "" {
+		return body, nil, nil
+	}
+	return nil, nil, &Error{Code: CodeNoDialect, Msg: "conversion " + string(p.From) + ">" +
+		string(p.Dialect) + " is not supported"}
+}
