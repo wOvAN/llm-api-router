@@ -1,7 +1,7 @@
 package convert
 
 import (
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -189,6 +189,6 @@ func toolArguments(raw json.RawMessage) any {
 }
 
 func shortHash(s string) string {
-	sum := sha1.Sum([]byte(s))
+	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:20]
 }

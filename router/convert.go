@@ -1,26 +1,11 @@
 package router
 
 import (
+	"encoding/json"
+	"fmt"
 	"llm-api-router/convert"
 	"llm-api-router/proxy"
 )
-
-// maxConvertNotesBytes bounds RequestMetric.ConvertNotes (the spec's ≤ 512B): the
-// list is persisted with every metric and rendered in the GUI, so a chatty
-// translator must not be able to grow it without bound. Whole notes are kept,
-// the tail is dropped.
-const maxConvertNotesBytes = 512
-
-func capNotes(notes []string) []string {
-	n := 0
-	for i, s := range notes {
-		if n+len(s) > maxConvertNotesBytes {
-			return notes[:i]
-		}
-		n += len(s)
-	}
-	return notes
-}
 
 // responseTranslator adapts convert's response direction to the shape
 // proxy.StreamTranslator expects. Here it translates non-streamed JSON bodies;
@@ -52,3 +37,26 @@ func (t *responseTranslator) WriteFrame(frame []byte) [][]byte { return [][]byte
 func (t *responseTranslator) FinishFrames() [][]byte { return nil }
 
 func (t *responseTranslator) Notes() []string { return t.notes }
+
+// droppedKeys reports the top-level fields a converted request lost without a
+// per-field drop. The spoke marshals a whitelist, so a key it never decodes — a
+// field Anthropic ships next month, a stray client key — disappears with nothing
+// to say so, and the spec forbids silent loss. Counting keys in against keys out
+// is the visibility the operator needs (a refusal would 400 real traffic on every
+// new Anthropic field, leaving `convert: off` as the only escape). A request
+// whose keys all map reports nothing.
+func droppedKeys(in, out []byte) []string {
+	n := keyCount(in) - keyCount(out)
+	if n <= 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("keys:%ddropped", n)}
+}
+
+func keyCount(body []byte) int {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(body, &m) != nil {
+		return 0
+	}
+	return len(m)
+}

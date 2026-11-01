@@ -328,6 +328,30 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
+		// A planned attempt must speak the backend's dialect in the body, not just
+		// in the path: the plan moved the endpoint, this is what moves the request.
+		// A refusal is the same class as the plan's own refusal — nothing was sent,
+		// so no health/rate-limit/quota bookkeeping, the next attempt is tried, and
+		// the last refusal is our 400 naming the field.
+		if meta.convert != "" {
+			converted, notes, convErr := convert.Request(plan, rewrittenBody,
+				convert.OptionsFrom(r.store.GetSettings().Convert))
+			if convErr != nil {
+				attemptErrors = append(attemptErrors, convErr.Error())
+				if i < len(attempts)-1 {
+					log.Warnf("[%s] model=%q — skipping %s: %v", req.URL.Path, model, srv.Name, convErr)
+					continue
+				}
+				refusal = convErr
+				break
+			}
+			rewrittenBody = converted
+			// Undecoded top-level fields vanish without a per-field drop; the
+			// routed path reports the difference (the preview path deliberately
+			// does not — it calls convert.Request directly).
+			meta.convertNotes = append(notes, droppedKeys(body, converted)...)
+		}
+
 		// stream_options.include_usage is an OpenAI field: injected into the body
 		// in the dialect this attempt speaks, after any conversion. stripStream
 		// hides the injected usage chunk from the client (unless configured
@@ -604,7 +628,7 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 	if meta.translator != nil {
 		m.ConvertNotes = append(m.ConvertNotes, meta.translator.Notes()...)
 	}
-	m.ConvertNotes = capNotes(m.ConvertNotes)
+	m.ConvertNotes = proxy.CapConvertNotes(m.ConvertNotes)
 	if wasFallback {
 		m.Features = append(m.Features, "fallback")
 	}

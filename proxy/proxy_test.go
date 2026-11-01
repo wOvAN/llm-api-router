@@ -1960,6 +1960,7 @@ func TestStreamProxyMidStreamErrorBypassesTranslator(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")) //nolint:errcheck
+		w.(http.Flusher).Flush()                                                                // the bytes must reach the wire before the cut
 		if hj, ok := w.(http.Hijacker); ok {
 			if conn, _, err := hj.Hijack(); err == nil {
 				_ = conn.Close()
@@ -1974,10 +1975,47 @@ func TestStreamProxyMidStreamErrorBypassesTranslator(t *testing.T) {
 	_, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "m", "m",
 		&RouterHeaders{ServerID: "s1", Translate: &dropAllTranslator{}}, false, nil)
 	if _, ok := errors.AsType[*MidStreamError](err); !ok {
-		t.Skipf("backend did not break the stream (err=%v)", err)
+		t.Fatalf("the hijacked connection must end the stream as a mid-stream error, got %v", err)
 	}
 	if body := w.Body.String(); !strings.Contains(body, "event: error") {
 		t.Fatalf("the error frame was swallowed by the translator: %s", body)
+	}
+}
+
+// The same break on a NON-streamed answer: the JSON body is still buffered inside
+// the translator (nothing has reached the client yet), and `passthrough` makes
+// `finish` a no-op — so without delivering the buffer on this path the client
+// gets a 200 with no body at all plus an SSE frame grafted onto a JSON response.
+// A truncated answer must reach the client in the backend's shape, next to the
+// error frame: a truncated message with no error is the failure this repo refuses.
+func TestStreamProxyMidStreamErrorDeliversBufferedJSON(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"rol`)) //nolint:errcheck
+		w.(http.Flusher).Flush()                                                     // the bytes must reach the wire before the cut
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer backend.Close()
+
+	tr := &dropAllTranslator{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m"}`))
+	req.Body = io.NopCloser(req.Body)
+	w := httptest.NewRecorder()
+	_, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "m", "m",
+		&RouterHeaders{ServerID: "s1", Translate: tr}, false, nil)
+	if _, ok := errors.AsType[*MidStreamError](err); !ok {
+		t.Fatalf("a backend that dies mid-JSON is a mid-stream error, got %v", err)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"choices"`) {
+		t.Fatalf("the partial JSON answer was dropped: %q", body)
+	}
+	if len(tr.bodies) != 0 {
+		t.Fatalf("a truncated body must go out native, not be translated: %q", tr.bodies)
 	}
 }
 
@@ -2002,5 +2040,23 @@ func TestTranslateWriterOverflowRelaysWholeBody(t *testing.T) {
 	}
 	if !bytes.Equal(rec.Body.Bytes()[:len(chunk)], chunk) {
 		t.Fatal("the relayed prefix is not the native body")
+	}
+}
+
+// The notes header is bounded like the metric: a converted request with many
+// dropped blocks must not become a megabyte of response header.
+func TestSetRouterHeadersCapsConvertNotes(t *testing.T) {
+	notes := make([]string, 0, 600)
+	for range 600 {
+		notes = append(notes, "block=dropped")
+	}
+	w := httptest.NewRecorder()
+	SetRouterHeaders(w, &RouterHeaders{Convert: "messages>chat", ConvertNotes: notes})
+	got := w.Header().Get("X-Router-Convert-Notes")
+	if len(got) > MaxConvertNotesBytes {
+		t.Fatalf("notes header is %d bytes, limit %d", len(got), MaxConvertNotesBytes)
+	}
+	if !strings.Contains(got, "block=dropped") {
+		t.Fatalf("notes must survive up to the bound: %q", got)
 	}
 }

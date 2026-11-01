@@ -364,8 +364,32 @@ func SetRouterHeaders(w http.ResponseWriter, h *RouterHeaders) {
 		w.Header().Set("X-Router-Convert", h.Convert)
 	}
 	if len(h.ConvertNotes) > 0 {
-		w.Header().Set("X-Router-Convert-Notes", strings.Join(h.ConvertNotes, ", "))
+		w.Header().Set("X-Router-Convert-Notes", strings.Join(CapConvertNotes(h.ConvertNotes), ", "))
 	}
+}
+
+// MaxConvertNotesBytes bounds the conversion notes list (the spec's ≤ 512B).
+// Notes are one per dropped block, so a converted request with a chatty backend
+// can produce hundreds, and neither the response header nor the metric is a place
+// for that.
+const MaxConvertNotesBytes = 512
+
+// CapConvertNotes keeps whole notes (never half a note) within the bound, counting
+// the ", " the header joins them with, and drops the tail. Exported because the
+// metric side (router) applies the same bound to the same list: one rule, one
+// implementation.
+func CapConvertNotes(notes []string) []string {
+	n := 0
+	for i, s := range notes {
+		if i > 0 {
+			n += len(", ")
+		}
+		if n+len(s) > MaxConvertNotesBytes {
+			return notes[:i]
+		}
+		n += len(s)
+	}
+	return notes
 }
 
 // metricsWriter wraps an http.ResponseWriter to track TTFB and response size.
@@ -1032,15 +1056,34 @@ func newTranslateWriter(w http.ResponseWriter, tr StreamTranslator) *translateWr
 }
 
 // setJSON arms JSON buffering. StreamProxy already learns the response kind from
-// the upstream headers and arms the relay the same way.
-func (t *translateWriter) setJSON(on bool) { t.json = on && t.tr != nil }
+// the upstream headers and arms the relay the same way. Nil-safe: passthrough
+// traffic never builds this writer.
+func (t *translateWriter) setJSON(on bool) {
+	if t != nil {
+		t.json = on
+	}
+}
 
-// passthrough stops translating: an upstream-authored error frame is already in
-// the client's dialect (sendMidStreamError keys on the client's path).
-func (t *translateWriter) passthrough() { t.pass = true }
+// passthrough stops translating, for a frame that is already in the client's
+// dialect (sendMidStreamError keys on the client's path) — and delivers whatever
+// the translator is still holding. On an SSE stream that is nothing (bytes went
+// out as they arrived); on a buffered JSON body it is the whole partial answer,
+// and dropping it would hand the client a 200 with no body at all, which is the
+// truncated-answer-with-no-error failure this repo refuses.
+func (t *translateWriter) passthrough() {
+	if t == nil {
+		return
+	}
+	t.pass = true
+	if b := t.takeBuf(); len(b) > 0 {
+		if _, err := t.ResponseWriter.Write(b); err != nil {
+			log.Warnf("translateWriter: partial body write failed: %v", err)
+		}
+	}
+}
 
 func (t *translateWriter) Write(data []byte) (int, error) {
-	if t.tr == nil || t.pass {
+	if t.pass {
 		return t.ResponseWriter.Write(data)
 	}
 	if !t.json {
@@ -1080,9 +1123,10 @@ func (t *translateWriter) Flush() {
 }
 
 // finish delivers what the translator still owes: the frames that close open
-// blocks, or the translated JSON body.
+// blocks, or the translated JSON body. Nil-safe, like the rest of the calls
+// StreamProxy makes on it.
 func (t *translateWriter) finish() {
-	if t.tr == nil || t.pass {
+	if t == nil || t.pass {
 		return
 	}
 	if !t.json {
@@ -1097,7 +1141,9 @@ func (t *translateWriter) finish() {
 			log.Warnf("translateWriter: json translation failed, relaying native body: %v", err)
 			translated = b
 		}
-		_, _ = t.ResponseWriter.Write(translated)
+		if _, err := t.ResponseWriter.Write(translated); err != nil {
+			log.Warnf("translateWriter: translated body write failed: %v", err)
+		}
 	}
 	if f, ok := t.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
@@ -1328,13 +1374,17 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// relay (so it sees whole frames, not TCP chunks) and below both silence
 	// writers (so a heartbeat is emitted in the client's dialect and never
 	// re-enters the translator), while metricsWriter, modelRewriteWriter and the
-	// trace tap stay on the native side of it.
-	var translator StreamTranslator
-	if rh != nil {
-		translator = rh.Translate
+	// trace tap stay on the native side of it. A passthrough request does not pay
+	// for it at all: no writer is built, exactly as with the trace tap.
+	var tw *translateWriter
+	if rh != nil && rh.Translate != nil {
+		tw = newTranslateWriter(ws, rh.Translate)
 	}
-	tw := newTranslateWriter(ws, translator)
-	clientW := newSSERelay(tw, strip)
+	var relayTo http.ResponseWriter = ws
+	if tw != nil {
+		relayTo = tw
+	}
+	clientW := newSSERelay(relayTo, strip)
 	mw := newMetricsWriter(clientW, start)
 	defer bufPool.Put(mw.bodyBuffer) //nolint:errcheck
 	mrw := newModelRewriteWriter(mw, targetModel, originalModel)

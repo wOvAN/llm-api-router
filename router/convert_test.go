@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"llm-api-router/domain"
+	"llm-api-router/proxy"
 )
 
 // A backend that declares nothing is byte-for-byte passthrough: the client's path
@@ -282,7 +283,9 @@ func TestHandleChatStreamStillInjectsUsage(t *testing.T) {
 }
 
 // The first usable slice: an Anthropic client, a chat-only backend, a non-streamed
-// answer. The client must receive an Anthropic message object.
+// answer. The request must reach the backend IN CHAT SHAPE (the plan moved the
+// path; the transform carries the body) and the answer must come back in Anthropic
+// shape, envelope, blocks and usage spelling included.
 func TestHandleMessagesServedByChatBackend(t *testing.T) {
 	var gotPath, gotBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +294,8 @@ func TestHandleMessagesServedByChatBackend(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"c1","model":"claude","choices":[{"index":0,` +
 			`"message":{"role":"assistant","content":"hi there"},"finish_reason":"stop"}],` +
-			`"usage":{"prompt_tokens":12,"completion_tokens":3}}`))
+			`"usage":{"prompt_tokens":120,"completion_tokens":3,` +
+			`"prompt_tokens_details":{"cached_tokens":100}}}`))
 	}))
 	defer backend.Close()
 
@@ -306,7 +310,9 @@ func TestHandleMessagesServedByChatBackend(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
-		`{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
+		`{"model":"claude","max_tokens":10,"system":"be brief",`+
+			`"tools":[{"name":"fetch","input_schema":{"type":"object","properties":{"u":{"type":"number"}}}}],`+
+			`"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
 	w := httptest.NewRecorder()
 	r.Handle(w, req)
 
@@ -316,12 +322,28 @@ func TestHandleMessagesServedByChatBackend(t *testing.T) {
 	if gotPath != "/v1/chat/completions" {
 		t.Fatalf("backend path = %q", gotPath)
 	}
-	if !strings.Contains(gotBody, `"max_tokens":10`) {
-		t.Fatalf("anthropic max_tokens not carried over: %s", gotBody)
+	// The request side is the point of the spoke: an Anthropic body that merely
+	// landed on a chat path is the failure the loss policy exists to prevent.
+	if strings.Contains(gotBody, "input_schema") {
+		t.Fatalf("the backend received an Anthropic body: %s", gotBody)
+	}
+	for _, want := range []string{`"type":"function"`, `"parameters"`, `"name":"fetch"`,
+		`"role":"system"`, `"content":"be brief"`, `"content":"hi"`, `"max_tokens":10`} {
+		if !strings.Contains(gotBody, want) {
+			t.Fatalf("converted request lost %s: %s", want, gotBody)
+		}
 	}
 	body := w.Body.String()
 	if !strings.Contains(body, `"type":"message"`) || !strings.Contains(body, `"stop_reason":"end_turn"`) {
 		t.Fatalf("client did not get an Anthropic message: %s", body)
+	}
+	// The usage convention is converted too: OpenAI's prompt_tokens (120) already
+	// contains its cached tokens (100), Anthropic's input_tokens sits next to them.
+	for _, want := range []string{`"type":"text"`, `"text":"hi there"`, `"input_tokens":20`,
+		`"cache_read_input_tokens":100`, `"output_tokens":3`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("client answer lost %s: %s", want, body)
+		}
 	}
 	if h := w.Result().Header.Get("X-Router-Convert"); h != "messages>chat" {
 		t.Fatalf("X-Router-Convert = %q", h)
@@ -332,35 +354,174 @@ func TestHandleMessagesServedByChatBackend(t *testing.T) {
 	}
 	// Usage is read from the native response: the translator runs after
 	// metricsWriter, so extraction never sees translated bytes.
-	if rec[0].PromptTokens != 12 || rec[0].CompletionTokens != 3 {
+	if rec[0].PromptTokens != 120 || rec[0].CompletionTokens != 3 || rec[0].CachedTokens != 100 {
 		t.Fatalf("usage lost: %+v", rec[0])
+	}
+}
+
+// A request the spoke can not represent is a per-attempt refusal, exactly like a
+// backend the plan can not reach: nothing is sent to that backend, the next
+// attempt is tried, and when the last attempt refuses too the client gets OUR 400
+// naming the field — never a backend 4xx for a body it never saw, and never a
+// healthy-looking rule.
+func TestHandleConvertRequestRefusal(t *testing.T) {
+	// A hosted tool is always-400 class: the provider runs it, the model does not.
+	const body = `{"model":"claude","max_tokens":10,` +
+		`"tools":[{"name":"w","type":"web_search_20250305"}],` +
+		`"messages":[{"role":"user","content":"hi"}]}`
+
+	t.Run("falls through to the next attempt", func(t *testing.T) {
+		var chatHits, plainHits int
+		chat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			chatHits++
+		}))
+		chatURL := chat.URL
+		chat.Close() // hijacked + closed: the refusal must be decided before the dial
+		plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			plainHits++
+			_, _ = w.Write([]byte(`{"type":"message","role":"assistant","content":[],"model":"claude"}`))
+		}))
+		defer plain.Close()
+
+		r, store, ms, _ := newTestRouter(t)
+		if err := store.AddServer(&domain.Server{ID: "chatty", Name: "chatty", URL: chatURL,
+			APITypes:  []domain.APIType{domain.APITypeOpenAI},
+			Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+			t.Fatalf("AddServer: %v", err)
+		}
+		if err := store.AddServer(&domain.Server{ID: "undeclared", Name: "undeclared", URL: plain.URL,
+			APITypes: []domain.APIType{domain.APITypeAnthropic}}); err != nil {
+			t.Fatalf("AddServer: %v", err)
+		}
+		if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"},
+			ServerID: "chatty", TargetModel: "claude", NumRetries: -1, Enabled: true,
+			Fallbacks: []domain.FallbackEntry{{ServerID: "undeclared"}}}); err != nil {
+			t.Fatalf("AddRule: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+
+		res := w.Result()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("status %d: %s", res.StatusCode, w.Body.String())
+		}
+		if chatHits != 0 || plainHits != 1 {
+			t.Fatalf("the refusing attempt must send nothing: chat=%d plain=%d", chatHits, plainHits)
+		}
+		if h := res.Header.Get("X-Router-Convert"); h != "" {
+			t.Fatalf("the serving attempt is a passthrough, got X-Router-Convert=%q", h)
+		}
+		if rec := ms.Recent(); len(rec) != 1 || rec[0].Convert != "" {
+			t.Fatalf("the metric describes the serving attempt: %+v", rec)
+		}
+	})
+
+	t.Run("the last refusal is our 400", func(t *testing.T) {
+		var hits int
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits++
+		}))
+		defer backend.Close()
+
+		r, store, ms, _ := newTestRouter(t)
+		if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: backend.URL,
+			APITypes:  []domain.APIType{domain.APITypeOpenAI},
+			Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+			t.Fatalf("AddServer: %v", err)
+		}
+		if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"}, ServerID: "s1",
+			TargetModel: "claude", NumRetries: -1, Enabled: true}); err != nil {
+			t.Fatalf("AddRule: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+
+		res := w.Result()
+		if res.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status %d, want 400: %s", res.StatusCode, w.Body.String())
+		}
+		if hits != 0 {
+			t.Fatalf("a refusal sends nothing upstream, got %d hits", hits)
+		}
+		if got := res.Header.Get("X-Router-Fallback-Errors"); got != "" {
+			t.Fatalf("a single attempt has no fallback errors: %q", got)
+		}
+		if b := w.Body.String(); !strings.Contains(b, "tools") {
+			t.Fatalf("the refusal must name the field: %s", b)
+		}
+		if rec := ms.Recent(); len(rec) != 1 || rec[0].StatusCode != http.StatusBadRequest {
+			t.Fatalf("the refusal must be recorded: %+v", rec)
+		}
+	})
+}
+
+// A top-level field the spoke never decodes vanishes from the converted body, and
+// a silent loss is what the notes channel exists to make visible (R16): the routed
+// path compares what went in against what came out and reports the difference.
+func TestHandleConvertReportsDroppedKeys(t *testing.T) {
+	var gotBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"id":"c1","model":"claude","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer backend.Close()
+
+	r, store, ms, _ := newTestRouter(t)
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: backend.URL,
+		APITypes:  []domain.APIType{domain.APITypeOpenAI},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"}, ServerID: "s1",
+		TargetModel: "claude", NumRetries: -1, Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"claude","max_tokens":10,"service_tier":"priority",`+
+			`"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if strings.Contains(gotBody, "service_tier") {
+		t.Fatalf("the spoke must not pass the field through: %s", gotBody)
+	}
+	notes := w.Result().Header.Get("X-Router-Convert-Notes")
+	if !strings.Contains(notes, "keys:1dropped") {
+		t.Fatalf("the loss of an undecoded field must be visible, notes=%q", notes)
+	}
+	rec := ms.Recent()
+	if len(rec) != 1 || !strings.Contains(strings.Join(rec[0].ConvertNotes, ","), "keys:1dropped") {
+		t.Fatalf("the metric must carry it too: %+v", rec)
 	}
 }
 
 // The metric's notes list is bounded (the spec's ≤ 512B): whole notes are kept,
 // the tail dropped, and a list that fits is untouched.
 func TestCapNotesBoundsTheTail(t *testing.T) {
-	if got := capNotes(nil); len(got) != 0 {
+	if got := proxy.CapConvertNotes(nil); len(got) != 0 {
 		t.Fatalf("nil notes: %v", got)
 	}
 	short := []string{"thinking=off", "stop_dropped"}
-	if got := capNotes(short); len(got) != 2 {
+	if got := proxy.CapConvertNotes(short); len(got) != 2 {
 		t.Fatalf("a list that fits must be untouched: %v", got)
 	}
 	long := []string{}
 	n := 0
-	for i := 0; n <= maxConvertNotesBytes; i++ {
+	for i := 0; n <= proxy.MaxConvertNotesBytes; i++ {
 		s := strings.Repeat("x", 100)
 		long = append(long, s)
 		n += len(s)
 	}
-	got := capNotes(long)
+	got := proxy.CapConvertNotes(long)
 	total := 0
 	for _, s := range got {
 		total += len(s)
 	}
-	if len(got) != len(long)-1 || total > maxConvertNotesBytes {
-		t.Fatalf("capNotes kept %d of %d notes (%d bytes, limit %d)",
-			len(got), len(long), total, maxConvertNotesBytes)
+	if len(got) != len(long)-1 || total > proxy.MaxConvertNotesBytes {
+		t.Fatalf("CapConvertNotes kept %d of %d notes (%d bytes, limit %d)",
+			len(got), len(long), total, proxy.MaxConvertNotesBytes)
 	}
 }
