@@ -3364,12 +3364,12 @@ git add router/ && git commit -m "test(router): cross-dialect fallbacks, jev can
 ### Task 11: GUI pill and the notes tooltip
 
 **Files:**
-- Modify: `admin/static/index.html`
+- Modify: `admin/static/index.html` (the Recent Requests row builder; the server form)
 - Test: `admin/convert_test.go`
 
 **Interfaces:**
-- Consumes: `RequestMetric.Convert` / `.UpstreamEndpoint` / `.ConvertNotes` (serialized by Task 3).
-- Produces: a `messages→chat` tag on a Recent Requests row whose tooltip carries the backend endpoint and the dropped-field notes.
+- Consumes: `RequestMetric.Convert` / `.UpstreamEndpoint` / `.ConvertNotes` (serialized by Task 3); `Server.Protocols` (Task 2), which the server form must not lose.
+- Produces: a `messages→chat` tag on a Recent Requests row whose tooltip carries the backend endpoint and the dropped-field notes; and a server form that round-trips the fields it does not render.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3390,12 +3390,29 @@ func TestGUIShowsConversion(t *testing.T) {
 		}
 	}
 }
+
+// The server form builds its PUT payload field by field, so every field it does
+// not render is erased on save: declaring protocols in config.json and then
+// renaming the server in the GUI silently reverts it to undeclared (passthrough).
+// The fix is a merge, so the fields the form does not manage ride along.
+func TestGUIServerFormPreservesUnmanagedFields(t *testing.T) {
+	b, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read gui: %v", err)
+	}
+	src := string(b)
+	for _, want := range []string{"editingServer = s", "editingServer = null", "Object.assign({}, editingServer"} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("gui server form drops unmanaged fields (missing %q)", want)
+		}
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `go test ./admin -run GUIShowsConversion -v`
-Expected: FAIL — `gui never reads "r.convert"`.
+Run: `go test ./admin -run GUI -v`
+Expected: FAIL — `gui never reads "r.convert"` and `gui server form drops unmanaged fields (missing "editingServer = s")`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -3413,6 +3430,37 @@ In `admin/static/index.html`, in the Recent Requests row builder (the function r
 ```
 
 and append `${convertNote}` to the template of the cell that renders `apiCell` (the API Type / endpoint column), so a converted request reads `openai`, `/v1/messages`, `messages→chat`.
+
+Then the server form. `editServer` (around `index.html:507`) fetches the full server — including `protocols`, which the form never renders — and `saveServer` (around `index.html:480`) rebuilds the payload from the inputs alone, so any GUI edit of a server erases its declared protocols. Stash the fetched object and merge on save:
+
+```js
+// The last server object the edit form was opened with, so a save keeps the
+// fields the form does not render (`protocols`, and whatever comes after it).
+let editingServer = null;
+```
+
+at the top of the file's script, in `editServer` after `const s = servers.find(s => s.id === id); if (!s) return;`:
+
+```js
+  editingServer = s;
+```
+
+in `openServerModal` (the Add-Server path, where `id` is empty):
+
+```js
+  if (!id) editingServer = null;
+```
+
+and in `saveServer`, change the payload literal from `const data = { … };` to a merge that keeps the unmanaged fields:
+
+```js
+  const data = Object.assign({}, editingServer, {
+    id: document.getElementById('server-id').value || id,
+    // …the existing fields, unchanged…
+  });
+```
+
+A new server (`editingServer === null`) keeps today's payload exactly, so a server added through the GUI stays undeclared.
 
 - [ ] **Step 4: Run the test and smoke-check the binary**
 
