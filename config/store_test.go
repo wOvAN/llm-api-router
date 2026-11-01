@@ -813,4 +813,11 @@ func TestConvertSettingsDefaults(t *testing.T) {
 	if c.MaxTokens() != 1024 || c.Version() != "2024-10-22" {
 		t.Fatalf("explicit values must win: %+v", c)
 	}
+	// The operator-facing sentinel: a negative default means "the client must bring
+	// its own budget", so it maps to 0 = none, and a converted request that omits
+	// max_tokens is REFUSED naming the field. Turning this back into `<= 0` would
+	// silently turn every such refusal into a 4096-token output cap.
+	if got := (domain.ConvertSettings{MaxTokensDefault: -1}).MaxTokens(); got != 0 {
+		t.Fatalf("MaxTokens() with a negative default = %d, want 0 (refuse, name max_tokens)", got)
+	}
 }

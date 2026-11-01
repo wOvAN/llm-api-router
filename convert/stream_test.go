@@ -414,6 +414,30 @@ func TestChatToMessagesStreamTranslatesAContentPartsDelta(t *testing.T) {
 	}
 }
 
+// The `event:` branch must judge the frame by its NAME. A backend fronting a
+// Responses-family model answers a converted request with named frames of a third
+// dialect, and the Anthropic SDK dispatches an unknown event name into the message
+// accumulator: a foreign payload carrying `usage`/`content` clobbers the answer the
+// emitter built, which is the same silent-corruption class the fail-open exists to
+// close. The proxy's own loop-detector frame is named `error`, so it keeps passing.
+func TestChatToMessagesStreamFailsOpenOnAForeignEventName(t *testing.T) {
+	s := NewChatToMessages()
+	s.WriteFrame([]byte(`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Bon"}}]}` + "\n\n"))
+	got := s.WriteFrame([]byte("event: response.output_text.delta\ndata: {\"delta\":\"jour\"}\n\n"))
+	if len(got) != 1 || !strings.Contains(string(got[0]), "event: error") ||
+		!strings.Contains(string(got[0]), `"type":"api_error"`) {
+		t.Fatalf("a named frame of a third dialect was forwarded into the client's accumulator: %q", got)
+	}
+	if !slices.Contains(s.Notes(), "frame=untranslated") {
+		t.Fatalf("the untranslated frame must be reported: %v", s.Notes())
+	}
+	for _, f := range s.WriteFrame([]byte("event: message_stop\ndata: {}\n\n")) {
+		if strings.Contains(string(f), "message_stop") {
+			t.Fatalf("a stream that failed open is terminal: %q", f)
+		}
+	}
+}
+
 // A JSON object with none of a Chat Completions chunk's keys is not ours to
 // translate — an upstream-authored Anthropic frame — so it goes through untouched
 // instead of being parsed into nothing and emitted as nothing.

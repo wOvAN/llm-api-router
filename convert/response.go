@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 )
 
@@ -115,7 +116,14 @@ func ChatToMessages(body []byte) ([]byte, []string, error) {
 		blocks = append(blocks, map[string]any{"type": "thinking", "thinking": ch.Message.Reasoning})
 	}
 	texts, dropped := contentTexts(ch.Message.Content)
-	notes = append(notes, dropped...)
+	// One distinct note per distinct loss (the emitter's `note()` is the same rule):
+	// the cap at the consumer keeps the HEAD of the list, so twelve identical
+	// `content_part` notes would evict every other loss from the metric and the GUI.
+	for _, n := range dropped {
+		if !slices.Contains(notes, n) {
+			notes = append(notes, n)
+		}
+	}
 	for _, t := range texts {
 		blocks = append(blocks, map[string]any{"type": "text", "text": t})
 	}

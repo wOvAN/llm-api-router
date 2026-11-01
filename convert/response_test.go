@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -122,6 +123,25 @@ func TestChatToMessagesResponseReportsWhatItLost(t *testing.T) {
 		if !slices.Contains(notes, want) {
 			t.Fatalf("notes = %v, want %s", notes, want)
 		}
+	}
+}
+
+// Notes are bounded at 512 bytes at the consumer and the cap keeps the head, so
+// one repeated loss must be one note: a multimodal answer carrying a dozen image
+// parts would otherwise evict every other note from the metric and the GUI
+// tooltip (the emitter's own `note()` already dedups — this direction must too).
+func TestChatToMessagesResponseNotesAreReportedOnce(t *testing.T) {
+	part := `{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}},`
+	body := `{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant",` +
+		`"content":[` + strings.Repeat(part, 12) +
+		`{"type":"text","text":"hi"}]},"finish_reason":"content_filter"},` +
+		`{"index":1,"message":{"role":"assistant","content":"x"},"finish_reason":"stop"}]}`
+	_, notes, err := ChatToMessages([]byte(body))
+	if err != nil {
+		t.Fatalf("ChatToMessages: %v", err)
+	}
+	if len(notes) != 3 {
+		t.Fatalf("a repeated loss must be reported once, notes = %v", notes)
 	}
 }
 

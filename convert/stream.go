@@ -129,13 +129,23 @@ func (c *chatToMessages) handle(frame []byte) [][]byte {
 	if len(data) == 0 {
 		return nil
 	}
-	// A frame that carries an `event:` line is already in the client's dialect: the
-	// proxy's own loop-detector frame, an Anthropic backend authoring its own
-	// events. It must be the FIRST branch, because the prefix makes the frame as a
-	// whole fail JSON parsing — a classifier that parses first judges it by its
-	// payload and drops it.
+	// A frame that carries an `event:` line was authored as a named SSE event, and
+	// the NAME decides the dialect: only one Anthropic defines is already in the
+	// client's (the proxy's own loop-detector frame, an Anthropic backend writing
+	// its own events). A third dialect's named event is forwarded into the client's
+	// message accumulator and clobbers the answer, so it fails open like any frame
+	// no dialect owns. It must be the FIRST branch, because the prefix makes the
+	// frame as a whole fail JSON parsing — a classifier that parses first judges it
+	// by its payload and drops it.
 	if bytes.HasPrefix(data, []byte("event:")) {
-		return reframe(frame)
+		name := data[len("event:"):]
+		if i := bytes.IndexAny(name, "\r\n"); i >= 0 {
+			name = name[:i]
+		}
+		if anthropicEvents[string(bytes.TrimSpace(name))] {
+			return reframe(frame)
+		}
+		return c.failOpen()
 	}
 	// SSE comments are heartbeats; Anthropic's are injected below the translator.
 	if bytes.HasPrefix(data, []byte(":")) {
