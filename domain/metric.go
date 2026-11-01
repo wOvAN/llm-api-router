@@ -25,7 +25,16 @@ type RequestMetric struct {
 	DraftTokensAccepted int       `json:"draft_tokens_accepted"`
 	APIType             APIType   `json:"api_type"`
 	APIEndpoint         string    `json:"api_endpoint"`
-	ClientIP            string    `json:"client_ip"`
+
+	// UpstreamEndpoint is the path the serving attempt actually used, Convert
+	// names the conversion (`messages>chat`, empty = none), ConvertNotes lists
+	// what a deliberate drop cost. The client's own endpoint stays in APIEndpoint:
+	// the class table answers "what did the client send".
+	UpstreamEndpoint string   `json:"upstream_endpoint,omitempty"`
+	Convert          string   `json:"convert,omitempty"`
+	ConvertNotes     []string `json:"convert_notes,omitempty"`
+
+	ClientIP string `json:"client_ip"`
 
 	// Request shape, classified by heuristic on every request (0 tokens):
 	// the endpoint class plus the signs a byte scan saw (stream, tools:<n>,

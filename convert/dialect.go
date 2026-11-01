@@ -18,11 +18,15 @@ const (
 
 // DialectForPath names the dialect a request path belongs to. The empty string
 // means the path carries no dialect this package can translate: audio uploads,
-// embeddings, llama.cpp's /v1/systemone. Those are never conversion subjects.
+// embeddings, llama.cpp's /v1/systemone, and /v1/messages/count_tokens (a token
+// counter, not a messages call — it has no Chat Completions counterpart, so it
+// must never be planned onto one). Those are never conversion subjects.
 //
 // Order matters: /v1/chat/completions contains /completions.
 func DialectForPath(path string) Dialect {
 	switch {
+	case strings.Contains(path, "/count_tokens"):
+		return ""
 	case strings.Contains(path, "/messages"):
 		return Messages
 	case strings.Contains(path, "/chat/completions"):

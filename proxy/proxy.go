@@ -289,6 +289,13 @@ type RouterHeaders struct {
 	KeepAliveIdle time.Duration
 	// Proxy is the server's proxy URL ("" = direct connection). Not a client-visible header.
 	Proxy string
+	// UpstreamPath replaces the client's path when a conversion points the request
+	// at a different endpoint ("" = the client's path). Not a client-visible header.
+	UpstreamPath string
+	// Convert names the conversion in flight (`messages>chat`) → X-Router-Convert.
+	Convert string
+	// ConvertNotes lists what a deliberate drop cost → X-Router-Convert-Notes.
+	ConvertNotes []string
 	// Trace is the per-request trace capture (nil = tracing off). Not a
 	// client-visible header, like Proxy.
 	Trace TraceTap
@@ -325,6 +332,18 @@ func SetRouterHeaders(w http.ResponseWriter, h *RouterHeaders) {
 		} else {
 			log.Errorf("failed to marshal fallback errors: %v", err)
 		}
+	}
+	// The response writer's header map persists across retry/fallback attempts, so
+	// both convert headers are cleared before they are written: a conversion (or
+	// a dropped field) reported by an earlier attempt must not ride on a
+	// passthrough later one (same rule as X-Router-Retries above).
+	w.Header().Del("X-Router-Convert")
+	w.Header().Del("X-Router-Convert-Notes")
+	if h.Convert != "" {
+		w.Header().Set("X-Router-Convert", h.Convert)
+	}
+	if len(h.ConvertNotes) > 0 {
+		w.Header().Set("X-Router-Convert-Notes", strings.Join(h.ConvertNotes, ", "))
 	}
 }
 
@@ -1136,19 +1155,26 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		return nil, fmt.Errorf("parse target URL: %w", err)
 	}
 
+	// A conversion aims the request at the dialect's endpoint; "" = the client's
+	// own path. The mid-stream and loop-detector error frames keep keying on
+	// req.URL.Path — that is the client's dialect, which is what the client reads.
+	reqPath := req.URL.Path
+	if rh != nil && rh.UpstreamPath != "" {
+		reqPath = rh.UpstreamPath
+	}
 	targetBase := strings.TrimRight(target.Path, "/")
-	targetPath := targetBase + req.URL.Path
+	targetPath := targetBase + reqPath
 	// URL dedup: a server URL that already ends with /v1 plus a request path
 	// that starts with /v1 would otherwise produce /v1/v1/... — drop the
 	// redundant prefix so the two merge into a single /v1.
-	if strings.HasSuffix(targetBase, "/v1") && strings.HasPrefix(req.URL.Path, "/v1") {
-		targetPath = targetBase + req.URL.Path[len("/v1"):]
+	if strings.HasSuffix(targetBase, "/v1") && strings.HasPrefix(reqPath, "/v1") {
+		targetPath = targetBase + reqPath[len("/v1"):]
 	} else if strings.HasSuffix(targetBase, "/v1") {
 		// The inverse: llama.cpp serves TTS (and the STT alias) at the ROOT
 		// (/tts, /audio/transcriptions), so a server URL that carries /v1 for
 		// its chat endpoints must lose it for those paths. Without this a single
 		// llama.cpp server could not serve both chat and audio.
-		targetPath = strings.TrimSuffix(targetBase, "/v1") + req.URL.Path
+		targetPath = strings.TrimSuffix(targetBase, "/v1") + reqPath
 	}
 
 	start := time.Now()

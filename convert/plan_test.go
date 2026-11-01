@@ -31,6 +31,12 @@ func TestDecidePassthrough(t *testing.T) {
 	if err != nil || p.Dialect != Messages {
 		t.Fatalf("got %+v, %v, want passthrough", p, err)
 	}
+	// Legacy on an undeclared backend is passthrough too: the refusal is for a
+	// backend that declares what it serves, not for a config that says nothing.
+	p, err = Decide(Legacy, "/v1/completions", nil, "auto")
+	if err != nil || p.Dialect != Legacy || p.Path != "/v1/completions" {
+		t.Fatalf("got %+v, %v, want passthrough", p, err)
+	}
 }
 
 func TestDecideConvertsToDeclaredDialect(t *testing.T) {
@@ -78,5 +84,22 @@ func TestDecideDialectlessPathsArePassthrough(t *testing.T) {
 	p, err := Decide("", "/v1/audio/speech", protocols("/v1/chat/completions"), "auto")
 	if err != nil || p.Dialect != "" || p.Path != "/v1/audio/speech" {
 		t.Fatalf("got %+v, %v, want untouched passthrough", p, err)
+	}
+	// count_tokens is a token counter, not a messages call: it has no chat
+	// counterpart, so a chat-only backend must get the client's own path (without
+	// it, Claude Code's token count is answered with a completion).
+	p, err = Decide(Messages, "/v1/messages/count_tokens", protocols("/v1/chat/completions"), "auto")
+	if err != nil || p.Dialect != Messages || p.Path != "/v1/messages/count_tokens" {
+		t.Fatalf("got %+v, %v, want passthrough of the count_tokens path", p, err)
+	}
+}
+
+func TestDecideIdentityComparesDialects(t *testing.T) {
+	// The root-served llama.cpp form (/messages) is the same endpoint as
+	// /v1/messages: declaring it is passthrough, not a refusal naming two paths
+	// that mean the same thing.
+	p, err := Decide(Messages, "/v1/messages", protocols("/messages"), "auto")
+	if err != nil || p.Dialect != Messages || p.Path != "/v1/messages" {
+		t.Fatalf("got %+v, %v, want identity with the client's path", p, err)
 	}
 }

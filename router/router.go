@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"llm-api-router/config"
+	"llm-api-router/convert"
 	"llm-api-router/domain"
 	"llm-api-router/metrics"
 	"llm-api-router/pkg/log"
@@ -46,16 +47,20 @@ func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, ra
 // classification (always, 0 tokens) and the trace capture (only inside the
 // window). It rides into record so the metric and the trace entry agree.
 type reqMeta struct {
-	class    string
-	features []string
-	capture  *trace.Capture
-	retries  int
+	class        string
+	features     []string
+	capture      *trace.Capture
+	retries      int
+	upstreamPath string
+	convert      string
+	convertNotes []string
 }
 
 // serverAttempt is one proxy target: a backend server plus the model to send it.
 type serverAttempt struct {
 	server      *domain.Server
 	targetModel string
+	convert     string // the attempt's own `convert` value ("" = "auto")
 }
 
 // orderedFallbacks returns the rule's enabled fallbacks in attempt order:
@@ -190,6 +195,10 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	var attempts []serverAttempt
 	requestStart := time.Now()
 	apiType := apiTypeFromPath(req.URL.Path)
+	// The client's own dialect (from its path) and the per-request conversion
+	// override; heartbeats keep keying on apiType — they are for the client.
+	clientDialect := convert.DialectForPath(req.URL.Path)
+	headerConvert := req.Header.Get("X-Router-Convert")
 	if rule.IsJev() {
 		// The decision model picks the pool entry; the rest of the pool stays
 		// behind it as the fallback chain.
@@ -197,14 +206,14 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		jev = &outcome
 		attempts = list
 	} else {
-		attempts = []serverAttempt{{server: primaryServer, targetModel: rule.TargetModel}}
+		attempts = []serverAttempt{{server: primaryServer, targetModel: rule.TargetModel, convert: rule.Convert}}
 		for _, fb := range orderedFallbacks(rule) {
 			if srv, ok := r.store.GetServer(fb.ServerID); ok {
 				tm := fb.TargetModel
 				if tm == "" {
 					tm = rule.TargetModel
 				}
-				attempts = append(attempts, serverAttempt{server: srv, targetModel: tm})
+				attempts = append(attempts, serverAttempt{server: srv, targetModel: tm, convert: fb.Convert})
 			}
 		}
 	}
@@ -261,6 +270,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		ping = []byte(": keep-alive\n\n")
 	}
 	var lastErr error
+	// The refusal of the last attempt: a backend this attempt can not speak to,
+	// which nothing downstream of it can fix.
+	var refusal error
 	// Errors from failed attempts, surfaced to the client via
 	// X-Router-Fallback-Errors (preceding attempts only).
 	var attemptErrors []string
@@ -289,6 +301,34 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			log.Warnf("[%s] model=%q — skipping quota-exceeded server %s (tpm=%d rpm=%d, attempt %d/%d)",
 				req.URL.Path, model, srv.Name, tokens, reqs, i+1, len(attempts))
 			continue
+		}
+
+		// The dialect decision is per attempt: a fallback server and a jev
+		// candidate each declare their own capability, and a per-request header
+		// outranks the config.
+		forced := attempt.convert
+		if headerConvert == "off" {
+			forced = "off"
+		}
+		plan, planErr := convert.Decide(clientDialect, req.URL.Path, srv.Protocols, forced)
+		if planErr != nil {
+			// A backend this attempt can not speak to is a refusal, not a
+			// transport failure: nothing was sent, so no health/rate-limit/quota
+			// bookkeeping happens. Try the next attempt; if the last one refuses
+			// too, the client gets our 400 naming what the backend serves.
+			attemptErrors = append(attemptErrors, planErr.Error())
+			if i < len(attempts)-1 {
+				log.Warnf("[%s] model=%q — skipping %s: %v", req.URL.Path, model, srv.Name, planErr)
+				continue
+			}
+			refusal = planErr
+			break
+		}
+		// Assigned on every attempt so the recorded metric describes the attempt
+		// that served, never an earlier failed one.
+		meta.upstreamPath, meta.convert, meta.convertNotes = plan.Path, "", nil
+		if plan.Dialect != plan.From && plan.From != "" {
+			meta.convert = string(plan.From) + ">" + string(plan.Dialect)
 		}
 
 		rewrittenBody, err := rewriteAttemptBody(req, body, targetModel)
@@ -320,7 +360,17 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		log.Infof("[%s] model=%q -> %q on %s (attempt %d/%d)",
 			req.URL.Path, model, targetModel, srv.Name, i+1, len(attempts))
 
-		serverURL := srv.GetURLForAPIType(apiType)
+		// chat, responses and legacy all ride the server's OpenAI URL; only
+		// messages is Anthropic. A dialectless path (audio, count_tokens,
+		// systemone) keeps the client's own protocol — the plan never moves it.
+		upstreamType := apiType
+		if plan.Dialect != "" {
+			upstreamType = domain.APITypeOpenAI
+			if plan.Dialect == convert.Messages {
+				upstreamType = domain.APITypeAnthropic
+			}
+		}
+		serverURL := srv.GetURLForAPIType(upstreamType)
 		// On fallback, preserve the actual model used (don't rewrite back to
 		// the original) so the client knows which model actually responded.
 		responseModel := model
@@ -352,6 +402,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			FallbackErrors: attemptErrors,
 			KeepAliveIdle:  srvKeepAlive,
 			Proxy:          srv.ProxyURL(),
+			UpstreamPath:   plan.Path,
+			Convert:        meta.convert,
+			ConvertNotes:   meta.convertNotes,
 		}
 		if meta.capture != nil {
 			rh.Trace = meta.capture
@@ -480,6 +533,15 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	if refusal != nil {
+		r.record(req, requestStart, model, attempts[0].targetModel, attempts[0].server.ID,
+			proxy.ProxyMetrics{}, http.StatusBadRequest, refusal.Error(),
+			len(attempts) > 1, apiType, jev, meta)
+		log.Warnf("[%s] model=%q — refused: %v", req.URL.Path, model, refusal)
+		http.Error(w, refusal.Error(), http.StatusBadRequest)
+		return
+	}
+
 	errorBody := ""
 	if lastErr != nil {
 		errorBody = lastErr.Error()
@@ -522,6 +584,9 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 		AudioRTF:              pm.AudioRTF,
 		APIType:               apiType,
 		APIEndpoint:           meta.class,
+		UpstreamEndpoint:      meta.upstreamPath,
+		Convert:               meta.convert,
+		ConvertNotes:          meta.convertNotes,
 		ClientIP:              clientIP(req),
 	}
 	m.Class, m.Features = meta.class, meta.features

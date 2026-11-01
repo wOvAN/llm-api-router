@@ -37,7 +37,7 @@ type Options struct {
 // declaration, "off" forces passthrough, "messages>chat" names the edge.
 func Decide(client Dialect, path string, protocols []domain.ServerProtocol, forced string) (Plan, error) {
 	ident := Plan{From: client, Dialect: client, Path: path}
-	if forced == "off" || client == "" || path == "" {
+	if forced == "off" || DialectForPath(path) == "" {
 		return ident, nil
 	}
 	if forced != "" && forced != "auto" {
@@ -52,16 +52,21 @@ func Decide(client Dialect, path string, protocols []domain.ServerProtocol, forc
 		return Plan{}, &Error{Code: CodeNoDialect, Msg: fmt.Sprintf(
 			"conversion %s is not supported", forced)}
 	}
+	if len(protocols) == 0 {
+		// Nothing declared: today's behavior, the client's own endpoint — checked
+		// before the legacy refusal, so an undeclared backend keeps /v1/completions.
+		return ident, nil
+	}
 	if client == Legacy {
 		// /v1/completions wants a rendered prompt: the chat template lives in the
 		// backend's tokenizer, which the proxy does not have.
 		return Plan{}, &Error{Code: CodeNoDialect, Field: "path", Msg: "converting /v1/completions is not supported: the chat template is applied by the backend"}
 	}
-	if len(protocols) == 0 {
-		return ident, nil
-	}
+	// Identity compares dialects, not path strings: an operator who declares the
+	// root-served llama.cpp form (/messages, /chat/completions — a form this
+	// router's URL join deliberately supports) means the same endpoint.
 	for _, p := range protocols {
-		if p.Path == path {
+		if DialectForPath(p.Path) == client {
 			return ident, nil
 		}
 	}
