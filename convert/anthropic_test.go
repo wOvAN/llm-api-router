@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +64,10 @@ func TestMessagesToChatCore(t *testing.T) {
 	call, _ := calls[0].(map[string]any)
 	if call["id"] != "tu_1" || call["type"] != "function" {
 		t.Fatalf("tool call shape: %+v", call)
+	}
+	cfn, _ := call["function"].(map[string]any)
+	if cfn["arguments"] != `{"url":"u"}` {
+		t.Fatalf("tool_call arguments must be the serialized JSON string, not the raw object: %#v", cfn["arguments"])
 	}
 	toolMsg, _ := msgs[3].(map[string]any)
 	if toolMsg["role"] != "tool" || toolMsg["tool_call_id"] != "tu_1" || toolMsg["content"] != "ok" {
@@ -134,6 +139,14 @@ func TestMessagesToChatRefusesUnrepresentable(t *testing.T) {
 	if len(notes) != 1 || notes[0] != "top_k=dropped" {
 		t.Fatalf("drop not reported: %v", notes)
 	}
+	// thinking is a reported drop too (amended plan, R14), spelled like every
+	// other drop.
+	_, notes, err = MessagesToChat([]byte(
+		`{"model":"m","max_tokens":1,"messages":[],"thinking":{"type":"enabled","budget_tokens":100}}`),
+		Options{DropParams: true})
+	if err != nil || len(notes) != 1 || notes[0] != "thinking=dropped" {
+		t.Fatalf("thinking under drop_params must be a reported drop: %v %v", notes, err)
+	}
 }
 
 func mustFail(t *testing.T, body string) error {
@@ -167,6 +180,236 @@ func TestMessagesToChatImagesBecomeDataURLs(t *testing.T) {
 	iu, _ := part["image_url"].(map[string]any)
 	if iu["url"] != "data:image/png;base64,AAA" {
 		t.Fatalf("image not mapped to an OpenAI image_url data URL: %+v", part)
+	}
+}
+
+// OpenAI's tool_calls[].function.arguments is a JSON string on the wire: a
+// vLLM-shaped backend 4xxs on a raw object, and 4xx rides the relay (no retry,
+// no fallback), so the object must be serialized here.
+func TestMessagesToChatToolCallArgumentsSerialized(t *testing.T) {
+	in := `{"model":"m","max_tokens":1,"messages":[{"role":"assistant","content":[
+		{"type":"tool_use","id":"t1","name":"f"},
+		{"type":"tool_use","id":"t2","name":"g","input":{"a":1,"b":[2]}}]}]}`
+	out, notes, err := MessagesToChat([]byte(in), Options{})
+	if err != nil {
+		t.Fatalf("MessagesToChat: %v", err)
+	}
+	if notes != nil {
+		t.Fatalf("lossless request: %v", notes)
+	}
+	m := decode(t, out)
+	msgs, _ := m["messages"].([]any)
+	am, _ := msgs[0].(map[string]any)
+	calls, _ := am["tool_calls"].([]any)
+	if len(calls) != 2 {
+		t.Fatalf("want 2 tool calls: %+v", am["tool_calls"])
+	}
+	c0, _ := calls[0].(map[string]any)
+	f0, _ := c0["function"].(map[string]any)
+	if f0["arguments"] != "{}" {
+		t.Fatalf("a tool_use with no input must serialize to {}: %#v", f0["arguments"])
+	}
+	c1, _ := calls[1].(map[string]any)
+	f1, _ := c1["function"].(map[string]any)
+	if f1["arguments"] != `{"a":1,"b":[2]}` {
+		t.Fatalf("input must ride as its exact JSON string: %#v", f1["arguments"])
+	}
+}
+
+// The always-400 class (spec R14): a field whose meaning the backend can not
+// recover stays a refusal even under drop_params — shipping a request whose PDF,
+// hosted tool run or audio clip silently vanished is worse than a 400, and the
+// drop_params invitation must not be offered for it. (thinking is NOT in this
+// class: the amended plan makes it a reported drop, thinking=dropped.)
+func TestMessagesToChatAlwaysRefusedClass(t *testing.T) {
+	cases := map[string]string{
+		"document":    `{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","media_type":"application/pdf","file_id":"f"}}]}]}`,
+		"audio":       `{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"AAA"}}]}]}`,
+		"hosted tool": `{"model":"m","max_tokens":1,"messages":[],"tools":[{"type":"web_search_20250305","name":"web_search"}]}`,
+	}
+	for name, in := range cases {
+		_, notes, err := MessagesToChat([]byte(in), Options{DropParams: true})
+		code, field, ok := fieldErr(err, "")
+		if !ok || code != CodeField || field == "" {
+			t.Fatalf("%s: drop_params must not smuggle an always-refused field through: code=%q field=%q err=%v", name, code, field, err)
+		}
+		if notes != nil {
+			t.Fatalf("%s: a refused field must not also be noted: %v", name, notes)
+		}
+		if strings.Contains(err.Error(), "drop_params") {
+			t.Fatalf("%s: refusal must not invite drop_params: %v", name, err)
+		}
+	}
+}
+
+// Anthropic's output_format is flat ({type,name,schema,strict}); Chat's
+// response_format nests the payload under json_schema. A copy-across would leave
+// the schema where the backend looks for a {name,schema,strict} object:
+// structured output silently unconstrained.
+func TestMessagesToChatOutputFormatNesting(t *testing.T) {
+	out, notes, err := MessagesToChat([]byte(
+		`{"model":"m","max_tokens":1,"messages":[],"output_format":{"type":"json_schema","name":"recipe","strict":true,"schema":{"type":"object"}}}`), Options{})
+	if err != nil {
+		t.Fatalf("MessagesToChat: %v", err)
+	}
+	if notes != nil {
+		t.Fatalf("the json_schema nesting is lossless: %v", notes)
+	}
+	m := decode(t, out)
+	rf, _ := m["response_format"].(map[string]any)
+	if rf == nil || rf["type"] != "json_schema" {
+		t.Fatalf("response_format: %+v", m["response_format"])
+	}
+	if _, has := rf["schema"]; has {
+		t.Fatalf("Anthropic's flat schema leaked into the chat response_format: %+v", rf)
+	}
+	js, _ := rf["json_schema"].(map[string]any)
+	if js["name"] != "recipe" || js["strict"] != true || js["schema"] == nil {
+		t.Fatalf("json_schema nesting: %+v", rf)
+	}
+	// text form and the omitted optional name
+	out, notes, err = MessagesToChat([]byte(
+		`{"model":"m","max_tokens":1,"messages":[],"output_format":{"type":"json_schema","schema":{"type":"object"}}}`), Options{})
+	if err != nil || notes != nil {
+		t.Fatalf("json_schema without a name: %v %v", err, notes)
+	}
+	rf, _ = decode(t, out)["response_format"].(map[string]any)
+	js, _ = rf["json_schema"].(map[string]any)
+	if js["name"] != "response" {
+		t.Fatalf("a chat json_schema must carry a name: %+v", rf)
+	}
+	if _, has := js["strict"]; has {
+		t.Fatalf("strict must not be invented: %+v", rf)
+	}
+	out, _, err = MessagesToChat([]byte(
+		`{"model":"m","max_tokens":1,"messages":[],"output_format":{"type":"text"}}`), Options{})
+	if err != nil {
+		t.Fatalf("text output_format: %v", err)
+	}
+	rf, _ = decode(t, out)["response_format"].(map[string]any)
+	if rf["type"] != "text" {
+		t.Fatalf("text form: %+v", rf)
+	}
+	// a type chat has no shape for: the droppable path
+	_, _, err = MessagesToChat([]byte(
+		`{"model":"m","max_tokens":1,"messages":[],"output_format":{"type":"grammar","grammar":"x"}}`), Options{})
+	if _, _, ok := fieldErr(err, "output_format"); !ok {
+		t.Fatalf("an output_format type chat has no shape for must name the field: %v", err)
+	}
+	_, notes, err = MessagesToChat([]byte(
+		`{"model":"m","max_tokens":1,"messages":[],"output_format":{"type":"grammar","grammar":"x"}}`),
+		Options{DropParams: true})
+	if err != nil || len(notes) != 1 || notes[0] != "output_format=dropped" {
+		t.Fatalf("the output_format drop must be reported: %v %v", notes, err)
+	}
+}
+
+// tool_choice: the four chat values, the named-function forms, and — the part the
+// loss policy guards — nothing may vanish quietly: disable_parallel_tool_use maps
+// to parallel_tool_calls, and any value with no chat representation (a bare
+// "tool", mcp_tool, an undecodable value) is refused (droppable with a note).
+func TestMessagesToChatToolChoicePolicy(t *testing.T) {
+	// parallel_tool_calls mapping is lossless: no note.
+	out, notes, err := MessagesToChat([]byte(
+		`{"model":"m","max_tokens":1,"messages":[],"tools":[{"name":"f","input_schema":{}}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true}}`), Options{})
+	if err != nil || notes != nil {
+		t.Fatalf("disable_parallel_tool_use: %v %v", err, notes)
+	}
+	m := decode(t, out)
+	if m["tool_choice"] != "auto" || m["parallel_tool_calls"] != false {
+		t.Fatalf("tool_choice/parallel_tool_calls: %v %v", m["tool_choice"], m["parallel_tool_calls"])
+	}
+	// a bare string is validated against the chat values, not forwarded verbatim
+	out, notes, err = MessagesToChat([]byte(`{"model":"m","max_tokens":1,"messages":[],"tool_choice":"auto"}`), Options{})
+	if err != nil || notes != nil {
+		t.Fatalf("bare auto: %v %v", err, notes)
+	}
+	if m := decode(t, out); m["tool_choice"] != "auto" {
+		t.Fatalf("bare auto: %v", m["tool_choice"])
+	}
+	if _, _, ok := fieldErr(mustFail(t, `{"model":"m","max_tokens":1,"messages":[],"tool_choice":"tool"}`), "tool_choice"); !ok {
+		t.Fatal("a bare tool_choice the chat dialect has no value for must name the field")
+	}
+	// provider-side object types (mcp_tool) and undecodable values: refused by
+	// default, a reported drop under drop_params.
+	for _, tc := range []string{`{"type":"mcp_tool","name":"m"}`, `["auto"]`} {
+		in := `{"model":"m","max_tokens":1,"messages":[],"tool_choice":` + tc + `}`
+		if _, _, ok := fieldErr(mustFail(t, in), "tool_choice"); !ok {
+			t.Fatalf("%s: must refuse naming tool_choice", tc)
+		}
+		_, notes, err := MessagesToChat([]byte(in), Options{DropParams: true})
+		if err != nil || len(notes) != 1 || notes[0] != "tool_choice=dropped" {
+			t.Fatalf("%s: drop_params must report the drop: %v %v", tc, notes, err)
+		}
+	}
+}
+
+// An Anthropic image with a url source rides chat's image_url losslessly — it
+// must not 400, and it must not depend on drop_params.
+func TestMessagesToChatImageSourceURL(t *testing.T) {
+	in := `{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[
+		{"type":"text","text":"what is in this?"},
+		{"type":"image","source":{"type":"url","url":"https://x.example/y.png"}}]}]}`
+	out, notes, err := MessagesToChat([]byte(in), Options{})
+	if err != nil {
+		t.Fatalf("MessagesToChat: %v", err)
+	}
+	if notes != nil {
+		t.Fatalf("url images map losslessly: %v", notes)
+	}
+	m := decode(t, out)
+	msgs, _ := m["messages"].([]any)
+	um, _ := msgs[0].(map[string]any)
+	parts, _ := um["content"].([]any)
+	if len(parts) != 2 {
+		t.Fatalf("want text + image parts: %+v", um["content"])
+	}
+	part, _ := parts[1].(map[string]any)
+	iu, _ := part["image_url"].(map[string]any)
+	if iu["url"] != "https://x.example/y.png" {
+		t.Fatalf("url source not carried over: %+v", part)
+	}
+}
+
+// The small fields: a tool with no input_schema omits parameters (a null
+// parameters is a schema vLLM rejects), an untyped content block refuses under a
+// non-empty field name, and a message with no content key converts like
+// content:"" (not an "invalid content" refusal for a key that was never sent).
+func TestMessagesToChatSmallFields(t *testing.T) {
+	out, notes, err := MessagesToChat([]byte(
+		`{"model":"m","max_tokens":1,"messages":[],"tools":[{"name":"f","description":"d"}]}`), Options{})
+	if err != nil || notes != nil {
+		t.Fatalf("MessagesToChat: %v %v", err, notes)
+	}
+	m := decode(t, out)
+	tools, _ := m["tools"].([]any)
+	tl, _ := tools[0].(map[string]any)
+	fn, _ := tl["function"].(map[string]any)
+	if _, has := fn["parameters"]; has {
+		t.Fatalf("a tool with no input_schema must omit parameters: %+v", fn)
+	}
+
+	code, field, ok := fieldErr(mustFail(t,
+		`{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"text":"hi"}]}]}`), "")
+	if !ok || code != CodeField || field == "" {
+		t.Fatalf("an untyped content block must refuse under a non-empty field: code=%q field=%q", code, field)
+	}
+	_, notes, err = MessagesToChat([]byte(
+		`{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"text":"hi"}]}]}`),
+		Options{DropParams: true})
+	if err != nil || len(notes) != 1 || notes[0] != field+"=dropped" {
+		t.Fatalf("the untyped block drop must be reported under the same name: %v %v", notes, err)
+	}
+
+	out, notes, err = MessagesToChat([]byte(`{"model":"m","max_tokens":1,"messages":[{"role":"user"}]}`), Options{})
+	if err != nil || notes != nil {
+		t.Fatalf("a message with no content key: %v %v", err, notes)
+	}
+	m = decode(t, out)
+	msgs, _ := m["messages"].([]any)
+	um, _ := msgs[0].(map[string]any)
+	if um["content"] != "" {
+		t.Fatalf("no content key must convert like an empty message: %+v", um)
 	}
 }
 

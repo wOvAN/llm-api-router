@@ -39,23 +39,23 @@ type aMsg struct {
 }
 
 // aBlock is the union of the Anthropic content-block shapes this spoke reads
-// (text, image, tool_use, tool_result, plus the fields tools declare).
+// (text, image, document, audio, tool_use, tool_result).
 type aBlock struct {
-	Type        string          `json:"type"`
-	Text        string          `json:"text"`
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Input       json.RawMessage `json:"input"`
-	ToolUseID   string          `json:"tool_use_id"`
-	Content     json.RawMessage `json:"content"`
-	Source      *aSource        `json:"source"`
-	Description string          `json:"description"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
+	Source    *aSource        `json:"source"`
 }
 
 type aSource struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
+	URL       string `json:"url"`
 }
 
 type aTool struct {
@@ -71,13 +71,21 @@ func MessagesToChat(body []byte, o Options) ([]byte, []string, error) {
 		return nil, nil, &Error{Code: CodeField, Field: "body", Msg: "invalid JSON body: " + err.Error()}
 	}
 	var notes []string
+	// The always-400 class: content the target dialect cannot carry AND cannot
+	// lose quietly (a document, an audio block, a hosted tool run — the answer
+	// would be about material that vanished). drop_params can not buy these off,
+	// and their refusal must not invite it.
+	refuse := func(field, detail string) error {
+		return &Error{Code: CodeField, Field: field,
+			Msg: field + " has no Chat Completions representation (" + detail + ")."}
+	}
 	// drop refuses by default (a field with no representation must stop the
 	// request: the client asked for something the backend can not do) and reports
 	// a note when the operator opted into silent drops.
 	drop := func(field, detail string) error {
 		if !o.DropParams {
-			return &Error{Code: CodeField, Field: field, Msg: field + " has no Chat Completions " +
-				"representation (" + detail + "). Set settings.convert.drop_params to drop it."}
+			return &Error{Code: CodeField, Field: field, Msg: refuse(field, detail).Error() +
+				" Set settings.convert.drop_params to drop it."}
 		}
 		notes = append(notes, field+"=dropped")
 		return nil
@@ -112,14 +120,19 @@ func MessagesToChat(body []byte, o Options) ([]byte, []string, error) {
 	if len(in.Thinking) > 0 {
 		// Anthropic signs its thinking blocks; a signature can not be reproduced
 		// from OpenAI reasoning text, so a multi-turn tool loop over a converted
-		// request would break mid-conversation. Emulating it is never permitted.
+		// request loses the chain of thought. A reported drop, per the plan.
 		if err := drop("thinking", "signed thinking can not round-trip"); err != nil {
 			return nil, nil, err
 		}
 	}
 	if len(in.OutputFormat) > 0 {
-		out["response_format"] = in.OutputFormat
-		notes = append(notes, "output_format=response_format")
+		rf, err := chatResponseFormat(in.OutputFormat, drop)
+		if err != nil {
+			return nil, nil, err
+		}
+		if rf != nil {
+			out["response_format"] = rf
+		}
 	}
 
 	msgs := make([]any, 0, len(in.Messages)+1)
@@ -127,7 +140,7 @@ func MessagesToChat(body []byte, o Options) ([]byte, []string, error) {
 		msgs = append(msgs, map[string]any{"role": "system", "content": sys})
 	}
 	for _, m := range in.Messages {
-		converted, err := convertMessage(m, drop)
+		converted, err := convertMessage(m, drop, refuse)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -139,22 +152,30 @@ func MessagesToChat(body []byte, o Options) ([]byte, []string, error) {
 		tools := make([]any, 0, len(in.Tools))
 		for _, tl := range in.Tools {
 			if tl.Type != "" {
-				// web_search_20250305, text_editor_20241022, computer_*: the
-				// provider runs these, the model does not.
-				if err := drop("tools", "hosted tool "+tl.Type+" is provider-specific"); err != nil {
-					return nil, nil, err
-				}
-				continue
+				// web_search_20250305, file_search, code_interpreter, mcp:
+				// the provider runs these, the model does not. An agent whose
+				// declared tool vanished answers without it — always-400 class.
+				return nil, nil, refuse("tools", "hosted tool "+tl.Type+" is provider-specific")
 			}
-			tools = append(tools, map[string]any{"type": "function", "function": map[string]any{
-				"name": tl.Name, "description": tl.Description, "parameters": tl.InputSchema}})
+			fn := map[string]any{"name": tl.Name, "description": tl.Description}
+			if len(tl.InputSchema) > 0 {
+				fn["parameters"] = tl.InputSchema
+			}
+			tools = append(tools, map[string]any{"type": "function", "function": fn})
 		}
 		if len(tools) > 0 {
 			out["tools"] = tools
 		}
 	}
-	if tc := chatToolChoice(in.ToolChoice); tc != nil {
+	tc, parallel, err := chatToolChoice(in.ToolChoice, drop)
+	if err != nil {
+		return nil, nil, err
+	}
+	if tc != nil {
 		out["tool_choice"] = tc
+	}
+	if parallel != nil {
+		out["parallel_tool_calls"] = !*parallel
 	}
 	if in.Metadata != nil && in.Metadata.UserID != "" {
 		out["user"] = in.Metadata.UserID
@@ -193,11 +214,17 @@ func systemText(raw json.RawMessage) string {
 // convertMessage maps one Anthropic message to one or more Chat Completions
 // messages: an assistant turn carrying tool_use becomes a message with tool_calls,
 // and a tool_result becomes a role:"tool" message per call.
-func convertMessage(m aMsg, drop func(string, string) error) ([]any, error) {
+func convertMessage(m aMsg, drop, refuse func(string, string) error) ([]any, error) {
 	var text string
 	var blocks []aBlock
-	if json.Unmarshal(m.Content, &text) != nil {
-		if json.Unmarshal(m.Content, &blocks) != nil {
+	content := m.Content
+	if len(content) == 0 {
+		// A message with no content key at all behaves like content: null (which
+		// unmarshals to the empty string), not like a malformed one.
+		content = json.RawMessage(`""`)
+	}
+	if json.Unmarshal(content, &text) != nil {
+		if json.Unmarshal(content, &blocks) != nil {
 			return nil, &Error{Code: CodeField, Field: "content", Msg: "content must be a string or blocks"}
 		}
 	}
@@ -213,17 +240,33 @@ func convertMessage(m aMsg, drop func(string, string) error) ([]any, error) {
 		case "text":
 			parts = append(parts, map[string]any{"type": "text", "text": b.Text})
 		case "image":
-			if b.Source == nil || b.Source.Type != "base64" {
-				if err := drop("image", "only base64 image sources are proxied"); err != nil {
+			switch {
+			case b.Source != nil && b.Source.Type == "base64" && b.Source.Data != "":
+				parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{
+					"url": "data:" + b.Source.MediaType + ";base64," + b.Source.Data}})
+			case b.Source != nil && b.Source.Type == "url" && b.Source.URL != "":
+				// Chat's image_url.url takes an http(s) URL directly: lossless.
+				parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{
+					"url": b.Source.URL}})
+			default:
+				if err := drop("image", "the image source is neither a base64 payload nor a url"); err != nil {
 					return nil, err
 				}
-				continue
 			}
-			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{
-				"url": "data:" + b.Source.MediaType + ";base64," + b.Source.Data}})
+		case "document", "audio":
+			// A PDF page or an audio clip the chat backend can not ingest:
+			// always-400 class, drop_params can not buy it off.
+			return nil, refuse(b.Type, b.Type+" content can not be ingested by a Chat Completions backend")
 		case "tool_use":
+			// Chat's arguments is a JSON string on the wire (official SDK:
+			// Arguments string); forwarding the raw object makes strict backends
+			// 4xx, which the relay forwards as-is — no retry, no fallback.
+			args := "{}"
+			if len(b.Input) > 0 && string(b.Input) != "null" {
+				args = string(b.Input)
+			}
 			calls = append(calls, map[string]any{"id": b.ID, "type": "function",
-				"function": map[string]any{"name": b.Name, "arguments": b.Input}})
+				"function": map[string]any{"name": b.Name, "arguments": args}})
 		case "tool_result":
 			body, err := toolResultContent(b, drop)
 			if err != nil {
@@ -231,7 +274,11 @@ func convertMessage(m aMsg, drop func(string, string) error) ([]any, error) {
 			}
 			out = append(out, map[string]any{"role": "tool", "tool_call_id": b.ToolUseID, "content": body})
 		default:
-			if err := drop(b.Type, "content block has no Chat Completions representation"); err != nil {
+			name := b.Type
+			if name == "" {
+				name = "content_block"
+			}
+			if err := drop(name, "content block has no Chat Completions representation"); err != nil {
 				return nil, err
 			}
 		}
@@ -280,36 +327,105 @@ func toolResultContent(b aBlock, drop func(string, string) error) (string, error
 	return strings.Join(parts, "\n"), nil
 }
 
-// chatToolChoice maps Anthropic's tool_choice (a string or {type,name}) onto the
-// Chat Completions values: "auto", "required", a named function, or "none".
-func chatToolChoice(raw json.RawMessage) any {
+// chatResponseFormat rebuilds Anthropic's flat output_format
+// ({type,name,schema,strict}) as Chat Completions' response_format, whose
+// json_schema payload nests one level deeper: copying the object across would
+// leave the schema where the backend looks for a {name,schema,strict} object,
+// silently un-constraining the answer.
+func chatResponseFormat(raw json.RawMessage, drop func(string, string) error) (any, error) {
+	var of struct {
+		Type   string          `json:"type"`
+		Name   string          `json:"name"`
+		Schema json.RawMessage `json:"schema"`
+		Strict *bool           `json:"strict"`
+	}
+	if json.Unmarshal(raw, &of) != nil {
+		if err := drop("output_format", "output_format is not an object"); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	switch of.Type {
+	case "json_schema":
+		if len(of.Schema) == 0 {
+			if err := drop("output_format", "a json_schema output_format carries no schema"); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
+		name := of.Name
+		if name == "" {
+			name = "response" // chat requires a schema name, Anthropic makes it optional
+		}
+		js := map[string]any{"name": name, "schema": of.Schema}
+		if of.Strict != nil {
+			js["strict"] = *of.Strict
+		}
+		return map[string]any{"type": "json_schema", "json_schema": js}, nil
+	case "json_object", "text":
+		return map[string]any{"type": of.Type}, nil
+	}
+	if err := drop("output_format", "output_format type "+of.Type+" has no Chat Completions representation"); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// chatToolChoice maps Anthropic's tool_choice (a string or {type,name,
+// disable_parallel_tool_use}) onto Chat Completions: the value plus the parallel
+// flag it carries. The loss policy governs the rest: a value with no chat
+// representation (a bare "tool", the provider-side mcp_tool, an undecodable
+// value) goes through drop — refused by default, a reported drop under
+// drop_params — never a quiet vanish.
+func chatToolChoice(raw json.RawMessage, drop func(string, string) error) (any, *bool, error) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		if s == "any" {
-			return "required"
+		switch s {
+		case "any":
+			return "required", nil, nil
+		case "auto", "required", "none":
+			return s, nil, nil
 		}
-		return s
+		if err := drop("tool_choice", "a bare tool_choice "+strconv.Quote(s)+" is not a Chat Completions value"); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, nil
 	}
 	var obj struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
+		Type            string `json:"type"`
+		Name            string `json:"name"`
+		DisableParallel *bool  `json:"disable_parallel_tool_use"`
 	}
 	if json.Unmarshal(raw, &obj) != nil {
-		return nil
+		if err := drop("tool_choice", "tool_choice has no Chat Completions representation"); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, nil
 	}
+	var tc any
 	switch obj.Type {
 	case "any":
 		if obj.Name == "" {
-			return "required"
+			tc = "required"
+		} else {
+			tc = namedFunction(obj.Name)
 		}
-		return map[string]any{"type": "function", "function": map[string]any{"name": obj.Name}}
 	case "tool":
-		return map[string]any{"type": "function", "function": map[string]any{"name": obj.Name}}
+		tc = namedFunction(obj.Name)
 	case "auto", "none":
-		return obj.Type
+		tc = obj.Type
+	default:
+		// mcp_tool and the other provider-side choices.
+		if err := drop("tool_choice", "tool_choice type "+obj.Type+" is provider-specific"); err != nil {
+			return nil, nil, err
+		}
 	}
-	return nil
+	return tc, obj.DisableParallel, nil
+}
+
+func namedFunction(name string) any {
+	return map[string]any{"type": "function", "function": map[string]any{"name": name}}
 }
