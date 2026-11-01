@@ -55,9 +55,36 @@ type stack struct {
 	openai    openai.Client
 	anthropic anthropic.Client
 
-	mu       sync.Mutex
-	lastReq  *http.Request
-	lastBody []byte
+	mu         sync.Mutex
+	lastReq    *http.Request
+	lastBody   []byte
+	clientBody bytes.Buffer
+}
+
+// teeWriter records what the proxy wrote to the client, so a test can tell a
+// frame the emitter forwarded from one the SDK dropped on the floor (see
+// clientBytes). It is the outermost client-side writer: the proxy's own writer
+// chain wraps it and only ever needs Write/WriteHeader/Flush.
+type teeWriter struct {
+	http.ResponseWriter
+	mu   *sync.Mutex
+	body *bytes.Buffer
+}
+
+func (t *teeWriter) Write(b []byte) (int, error) {
+	n, err := t.ResponseWriter.Write(b)
+	if n > 0 {
+		t.mu.Lock()
+		t.body.Write(b[:n])
+		t.mu.Unlock()
+	}
+	return n, err
+}
+
+func (t *teeWriter) Flush() {
+	if f, ok := t.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func newStack(t *testing.T, backend http.Handler) *stack {
@@ -94,8 +121,10 @@ func newStack(t *testing.T, backend http.Handler) *stack {
 		t.Fatalf("AddServer: %v", err)
 	}
 
-	r := router.New(st.store, st.ms, nil, nil, nil, nil)
-	st.proxy = httptest.NewServer(http.HandlerFunc(r.Handle))
+	rt := router.New(st.store, st.ms, nil, nil, nil, nil)
+	st.proxy = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rt.Handle(&teeWriter{ResponseWriter: w, mu: &st.mu, body: &st.clientBody}, r)
+	}))
 	t.Cleanup(st.proxy.Close)
 
 	st.openai = openai.NewClient(
@@ -122,11 +151,37 @@ func (st *stack) addRule(incoming []string, target string) {
 	}
 }
 
+// declareProtocols declares the endpoints the fake backend serves, which is what
+// decides whether the router converts the request (see convert.Decide). The
+// default stack declares nothing, so every existing test stays a passthrough.
+func (st *stack) declareProtocols(paths ...string) {
+	st.t.Helper()
+	srv, ok := st.store.GetServer("srv1")
+	if !ok {
+		st.t.Fatalf("server srv1 not found")
+	}
+	for _, p := range paths {
+		srv.Protocols = append(srv.Protocols, domain.ServerProtocol{Path: p})
+	}
+	if err := st.store.UpdateServer("srv1", srv); err != nil {
+		st.t.Fatalf("UpdateServer: %v", err)
+	}
+}
+
 // lastRequest returns the most recent request the fake backend saw.
 func (st *stack) lastRequest() (*http.Request, []byte) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.lastReq, st.lastBody
+}
+
+// clientBytes returns everything the proxy has written to the client on the
+// most recent request — for the tests that must distinguish a frame the
+// emitter forwarded verbatim from one the SDK's decoder ignored.
+func (st *stack) clientBytes() []byte {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.clientBody.Bytes()
 }
 
 // assertUpstream verifies the proxy rewrote the request model to wantModel and

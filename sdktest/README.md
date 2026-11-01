@@ -17,6 +17,9 @@ What it validates, through the full request/response pipeline:
   its client-side stripping, tool-call streaming, `/v1/models`
 - Anthropic: JSON + SSE streaming (canonical and llama.cpp shapes), `ping`
   tolerance, 4xx error passthrough
+- protocol conversion: an Anthropic client served by a chat-only backend
+  (`protocols` declared on the server), JSON and stream, plus what an
+  unparseable upstream frame costs that client
 - proxy-side metrics capture of token usage and llama.cpp native `timings`
 
 ## Separate module, on purpose
