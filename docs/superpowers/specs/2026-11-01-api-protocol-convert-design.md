@@ -1,0 +1,286 @@
+# Конвертер диалектов API (chat ↔ messages ↔ responses)
+
+> Статус: дизайн согласован в диалоге, реализации нет.
+> Объём — **вариант A**: перевод тела и стрима между диалектами. Никакого хранилища ответов в
+> прокси (`previous_response_id` не материализуем), никакого `chat ↔ completions`, ничего audio/embeddings.
+> Конверсия включается, когда бэкенд **достаточно** хорошо говорит на диалекте клиента, а не когда строки
+> в `api_types` не совпали.
+
+## Цель
+
+Сейчас роутер — прозрачный ретранслятор: путь клиента определяет протокол
+(`apiTypeFromPath`: `/messages` → anthropic, иначе openai), протокол определяет только **URL**
+бэкенда (`Server.GetURLForAPIType`) и форму heartbeat-кадра. Тело запроса и ответ никто не
+переводит. Следствие: попытка, у которой бэкенд не говорит на диалекте клиента, уезжает на
+апстрим с чужим путём и чужим телом, апстрим отвечает 404/422, а 4xx/5xx по существующему
+правилу **не считаются ошибкой** → ни retry, ни fallback. Клиент получает сырой 404 бэкенда,
+правило считается здоровым, в метриках — успешный fallback-проход. Это дыра, и она уже
+существует; конвертер — способ её закрыть, а не только способ «дать Claude Code локальный
+llama.cpp через OpenAI-эндпоинт».
+
+Второе следствие, более тонкое: у локальных движков поддержка диалектов **градированная**
+(см. таблицу ниже). «Бэкенд отдаёт `/v1/responses`» не значит «Responses-запрос клиента
+пройдёт»: у vLLM `store` молча игнорируется, и следующий запрос цепочки падает уже на другом
+движке. Значит триггер конверсии — не имя протокола, а **способность бэкенда обслужить
+конкретный запрос**.
+
+## Не делаем (сознательно)
+
+- **Никакого стора ответов в прокси.** `previous_response_id` материализуется только там, где
+  его реализовал автор бэкенда (vLLM с `VLLM_ENABLE_RESPONSES_API_STORE`, SGLang с включённым
+  response store) — тогда он едет как есть. Прокси-стор воспроизвёл бы худший из отказов,
+  которые мы сами себе перечислили: `200` с тихо усечённой историей, плюс требует общего
+  состояния между репликами (`docs/ha-replicas.md`: всё состояние процесса per-process), TTL,
+  вытеснения и семантики дерева. Это отдельная подсистема и отдельный spec.
+- **Никакого `chat ↔ completions`** (legacy text completions). `/v1/completions` хочет сырой
+  prompt; chat-шаблон живёт в tokenizer'е бэкенда, у прокси его нет. Строгий 400.
+- **Никакого прямого `messages ↔ responses`.** Только через хаб (chat), два спока.
+- Ничего audio / embeddings / `systemone` / `realtime`: нет парного диалекта.
+- Никакого авто-ремёпа `tools`-имён «в обе стороны с коллизиями» на v1: коллизия = 400.
+- Никакого стора «второй копии тела» в трассе (см. «Наблюдаемость»).
+
+## Словарь
+
+Диалекты (`convert.Dialect`), которые конвертер различает:
+
+| Диалект | Путь клиента | Форма тела |
+|---|---|---|
+| `chat` | `/v1/chat/completions` | OpenAI Chat Completions |
+| `responses` | `/v1/responses` | OpenAI Responses |
+| `messages` | `/v1/messages` | Anthropic Messages |
+| `completions` | `/v1/completions` | legacy, конверсии не подлежит |
+
+**Хаб — `chat`** (как в LiteLLM). Spoke = пара `(диалект → хаб)` и `(хаб → диалект)`;
+N² переходов никто не хранит. Канон = структуры `chat`, они же — единственная точка, где
+маппинги проверяются тестами.
+
+## Что умеют бэкенды (проверено по `.info`, не по именам роутов)
+
+| | `/v1/responses` | `/v1/messages` | стрим Responses | state |
+|---|---|---|---|---|
+| llama.cpp | шим над chat: `tools/server/server-chat.cpp:32` (`input`→messages, `instructions`→system, `tools[].type`→`function`) | есть (`server.cpp:190`) | created/in_progress/output_item.*/content_part.*/output_text.*/function_call_arguments.*/completed; нет `failed`, `incomplete`, `reasoning_summary_*`, hosted-тулзы | **400** `'previous_response_id'` (`server-chat.cpp:36`) |
+| vLLM | полный (`entrypoints/openai/responses/`) | есть (`entrypoints/anthropic/api_router.py`) | самый богатый: +`web_search_call.*`, `mcp_call*`, `code_interpreter_call*`, `custom_tool_call_input.*`, `failed`, `incomplete` | `store` **молча игнорируется** без env-флага (`responses/serving.py:162-172`), стор — dict без вытеснения (`FIXME: memory leak`, `:183`) |
+| SGLang | есть (`srt/entrypoints/openai/serving_responses.py`) | есть (`http_server.py:2150`) | есть `reasoning_summary_text.*`/`reasoning_summary_part.*` | под флагом store; иначе `_response_store_disabled_error` (`:339`); в коде `TODO(v): ensure this is propagated` (`protocol.py:2395`) |
+| audio.cpp | нет (чата нет) | нет | — | — |
+| Strata | есть (`/v1/responses`, `/v1/messages`, `count_tokens`) | есть | не аудитировано | — |
+| облако OpenAI | полный | нет | полный | полный |
+| облако Anthropic | нет | есть | — | — |
+
+Вывод, определяющий приоритет рёбер: `responses → chat` нужно не ради имени пути, а ради
+state-несовместимости, которой **нет ни у одного локального движка по умолчанию**. Ребро
+`messages ↔ chat` — самое частое по быту (Claude Code против OpenAI-only бэкенда; OpenAI-клиент
+против облака Anthropic).
+
+Модель способности нельзя вывести из `/v1/models`: полноту эндпоинта там не объявляет никто
+(`supported_endpoints` в этом клоне vLLM отсутствует, `server-models.cpp:2168` у llama.cpp даёт
+`id`/`owned_by`/`created_at`).
+
+## Модель способности
+
+`api_types` **не перегружаем** — сегодня это ключ выбора URL (`GetURLForAPIType`), а не
+объявление способности; существующие конфиги объявляют в нём единицы, и «переводить по
+отсутствию строки» молча сломало бы каждому, у кого llama.cpp описан как `["openai"]` при
+работающем `/v1/messages`.
+
+Способность живёт в новом поле сервера:
+
+```json
+"servers": {
+  "llama": {
+    "url": "http://host:8080/v1",
+    "api_types": ["openai"],
+    "protocols": [
+      { "path": "/v1/chat/completions" },
+      { "path": "/v1/messages" },
+      { "path": "/v1/responses", "state": false }
+    ]
+  }
+}
+```
+
+- Пусто (`protocols` не задан) = **совместимость**: считаем, что бэкенд говорит на том, что
+  объявлено в `api_types`, плюс (для локальных движков) результаты зонда. Поведение
+  существующих конфигов не меняется ни на байт.
+- Решение о конверсии на **каждую попытку** (у fallback-сервера и jev-кандидата свои
+  способности): `plan(clientDialect, path, body, server.protocols)`.
+- `rule.convert` / `fallback.convert` / `jev.candidates[].convert`: `"auto"` (по
+  способности) | `"off"` (никогда, чистый passthrough) | `"messages>chat"` (принудительно,
+  для отладки и для бэкендов, которые зонд не распознаёт).
+
+Зонд (опция, `config/capabilities.go` рядом с `CapabilitiesCache`, тот же кеш и fail-open):
+`POST` на эндпоинт с заведомо неполным телом (`{}`) различает «нет роута» (404) и «есть
+роут» (400 с текстом про поле: llama.cpp `'input' is required`). Ответ на
+`{"previous_response_id":"x"}` = 400 с текстом про `previous_response_id` ⇒
+поддержка есть, `state: false`. Дешевле, чем кажется: один запрос на сервер на TTL, как
+vision/audio-проба.
+
+## Точка врезки
+
+**Запрос — как можно раньше, ответ — как можно позже.** Всё остальное в цепочке продолжает
+видеть нативную форму апстрима, и `proxy/usage.go`, `modelRewriteWriter`, `loopDetector` и
+трасса не меняются ни на байт.
+
+- `router.Handle`: диалект клиента считается один раз из пути. `plan()` вызывается **внутри
+  цикла попыток**, рядом с `rewriteAttemptBody` (`router/router.go:294`): результат —
+  `(upstreamPath, convertedBody)`. `serverURL` (`:323`) берётся по **upstream**-диалекту, не
+  по клиентскому.
+- `EnsureStreamUsage` (`:245`) сегодня привязан к клиентскому пути и лежит вне цикла
+  попыток. Инъекция `stream_options.include_usage` бессмысленна для Anthropic-апстрима и
+  обязательна для chat-апстрима ⇒ **переезжает внутрь попытки** и решается по
+  upstream-диалекту. `stripStream` получает то же происхождение.
+- `ping` (`:258`) остаётся по **клиентскому** диалекту: heartbeat читает клиент.
+  `chat`/`responses` → SSE-комментарий, `messages` → `event: ping`.
+- Ответ: `convert.Stream` в цепочке **после** `sseRelay` (там уже целые `\n\n`-кадры) и
+  **до** `silenceWriter`-пары. Контракт: вход — один целый нативный кадр, выход — 0..N целых
+  кадров клиента. Нативные байты до конвертера уже прошли `metricsWriter` (usage/тайминги) и
+  `modelRewriteWriter` (имя модели правится в нативной форме — клиент увидит своё имя в своей
+  форме).
+- Mid-stream: `sendMidStreamError` и `loopDetector.sendLoopError` обязаны писать кадр в
+  **клиентском** диалекте (`chat` → `data:`-чанк с `finish_reason:"error"`; `messages` →
+  `event: error`; `responses` → `event: error` + `response.failed`). Существующая
+  таблица «OpenAI vs Anthropic» расширяется третьей веткой.
+- Ошибки апстрима (4xx/5xx, которые мы форвардим как есть) после конверсии становятся
+  нечитаемыми SDK клиента (у Anthropic `{"type":"error","error":{...}}`, у OpenAI
+  `{"error":{"message",...}}`). Значит **тело ошибки тоже переводится** — узкий переводчик по
+  трём формам, без разбора смысла.
+
+## Маппинг полей: `messages` ↔ `chat`
+
+Эталон для сверки — LiteLLM `llms/anthropic/experimental_pass_through/adapters/transformation.py`
+(1584 стр.) и `.../adapters/streaming_iterator.py` (1102), плюс llama.cpp-шим как живая
+спецификация того, что отвергать громко.
+
+| Канон (`chat`) | `messages` | `responses` | Судьба |
+|---|---|---|---|
+| system-сообщение | top-level `system` (string\|blocks) | `instructions` | lossless; несколько system → конкатенация в один |
+| `max_tokens` (опц.) | `max_tokens` **обязателен** | `max_output_tokens` | chat-клиент без лимита → дефолт из `settings.convert.max_tokens_default`; иначе 400 от бэкенда |
+| `stop` | `stop_sequences` | — | в `responses` терять некуда → поле не переводится, ребро `chat↔responses` его теряет |
+| `tools[].function.parameters` | `tools[].input_schema` | `tools[].function` | lossless; имена `/[a-zA-Z0-9_-]{1,64}/` |
+| `tool_calls[].{id,name,arguments}` / role `tool` + `tool_call_id` | `tool_use`(id,name,input) / `tool_result`(tool_use_id) | `function_call`(call_id,name,arguments) / `function_call_output` | lossless, `id` ↔ `call_id` |
+| `parallel_tool_calls` | `tool_choice.disable_parallel_tool_use` | `parallel_tool_calls` | lossless |
+| `reasoning_effort` / `reasoning{effort,summary}` | `thinking{type,budget_tokens}`, блоки `thinking`/`redacted_thinking` с **подписью** | `reasoning{effort,summary}` | **lossy**: effort↔budget_tokens — грубая сетка; подпись Anthropic не воспроизводится ⇒ на конвертированном запросе `thinking` **выключается** и это пишется в notes |
+| `response_format` (`json_schema`) | `output_format` (+`additionalProperties:false`) | `text.format` | lossless с правкой схемы |
+| `image_url{url: data:...}` | `source{type:base64,media_type,data}` | `input_image` | lossless; Anthropic `document`/PDF-блок в chat не помещается → 400 |
+| `usage` (`prompt_tokens`/`completion_tokens`, `prompt_tokens_details.cached_tokens`, `completion_tokens_details.reasoning_tokens`) | `input_tokens`/`output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` | `input_tokens`/`output_tokens` + details | метеринг не трогаем: читается с нативной стороны |
+| `cache_control` / `prompt_cache_key` | `cache_control{ephemeral}` | `prompt_cache_key` | **не переносится**; конверсия рвёт prefix cache бэкенда — видно в колонке `Cache hit` |
+| `stop_reason`: `stop`/`length`/`tool_calls`/`content_filter` | `end_turn`/`max_tokens`/`tool_use`/`stop_sequence`/`refusal` | `status`: completed/incomplete/failed | таблица; `refusal`/`content_filter` теряются, пишутся в notes |
+| — | `anthropic-version`, `anthropic-beta` | — | при синтетическом `messages`-запросе `anthropic-version` инжектится (дефолт `2023-06-01`); beta-фичи → notes, не дропаем молча |
+| `metadata.user_id` | `metadata.user_id` | `prompt_cache_key`/`safety_identifier` | jev-sticky уже читает обе ветки (`router/jev.go:545`), менять не нужно |
+
+Запреты v1 (громкий 400, список полей в тексте): Anthropic `document`/PDF в chat; hosted-тулзы
+(`web_search`, `file_search`, `code_interpreter`, `mcp`) при переводе в бэкенд без них;
+коллизия имён тулзов после усечения до 64 байт; `n>1`; `audio`-блоки.
+
+## Маппинг полей: `responses` → `chat`
+
+Одно направление, и оно stateless: `input` (string \| items) → `messages`, `instructions` →
+system, `function_call`/`function_call_output` → assistant `tool_calls` / role `tool`,
+`max_output_tokens` → `max_tokens`, `text.format` → `response_format`,
+`reasoning{effort}` → `reasoning_effort`, `include`/`truncation`/`background`/`store` → notes
+(прокси их не исполняет), `previous_response_id` → 400 с текстом «backend has no response
+store; send full `input`» (текст лучше чужого `store-disabled`: он объясняет клиенту, что
+делать). Обратное направление (`chat` → `responses`) — тот же код с эмиттером кадров, фаза 4.
+
+## Стрим: канонический событийный IR
+
+Конвертер стрима — **stateful на запрос**, не чистая функция: у Anthropic есть lifecycle
+контент-блоков (`content_block_start`/`delta`/`stop` с индексом), у Responses —
+`sequence_number`, `output_item`/`content_part`-вложенность и терминальный
+`response.completed` со всем объектом ответа. У chat-чанка индекса блока нет. Поэтому:
+
+- `convert.Stream` — объект на запрос, с `Write(frame []byte) []Frame` и `Finish() []Frame`.
+- Внутри: нормализация нативных кадров в канонические дельты
+  (`text`, `reasoning`, `tool_call{name,args_delta,index}`, `usage`, `finish`, `error`), затем
+  эмиссия в диалект клиента. Один IR, два эмита, N парсеров — spoke-пара.
+- `Finish()` обязан добить хвост (открытый блок/`content_block_stop`, `message_delta` с
+  usage, `response.output_item.done` + `response.completed`), как это уже делают
+  `modelRewriteWriter.Finish()` и `sseRelay.finish()`.
+- Heartbeats и wait-signals в конвертированный стрим идут **клиентским** кадром и мимо IR
+  (они пишутся ниже конвертера, в `silenceWriter`), поэтому не участвуют в склейке.
+- Лимиты: конвертер не буферит тело целиком; состояние — индексы блоков, буфер аргументов
+  тулз (усекается), накопленный usage. Тот же порядок, что у 256KB-буфера `metricsWriter`.
+
+## Отказы
+
+Три разных исхода, не смешивать:
+
+1. **Нечего переводить** (audio/embeddings/systemone/`completions`) → 400, поле в тексте.
+2. **Бэкенд не может** (`store`-нуждающийся Responses на движке без стора) → 400 с
+   подсказкой, **до** отправки на апстрим. Ничего не отправлено → fallback не считается
+   неудачей попыток: роутер пробует следующую попытку, и только когда попытки кончились,
+   отдаёт наш 400 (а не 502 «all backends failed»).
+3. **Конвертер сломался mid-stream** (кадр, который он не собрал, при уже отправленных
+   заголовках) → `*proxy.MidStreamError` в клиентском диалекте; сервер помечается unhealthy
+   тем же путём, что сейчас. Молча «пропустить кадр» запрещено: клиент получит обрезанный
+   ответ без ошибки.
+
+## Наблюдаемость
+
+- `RequestMetric.UpstreamEndpoint` — путь, уехавший на апстрим; `RequestMetric.Convert` —
+  `messages>chat` (пусто = passthrough); `RequestMetric.ConvertNotes` — список того, что
+  потеряно (`thinking=off`, `stop_dropped`, `store_ignored`), ≤ 512B.
+- `X-Router-Convert` (+ `-Notes`) в ответ; `X-Router-Status`/`-Server` не меняются.
+- `class:*`-агрегация остаётся по **клиентскому** пути: «что прислал клиент» — тот вопрос,
+  на который таблица Request Class отвечает. Пятая семья ключей не вводится; в Recent Requests
+  конверсия — пилюля рядом с классом (в tooltip — notes), как уже сделано для jev и audio.
+- Трасса: запрос сохраняется **как прислал клиент** (после красной цензуры), ответ — как
+  прислал бэкенд (нативная форма: `metricsWriter` стоит до конвертера). Второй копии
+  «что уехало» нет (2×512KB на запись); вместо неё в записи — `convert`/`upstream_endpoint`.
+  Для отладки самого конвертера этого хватает: `POST /admin/api/trace` + SDK-тесты ниже.
+
+## Тесты
+
+- **Юнит на маппинг**: золотые векторы `вход → выход` на спок, табличные. Источники векторов:
+  поведение llama.cpp-шима, LiteLLM-адаптеры, типы `.info/apis/openai-go` и
+  `.info/apis/anthropic-sdk-go`.
+- **Юнит на стрим**: последовательность нативных кадров → последовательность кадров клиента,
+  включая «кадр разрезан пополам» (у нас уже есть `TestStreamProxyRewritesModelSplitAcrossReads`
+  как образец), пустой дельта-чанк, терминальный usage-кадр, mid-stream обрыв.
+- **E2E в `router`**: hijacked `httptest`-бэкенд, говорящий в другом диалекте; проверка
+  кадров, дошедших до клиента. Требование к скорости: только живые `httptest`-серверы,
+  никаких `localhost:1` (`CLAUDE.md`: цена долгого suite — таймауты dial).
+- **`sdktest/`** — главный слой: официальные `openai-go`/`anthropic-sdk-go` как клиенты.
+  Именно он доказывает, что сгенерированные кадры парсятся реальными SDK, а не нашим
+  парсером. Добавить кейсы «Anthropic SDK → chat-бэкенд», «OpenAI SDK → anthropic-бэкенд».
+- Имена: `TestConvert*`, `TestMessagesToChat*`, `TestChatToMessages*`, `TestResponsesToChat*`,
+  `TestHandleConvert*`.
+- Регресс дыры, ради которой всё началось: `TestHandleProtocolMismatchConvertsFallback` —
+  primary без способности, fallback с ней → 200, `X-Router-Convert` выставлен, метрика
+  записана; и `TestHandleProtocolMismatchNoConvert` → 400 нашей формулировки, не 404 бэкенда.
+
+## Фазы
+
+1. **Каркас без перевода.** Модель способности (`protocols`), `plan()`, `UpstreamEndpoint`/
+   `Convert`/notes, `X-Router-Convert`, громкие 400 вместо 404 бэкенда, `EnsureStreamUsage`
+   переезжает в попытку. Польза: дыра «молча форвардим чужой 404» закрыта, точка врезки
+   существует, наблюдение показывает конверсии (а их пока ноль).
+2. **`messages → chat`**: JSON, затем SSE. Это то, ради чего фичу просят (Claude Code против
+   OpenAI-only бэкенда).
+3. **`chat → messages`**: обратное направление того же спока.
+4. **`responses → chat`** (stateless, `previous_response_id` → 400), `chat → responses` — по
+   требованию.
+
+## Риски
+
+- Горячий путь: декод/код JSON на кадр. Passthrough (без конверсии) не должен платить ничего
+  — одна nil-проверка, как `TraceTap`.
+- Конверсия рвёт prompt cache бэкенда (нет `cache_control`/`prompt_cache_key` в другой
+  форме) → деградация `Cache hit` должна быть видна, иначе её припишут модели.
+- `thinking` на конвертированном запросе ломает многоходовые tool-циклы (подпись) — поэтому
+  выключается, а не эмулируется.
+- Строгие клиенты (opencode) валидируют каждое событие: эмиту только события своего диалекта,
+  ничего «поверх».
+- `config.cloneRule`/`Store.AddServer`/`UpdateServer` перечисляют поля — новое поле
+  (`Protocols`, `Rule.Convert`, `FallbackEntry.Convert`, `JevCandidate.Convert`) обязано
+  появиться там же, иначе админские правки его молча стирают (известная ловушка CLAUDE.md).
+- `config.json` не перезаписывается (правило из CLAUDE.md), новая схема описывается в
+  `example.config.json`.
+
+## Открытые вопросы
+
+1. Дефолт `max_tokens` для `chat → messages` (Anthropic требует поле): значение в
+   `settings.convert.max_tokens_default`? Какое — 4096, или требовать явную настройку?
+2. Зонд способностей: включённый по умолчанию (как vision/audio-проба) или
+   `settings.convert.probe: true`? Зонд пишет в тот же `CapabilitiesCache`, 10min TTL.
+3. `X-Router-Convert: off` как per-request заголовок-предохранитель (в духе
+   `X-Router-Jev: off`) — нужен сразу в фазе 1?
