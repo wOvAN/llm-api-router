@@ -47,10 +47,11 @@ func OptionsFrom(s domain.ConvertSettings) Options {
 // client's own path, no translation. Otherwise the client's endpoint is looked up
 // in the declaration; a backend that does not serve it is planned onto the one
 // dialect the backend does serve, for the edges this build implements
-// (messages→chat). Anything else is a refusal, never a guess.
+// (messages→chat, responses→chat). Anything else is a refusal, never a guess.
 //
 // forced is rule/fallback/candidate `convert`: "auto" (or "") decides by the
-// declaration, "off" forces passthrough, "messages>chat" names the edge.
+// declaration, "off" forces passthrough, "messages>chat"/"responses>chat" name the
+// edge.
 func Decide(client Dialect, path string, protocols []domain.ServerProtocol, forced string) (Plan, error) {
 	ident := Plan{From: client, Dialect: client, Path: path}
 	if forced == "off" || DialectForPath(path) == "" {
@@ -62,7 +63,7 @@ func Decide(client Dialect, path string, protocols []domain.ServerProtocol, forc
 			return Plan{}, &Error{Code: CodeNoDialect, Msg: fmt.Sprintf(
 				"convert %q does not apply to a %s request", forced, client)}
 		}
-		if from == string(Messages) && to == string(Chat) {
+		if (from == string(Messages) || from == string(Responses)) && to == string(Chat) {
 			return Plan{From: client, Dialect: Chat, Path: PathFor(Chat), Forced: true}, nil
 		}
 		return Plan{}, &Error{Code: CodeNoDialect, Msg: fmt.Sprintf(
@@ -86,7 +87,7 @@ func Decide(client Dialect, path string, protocols []domain.ServerProtocol, forc
 			return ident, nil
 		}
 	}
-	if client == Messages {
+	if client == Messages || client == Responses {
 		for _, p := range protocols {
 			if DialectForPath(p.Path) == Chat {
 				return Plan{From: client, Dialect: Chat, Path: p.Path}, nil
@@ -96,6 +97,18 @@ func Decide(client Dialect, path string, protocols []domain.ServerProtocol, forc
 	return Plan{}, &Error{Code: CodeNoDialect, Msg: fmt.Sprintf(
 		"backend serves %s, not %s and no conversion exists for it",
 		strings.Join(declaredPaths(protocols), ", "), path)}
+}
+
+// decodedKeys is the plan's request decoder set — the keys the spoke reads, which
+// is the baseline DroppedKeys counts against. An identity plan has no spoke.
+func (p Plan) decodedKeys() map[string]bool {
+	switch p.From {
+	case Messages:
+		return DecodedRequestKeys
+	case Responses:
+		return DecodedResponsesKeys
+	}
+	return nil
 }
 
 func declaredPaths(protocols []domain.ServerProtocol) []string {
@@ -114,6 +127,9 @@ func Request(p Plan, body []byte, o Options) ([]byte, []string, error) {
 	}
 	if p.From == Messages && p.Dialect == Chat {
 		return MessagesToChat(body, o)
+	}
+	if p.From == Responses && p.Dialect == Chat {
+		return ResponsesToChat(body, o)
 	}
 	return nil, nil, &Error{Code: CodeNoDialect, Msg: "conversion " + p.Edge() + " is not supported"}
 }

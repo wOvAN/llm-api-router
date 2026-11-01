@@ -95,15 +95,58 @@ func TestConvertPreviewIdentityEchoesBody(t *testing.T) {
 }
 
 // A route the preview cannot serve is an answer, not a 5xx: the operator asked
-// "would this survive", and "no, because" is the answer.
+// "would this survive", and "no, because" is the answer. A responses request is no
+// longer one of these (it has its own spoke), so the fixture declares a backend a
+// chat client has no edge to.
 func TestConvertPreviewReportsRefusals(t *testing.T) {
-	out := postPreview(t, newPreviewHandler(t, ""),
-		`{"model":"r","path":"/v1/responses","body":{"model":"r","input":"hi"}}`)
+	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "n", URL: "http://127.0.0.1:1/v1",
+		Protocols: []domain.ServerProtocol{{Path: "/v1/messages"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"gpt"},
+		ServerID: "s1", TargetModel: "claude", Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	out := postPreview(t, NewHandler(store, nil, nil, nil),
+		`{"model":"gpt","path":"/v1/chat/completions",`+
+			`"body":{"model":"gpt","messages":[{"role":"user","content":"hi"}]}}`)
 	if out["code"] != "no_dialect" {
 		t.Fatalf("preview must report the refusal code: %v", out)
 	}
 	if !strings.Contains(out["error"].(string), "/v1/chat/completions") {
 		t.Fatalf("refusal must name what the backend serves: %v", out["error"])
+	}
+}
+
+// The responses spoke is previewable like any other: the operator sees the chat
+// body their Responses request would become, and what it cost.
+func TestConvertPreviewTranslatesResponses(t *testing.T) {
+	out := postPreview(t, newPreviewHandler(t, ""),
+		`{"model":"r","path":"/v1/responses","body":{"model":"r","input":"hi",`+
+			`"instructions":"be brief","max_output_tokens":64,"stream":true}}`)
+	if out["upstream_path"] != "/v1/chat/completions" {
+		t.Fatalf("upstream_path = %v, want /v1/chat/completions", out["upstream_path"])
+	}
+	if out["convert"] != "responses>chat" {
+		t.Fatalf("convert = %v, want responses>chat", out["convert"])
+	}
+	reqMap, ok := out["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("preview returned no translated body: %v", out)
+	}
+	if reqMap["max_tokens"] != float64(64) {
+		t.Fatalf("max_output_tokens not mapped onto max_tokens: %v", out["request"])
+	}
+	if reqMap["stream"] != true {
+		t.Fatalf("stream flag lost: %v", out["request"])
+	}
+	msgs, _ := reqMap["messages"].([]any)
+	if len(msgs) != 2 || msgs[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("instructions must become the leading system message: %v", out["request"])
 	}
 }
 

@@ -24,6 +24,9 @@ func Response(p Plan, body []byte) ([]byte, []string, error) {
 		}
 		return ChatToMessages(body)
 	}
+	if p.Dialect == Chat && p.From == Responses {
+		return ChatToResponses(body)
+	}
 	return nil, nil, &Error{Code: CodeNoDialect, Msg: "response conversion " + p.Edge() + " is not supported"}
 }
 

@@ -50,9 +50,39 @@ func TestDecideConvertsToDeclaredDialect(t *testing.T) {
 	}
 }
 
+func TestDecideResponsesClient(t *testing.T) {
+	// A backend that only speaks chat: a Responses client is planned onto chat.
+	p, err := Decide(Responses, "/v1/responses", protocols("/v1/chat/completions"), "auto")
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if p.Dialect != Chat || p.From != Responses || p.Edge() != "responses>chat" {
+		t.Fatalf("got %+v, want responses→chat", p)
+	}
+	if p.Path != "/v1/chat/completions" {
+		t.Fatalf("the plan must carry the declared path, got %q", p.Path)
+	}
+	// A backend that declares the Responses API keeps the client's own endpoint.
+	p, err = Decide(Responses, "/v1/responses", protocols("/v1/responses"), "auto")
+	if err != nil || p.Dialect != Responses || p.Path != "/v1/responses" {
+		t.Fatalf("got %+v, %v, want passthrough", p, err)
+	}
+	// Spokes never touch each other: a Responses client is not planned onto a
+	// Messages backend (that edge costs two transforms and buys nothing).
+	if _, err := Decide(Responses, "/v1/responses", protocols("/v1/messages"), "auto"); err == nil {
+		t.Fatal("messages↔responses must never be planned directly")
+	}
+	// A declared `state` backend is not a license to continue a response: the
+	// router stores nothing, and the request-level refusal is the spoke's job.
+	if p, err := Decide(Responses, "/v1/responses", protocols("/v1/responses=state"), "auto"); err != nil || p.Dialect != Responses {
+		t.Fatalf("got %+v, %v, want a declared stateful responses backend to stay passthrough", p, err)
+	}
+}
+
 func TestDecideRefusesWhenNoEdgeExists(t *testing.T) {
-	// Responses on a chat-only backend is a phase-4 edge: refused, not guessed.
-	_, err := Decide(Responses, "/v1/responses", protocols("/v1/chat/completions"), "auto")
+	// Anthropic on a responses-only backend: the hub is chat, so nothing connects
+	// them — refused, never guessed.
+	_, err := Decide(Messages, "/v1/messages", protocols("/v1/responses"), "auto")
 	var ce *Error
 	if !errors.As(err, &ce) || ce.Code != CodeNoDialect {
 		t.Fatalf("got %v, want *convert.Error{%s}", err, CodeNoDialect)
@@ -73,6 +103,10 @@ func TestDecideForcedEdgeAndOff(t *testing.T) {
 	p, err = Decide(Messages, "/v1/messages", protocols("/v1/chat/completions"), "off")
 	if err != nil || p.Dialect != Messages {
 		t.Fatalf("got %+v, %v, want passthrough with convert off", p, err)
+	}
+	p, err = Decide(Responses, "/v1/responses", nil, "responses>chat")
+	if err != nil || p.Dialect != Chat || !p.Forced {
+		t.Fatalf("got %+v, %v, want forced responses→chat", p, err)
 	}
 	if _, err := Decide(Messages, "/v1/messages", nil, "chat>responses"); err == nil {
 		t.Fatal("an unknown forced edge must be an error")

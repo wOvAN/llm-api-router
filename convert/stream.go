@@ -33,8 +33,14 @@ type Stream interface {
 // identity, a dialectless request, or a pair this build does not implement. The
 // caller arms the relay only on true, so an unconverted request pays nothing.
 func NewStream(p Plan) (Stream, bool) {
-	if p.Dialect == Chat && p.From == Messages {
+	if p.Dialect != Chat {
+		return nil, false
+	}
+	switch p.From {
+	case Messages:
 		return NewChatToMessages(), true
+	case Responses:
+		return NewChatToResponses(), true
 	}
 	return nil, false
 }

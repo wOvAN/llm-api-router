@@ -77,7 +77,7 @@ func convertPreviewFor(store *config.Store, model, path string, body json.RawMes
 	out["request"] = json.RawMessage(translated)
 	// The same key count the routed path reports, from the same producer: a dry run
 	// that hides a loss the real request reports is worse than no dry run.
-	notes = append(notes, convert.DroppedKeys(body, translated)...)
+	notes = append(notes, convert.DroppedKeys(plan, body, translated)...)
 	if len(notes) > 0 {
 		out["notes"] = notes
 	}

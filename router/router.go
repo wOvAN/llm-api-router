@@ -357,7 +357,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			// A top-level field the spoke never decodes vanishes without a
 			// per-field drop; the routed path reports the difference (the preview
 			// path counts the same keys, from the same producer).
-			meta.convertNotes = append(notes, convert.DroppedKeys(body, converted)...)
+			meta.convertNotes = append(notes, convert.DroppedKeys(plan, body, converted)...)
 		}
 
 		// stream_options.include_usage is an OpenAI field: injected into the body in

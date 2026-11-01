@@ -36,19 +36,7 @@ type aRequest struct {
 // with nothing to say so — which is what the router's `keys:<n>dropped` note
 // counts. It is derived, not transcribed, so a new field on the decoder is
 // accounted for the moment it exists.
-var DecodedRequestKeys = decodedRequestKeys()
-
-func decodedRequestKeys() map[string]bool {
-	typ := reflect.TypeOf(aRequest{})
-	out := make(map[string]bool, typ.NumField())
-	for i := 0; i < typ.NumField(); i++ {
-		name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
-		if name != "" && name != "-" {
-			out[name] = true
-		}
-	}
-	return out
-}
+var DecodedRequestKeys = decodedKeys(reflect.TypeOf(aRequest{}))
 
 // DroppedKeys compares what the client sent against what the backend will see and
 // reports the TOP-LEVEL keys that left with no per-field note to explain them. A
@@ -58,22 +46,27 @@ func decodedRequestKeys() map[string]bool {
 // `convert: off` as the only escape), so the path that counts them reports
 // `keys:<n>dropped`.
 //
-// The baseline is the spoke's own decoder set (`DecodedRequestKeys`): a key on it
-// is a key the spoke handled — mapped straight through, folded into another key
-// (`system` into `messages`), renamed (`stop_sequences` into `stop`), or dropped
-// under a `field=dropped` note. Counting it would report the plain system prompt
-// of every Anthropic client as a loss and make the operator count a field twice,
-// and a nested loss is already visible through its own block-level note
-// (`document=dropped`, `thinking=dropped`), so counting its container on top of
-// that note would double-report one loss (R25).
-func DroppedKeys(in, out []byte) []string {
+// The baseline is the SPOKE's own decoder set (a chat-sourced plan has no spoke,
+// and no keys are counted): a key on it is a key the spoke handled — mapped
+// straight through, folded into another key (`system` into `messages`), renamed
+// (`stop_sequences` into `stop`), or dropped under a `field=dropped` note.
+// Counting it would report the plain system prompt of every Anthropic client as a
+// loss and make the operator count a field twice, and a nested loss is already
+// visible through its own block-level note (`document=dropped`,
+// `thinking=dropped`), so counting its container on top of that note would
+// double-report one loss (R25).
+func DroppedKeys(p Plan, in, out []byte) []string {
+	baseline := p.decodedKeys()
+	if baseline == nil {
+		return nil
+	}
 	inKeys, outKeys := keySet(in), keySet(out)
 	if inKeys == nil {
 		return nil
 	}
 	n := 0
 	for k := range inKeys {
-		if _, kept := outKeys[k]; kept || DecodedRequestKeys[k] {
+		if _, kept := outKeys[k]; kept || baseline[k] {
 			continue
 		}
 		n++

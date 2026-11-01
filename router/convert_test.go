@@ -204,7 +204,11 @@ func TestHandleRefusalLeavesHealthClean(t *testing.T) {
 	if !health.IsHealthy("s1") {
 		t.Fatalf("fixture: s1 starts unhealthy")
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"r","input":"hi"}`))
+	// A responses request is no longer a refusal (it has its own spoke), so the
+	// fixture refuses the family that stays refused: /v1/completions wants a
+	// rendered prompt, and the chat template lives in the backend's tokenizer.
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+		strings.NewReader(`{"model":"r","prompt":"hi"}`))
 	w := httptest.NewRecorder()
 	r.Handle(w, req)
 
@@ -860,5 +864,68 @@ func TestCapNotesBoundsTheTail(t *testing.T) {
 	if len(got) != len(long)-1 || total > proxy.MaxConvertNotesBytes {
 		t.Fatalf("CapConvertNotes kept %d of %d notes (%d bytes, limit %d)",
 			len(got), len(long), total, proxy.MaxConvertNotesBytes)
+	}
+}
+
+// CI's view of the responses spoke: the router plans a Responses request onto the
+// chat endpoint the backend declares, reports the edge, and answers the client in
+// its own dialect (sdktest pins the SDK's own reading of the same bytes).
+func TestHandleResponsesServedByChatBackend(t *testing.T) {
+	var gotPath, gotBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotPath, gotBody = r.URL.Path, string(b)
+		_, _ = w.Write([]byte(`{"id":"c1","model":"c","object":"chat.completion",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},` +
+			`"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`))
+	}))
+	defer backend.Close()
+
+	r, store, ms, _ := newTestRouter(t)
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: backend.URL,
+		APITypes:  []domain.APIType{domain.APITypeOpenAI},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"r"}, ServerID: "s1",
+		TargetModel: "c", NumRetries: -1, Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"r","instructions":"be brief","input":"hi","max_output_tokens":64}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", res.StatusCode, w.Body.String())
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Errorf("upstream path = %q, want /v1/chat/completions", gotPath)
+	}
+	for _, want := range []string{`"max_tokens":64`, `"role":"system"`, "be brief"} {
+		if !strings.Contains(gotBody, want) {
+			t.Errorf("the translated chat request lacks %s: %s", want, gotBody)
+		}
+	}
+	if h := res.Header.Get("X-Router-Convert"); h != "responses>chat" {
+		t.Errorf("X-Router-Convert = %q, want responses>chat", h)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"object":"response"`) || !strings.Contains(body, `"output"`) {
+		t.Fatalf("the client asked in the Responses dialect and must be answered in it: %s", body)
+	}
+	// The model rewrite runs above the translator, so the client's own name comes
+	// back in the translated body.
+	if !strings.Contains(body, `"model":"r"`) {
+		t.Errorf("the response model was not rewritten back to the client's: %s", body)
+	}
+	rec := ms.Recent()
+	if len(rec) != 1 || rec[0].Convert != "responses>chat" ||
+		rec[0].UpstreamEndpoint != "/v1/chat/completions" {
+		t.Fatalf("the metric must describe the serving attempt: %+v", rec)
+	}
+	if len(rec) == 1 && (rec[0].PromptTokens != 3 || rec[0].CompletionTokens != 2) {
+		t.Fatalf("usage must be read off the backend's native bytes: %+v", rec[0])
 	}
 }

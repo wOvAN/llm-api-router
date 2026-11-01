@@ -553,11 +553,14 @@ func TestNewStreamIdentityArmsNothing(t *testing.T) {
 	if s, ok := NewStream(Plan{From: Chat, Dialect: Chat}); ok || s != nil {
 		t.Fatal("an identity plan must arm no translator (hot path pays nothing)")
 	}
-	if _, ok := NewStream(Plan{From: Responses, Dialect: Chat}); ok {
-		t.Fatal("unimplemented pairs must report no translator")
-	}
 	s, ok := NewStream(Plan{From: Messages, Dialect: Chat, Path: "/v1/chat/completions"})
 	if !ok || s == nil {
 		t.Fatal("chat answered, messages asked: must translate")
+	}
+	if s, ok = NewStream(Plan{From: Responses, Dialect: Chat, Path: "/v1/chat/completions"}); !ok || s == nil {
+		t.Fatal("chat answered, responses asked: must translate")
+	}
+	if _, ok := NewStream(Plan{From: Chat, Dialect: Responses}); ok {
+		t.Fatal("unimplemented pairs must report no translator")
 	}
 }
