@@ -605,6 +605,31 @@ func TestSSEFrameWriterTransparentAtEverySplitPoint(t *testing.T) {
 	}
 }
 
+// A backend that mixes terminators inside one stream (event A framed "\n\n",
+// event B framed "\r\n\r\n" — a proxy in front of the model normalizing CRLF, a
+// chunked writer flushing mid-event) must still be relayed one event per
+// delivery. Searching for the CRLF terminator across the whole buffer first puts
+// the first cut at B's terminator, so A and B leave as one glued blob — and
+// because stripping keys on the artifact's shape, a glued blob is not one: the
+// injected usage chunk reaches the client.
+func TestSSEFrameWriterMixedTerminators(t *testing.T) {
+	rec := &flushCaptureWriter{}
+	fw := newSSERelay(rec, true)
+
+	if _, err := fw.Write([]byte(
+		`data: {"choices":[],"usage":{"prompt_tokens":1}}` + "\n\n" +
+			`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(rec.deliveries), 1; got != want {
+		t.Fatalf("expected %d delivery (the usage artifact stripped, one frame per event), got %d: %q",
+			want, got, rec.deliveries)
+	}
+	if n := strings.Count(string(rec.deliveries[0]), "data:"); n != 1 {
+		t.Fatalf("delivery carries %d frames, want 1: %q", n, rec.deliveries[0])
+	}
+}
+
 // TestSSEFrameWriterDetectsMalformedUpstreamFrame verifies the writer flags a
 // frame whose data line is not valid JSON — the exact corruption reported by
 // the client ("JSON parsing failed ... Expected '}'") — while still forwarding

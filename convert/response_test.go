@@ -2,6 +2,7 @@ package convert
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -87,6 +88,72 @@ func TestChatToMessagesReasoningBecomesThinking(t *testing.T) {
 	first, _ := blocks[0].(map[string]any)
 	if first["type"] != "thinking" || first["thinking"] != "because" {
 		t.Fatalf("reasoning_content not mapped to a thinking block: %+v", first)
+	}
+}
+
+// The response direction can not refuse — the answer is already at the client —
+// so notes are its only channel, and the mapping loses real information in three
+// places: an `n>1` answer maps `choices[0]` only, a finish reason the mapping has
+// no row for collapses to a milder `stop_reason`, and a content part it cannot
+// read as text leaves entirely. Every one of them is a loss the operator must see
+// (R24), and none of them was visible.
+func TestChatToMessagesResponseReportsWhatItLost(t *testing.T) {
+	out, notes, err := ChatToMessages([]byte(`{"id":"c","model":"m","choices":[` +
+		`{"index":0,"message":{"role":"assistant","content":[{"type":"text","text":"hi"},` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}]},` +
+		`"finish_reason":"content_filter"},` +
+		`{"index":1,"message":{"role":"assistant","content":"second"},"finish_reason":"stop"}]}`))
+	if err != nil {
+		t.Fatalf("ChatToMessages: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if m["stop_reason"] != "refusal" {
+		t.Fatalf("stop_reason = %v, want refusal", m["stop_reason"])
+	}
+	blocks, _ := m["content"].([]any)
+	if len(blocks) != 1 {
+		t.Fatalf("only the text part maps: %+v", m["content"])
+	}
+	for _, want := range []string{"choices=dropped:1", "finish_reason=content_filter",
+		"content_part=dropped:image_url"} {
+		if !slices.Contains(notes, want) {
+			t.Fatalf("notes = %v, want %s", notes, want)
+		}
+	}
+}
+
+// A refused answer is the case the spec's loss table names: it must arrive as an
+// `end_turn` completion WITH a note, never as a silent end_turn — the client's
+// whole view of why the answer stopped is that field.
+func TestChatToMessagesResponseNotesACollapsedFinishReason(t *testing.T) {
+	for _, fr := range []string{"refusal", "eos_token", "abort"} {
+		out, notes, err := ChatToMessages([]byte(`{"id":"c","model":"m","choices":[{"message":` +
+			`{"role":"assistant","content":"partial"},"finish_reason":"` + fr + `"}]}`))
+		if err != nil {
+			t.Fatalf("%s: %v", fr, err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out, &m); err != nil {
+			t.Fatalf("%s: decode: %v", fr, err)
+		}
+		if m["stop_reason"] != "end_turn" {
+			t.Fatalf("%s: stop_reason = %v, want end_turn", fr, m["stop_reason"])
+		}
+		if !slices.Contains(notes, "finish_reason="+fr) {
+			t.Fatalf("%s: the collapsed finish reason must be reported: %v", fr, notes)
+		}
+	}
+	// The mapping's own rows lose nothing, and a backend that reported no finish
+	// reason has nothing to report: no note.
+	for _, fr := range []string{"", "stop", "length", "tool_calls", "function_call"} {
+		_, notes, err := ChatToMessages([]byte(`{"id":"c","model":"m","choices":[{"message":` +
+			`{"role":"assistant","content":"t"},"finish_reason":"` + fr + `"}]}`))
+		if err != nil || len(notes) != 0 {
+			t.Fatalf("%q: notes = %v, err = %v (nothing is lost here)", fr, notes, err)
+		}
 	}
 }
 

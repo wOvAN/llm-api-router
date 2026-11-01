@@ -20,6 +20,10 @@ func (h *Handler) convertPreview(w http.ResponseWriter, req *http.Request) {
 		Path  string          `json:"path"`
 		Body  json.RawMessage `json:"body"`
 	}
+	// The preview echoes the body back in full, so the request that asks for it is
+	// bounded: an operator (or a script with a bug) cannot make the admin endpoint
+	// buffer and re-serialize a gigabyte.
+	req.Body = http.MaxBytesReader(w, req.Body, maxPreviewBodyBytes)
 	if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request: "+err.Error())
 		return
@@ -27,6 +31,10 @@ func (h *Handler) convertPreview(w http.ResponseWriter, req *http.Request) {
 	out, status := convertPreviewFor(h.store, in.Model, in.Path, in.Body)
 	writeJSON(w, status, out)
 }
+
+// maxPreviewBodyBytes bounds the preview request (its `body` is a request body
+// plus the envelope, and the answer carries it again).
+const maxPreviewBodyBytes = 1 << 20
 
 func convertPreviewFor(store *config.Store, model, path string, body json.RawMessage) (map[string]any, int) {
 	if model == "" || path == "" {
@@ -67,6 +75,9 @@ func convertPreviewFor(store *config.Store, model, path string, body json.RawMes
 		return out, http.StatusOK
 	}
 	out["request"] = json.RawMessage(translated)
+	// The same key count the routed path reports, from the same producer: a dry run
+	// that hides a loss the real request reports is worse than no dry run.
+	notes = append(notes, convert.DroppedKeys(body, translated)...)
 	if len(notes) > 0 {
 		out["notes"] = notes
 	}

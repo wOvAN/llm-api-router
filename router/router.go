@@ -202,6 +202,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	// override; heartbeats keep keying on apiType — they are for the client.
 	clientDialect := convert.DialectForPath(req.URL.Path)
 	headerConvert := req.Header.Get("X-Router-Convert")
+	// The override is the client's instruction to US. Unlike X-Router-Retries and
+	// X-Router-KeepAlive (which ride upstream today, harmless), a conversion edge
+	// named in a header means nothing to a backend — and on a converted attempt the
+	// upstream request is a clone of this one, so it is deleted here.
+	req.Header.Del("X-Router-Convert")
 	if rule.IsJev() {
 		// The decision model picks the pool entry; the rest of the pool stays
 		// behind it as the fallback chain.
@@ -351,8 +356,8 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			rewrittenBody = converted
 			// A top-level field the spoke never decodes vanishes without a
 			// per-field drop; the routed path reports the difference (the preview
-			// path calls convert.Request directly and deliberately does not).
-			meta.convertNotes = append(notes, droppedKeys(body, converted)...)
+			// path counts the same keys, from the same producer).
+			meta.convertNotes = append(notes, convert.DroppedKeys(body, converted)...)
 		}
 
 		// stream_options.include_usage is an OpenAI field: injected into the body in

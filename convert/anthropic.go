@@ -50,6 +50,48 @@ func decodedRequestKeys() map[string]bool {
 	return out
 }
 
+// DroppedKeys compares what the client sent against what the backend will see and
+// reports the TOP-LEVEL keys that left with no per-field note to explain them. A
+// spoke marshals a whitelist, so a key it never decodes vanishes with nothing to
+// say so: no note, no refusal. The spec forbids silent loss, and a refusal would
+// 400 real traffic on every field the providers ship next month (leaving
+// `convert: off` as the only escape), so the path that counts them reports
+// `keys:<n>dropped`.
+//
+// The baseline is the spoke's own decoder set (`DecodedRequestKeys`): a key on it
+// is a key the spoke handled — mapped straight through, folded into another key
+// (`system` into `messages`), renamed (`stop_sequences` into `stop`), or dropped
+// under a `field=dropped` note. Counting it would report the plain system prompt
+// of every Anthropic client as a loss and make the operator count a field twice,
+// and a nested loss is already visible through its own block-level note
+// (`document=dropped`, `thinking=dropped`), so counting its container on top of
+// that note would double-report one loss (R25).
+func DroppedKeys(in, out []byte) []string {
+	inKeys, outKeys := keySet(in), keySet(out)
+	if inKeys == nil {
+		return nil
+	}
+	n := 0
+	for k := range inKeys {
+		if _, kept := outKeys[k]; kept || DecodedRequestKeys[k] {
+			continue
+		}
+		n++
+	}
+	if n == 0 {
+		return nil
+	}
+	return []string{"keys:" + strconv.Itoa(n) + "dropped"}
+}
+
+func keySet(body []byte) map[string]json.RawMessage {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(body, &m) != nil {
+		return nil
+	}
+	return m
+}
+
 type aMetadata struct {
 	UserID string `json:"user_id"`
 }
@@ -96,17 +138,19 @@ func MessagesToChat(body []byte, o Options) ([]byte, []string, error) {
 	// lose quietly (a document, an audio block, a hosted tool run — the answer
 	// would be about material that vanished). drop_params can not buy these off,
 	// and their refusal must not invite it.
+	refuseMsg := func(field, detail string) string {
+		return field + " has no Chat Completions representation (" + detail + ")."
+	}
 	refuse := func(field, detail string) error {
-		return &Error{Code: CodeField, Field: field,
-			Msg: field + " has no Chat Completions representation (" + detail + ")."}
+		return &Error{Code: CodeField, Field: field, Msg: refuseMsg(field, detail)}
 	}
 	// drop refuses by default (a field with no representation must stop the
 	// request: the client asked for something the backend can not do) and reports
 	// a note when the operator opted into silent drops.
 	drop := func(field, detail string) error {
 		if !o.DropParams {
-			return &Error{Code: CodeField, Field: field, Msg: refuse(field, detail).Error() +
-				" Set settings.convert.drop_params to drop it."}
+			return &Error{Code: CodeField, Field: field,
+				Msg: refuseMsg(field, detail) + " Set settings.convert.drop_params to drop it."}
 		}
 		notes = append(notes, field+"=dropped")
 		return nil
@@ -171,6 +215,7 @@ func MessagesToChat(body []byte, o Options) ([]byte, []string, error) {
 
 	if len(in.Tools) > 0 {
 		tools := make([]any, 0, len(in.Tools))
+		seen := make(map[string]bool, len(in.Tools))
 		for _, tl := range in.Tools {
 			if tl.Type != "" {
 				// web_search_20250305, file_search, code_interpreter, mcp:
@@ -178,6 +223,21 @@ func MessagesToChat(body []byte, o Options) ([]byte, []string, error) {
 				// declared tool vanished answers without it — always-400 class.
 				return nil, nil, refuse("tools", "hosted tool "+tl.Type+" is provider-specific")
 			}
+			if detail := toolNameDefect(tl.Name, seen); detail != "" {
+				// The name never reaches the backend and never comes back: refused
+				// by default (Field "tools", the message naming the tool), a
+				// reported drop naming it when the operator opted into them.
+				name := tl.Name
+				if name == "" {
+					name = "<unnamed>"
+				}
+				if !o.DropParams {
+					return nil, nil, refuse("tools", "tool "+strconv.Quote(name)+" "+detail)
+				}
+				notes = append(notes, "tools."+name+"=dropped")
+				continue
+			}
+			seen[tl.Name] = true
 			fn := map[string]any{"name": tl.Name, "description": tl.Description}
 			if len(tl.InputSchema) > 0 {
 				fn["parameters"] = tl.InputSchema
@@ -207,6 +267,43 @@ func MessagesToChat(body []byte, o Options) ([]byte, []string, error) {
 		return nil, nil, &Error{Code: CodeField, Field: "body", Msg: "encode: " + err.Error()}
 	}
 	return b, notes, nil
+}
+
+// maxChatToolNameBytes is Chat Completions' function-name cap. Anthropic allows
+// [a-zA-Z0-9_-]{1,128}; the intersection is what survives the round trip.
+const maxChatToolNameBytes = 64
+
+// toolNameDefect names what makes a tool name unable to survive the round trip,
+// or "" when it can. Nothing upstream validates either limit, so a name the
+// backend rejects used to leave this proxy intact and come back as the backend's
+// own 400 — forwarded as-is, no retry, no fallback, health green. A Claude Code
+// MCP-prefixed name (`mcp__<server>__<tool>`) over 64 bytes is routine, which is
+// exactly the hole this spoke exists to close: refuse it here, naming the tool.
+func toolNameDefect(name string, seen map[string]bool) string {
+	switch {
+	case name == "":
+		return "has no name"
+	case len(name) > maxChatToolNameBytes:
+		return "is over Chat Completions' " + strconv.Itoa(maxChatToolNameBytes) +
+			"-byte tool-name cap (Anthropic allows 128)"
+	case !isToolNameChars(name):
+		return "carries characters outside [a-zA-Z0-9_-]"
+	case seen[name]:
+		return "is declared twice"
+	}
+	return ""
+}
+
+func isToolNameChars(name string) bool {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // systemText flattens Anthropic's system field — a string or an array of text
@@ -386,7 +483,8 @@ func chatResponseFormat(raw json.RawMessage, drop func(string, string) error) (a
 	case "json_object", "text":
 		return map[string]any{"type": of.Type}, nil
 	}
-	if err := drop("output_format", "output_format type "+of.Type+" has no Chat Completions representation"); err != nil {
+	if err := drop("output_format", "output_format type "+strconv.Quote(of.Type)+
+		" has no Chat Completions representation"); err != nil {
 		return nil, err
 	}
 	return nil, nil

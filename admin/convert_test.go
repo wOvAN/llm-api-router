@@ -138,6 +138,42 @@ func TestConvertPreviewJevRuleIsRefused(t *testing.T) {
 
 // The GUI is embedded HTML: the only cheap assertion is that the fields the tag
 // renders are read. A dropped field shows up as a silently missing tag.
+// The preview answers "would this survive", and on a routed request an undecoded
+// top-level field is reported (`keys:<n>dropped`). Dry-run and real request must
+// not disagree about what left, so the preview counts the same keys.
+func TestConvertPreviewReportsDroppedKeys(t *testing.T) {
+	out := postPreview(t, newPreviewHandler(t, ""),
+		`{"model":"claude","path":"/v1/messages","body":{"model":"claude","max_tokens":10,`+
+			`"service_tier":"priority","messages":[]}}`)
+	notes, _ := out["notes"].([]any)
+	for _, want := range []string{"keys:1dropped"} {
+		var found bool
+		for _, n := range notes {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("notes = %v, want %s", notes, want)
+		}
+	}
+}
+
+// The preview echoes the body back in full, so the request that asks for it is
+// bounded — an admin endpoint must not buffer and re-serialize an unbounded body.
+func TestConvertPreviewBoundsTheBody(t *testing.T) {
+	h := newPreviewHandler(t, "")
+	body := `{"model":"claude","path":"/v1/messages","body":{"model":"claude","max_tokens":1,` +
+		`"messages":[{"role":"user","content":"` + strings.Repeat("x", 2<<20) + `"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/convert/preview", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if got := w.Result().StatusCode; got != http.StatusBadRequest {
+		t.Fatalf("an oversized preview body must be refused, got status %d (%d bytes echoed)",
+			got, w.Body.Len())
+	}
+}
+
 func TestGUIShowsConversion(t *testing.T) {
 	b, err := os.ReadFile("static/index.html")
 	if err != nil {

@@ -413,6 +413,58 @@ func TestMessagesToChatSmallFields(t *testing.T) {
 	}
 }
 
+// A tool name that can not survive the round trip is refused, not forwarded:
+// Anthropic allows `[a-zA-Z0-9_-]{1,128}`, Chat Completions caps function names at
+// 64 bytes, and nothing upstream validates. A Claude Code MCP-prefixed name
+// (`mcp__<server>__<tool>`) is routinely over the cap, so the request used to
+// leave with the name intact and come back as the backend's own 400 — forwarded,
+// no fallback, health green. drop_params buys it off with a note naming the tool.
+func TestMessagesToChatToolNameConstraint(t *testing.T) {
+	long := strings.Repeat("m", 65)
+	cases := map[string]string{
+		"over the chat cap": `{"model":"m","max_tokens":1,"messages":[],"tools":[{"name":"` + long +
+			`","input_schema":{}}]}`,
+		"illegal characters": `{"model":"m","max_tokens":1,"messages":[],"tools":[{"name":"mcp__srv__tool.v2",` +
+			`"input_schema":{}}]}`,
+		"empty":    `{"model":"m","max_tokens":1,"messages":[],"tools":[{"name":"","input_schema":{}}]}`,
+		"collides": `{"model":"m","max_tokens":1,"messages":[],"tools":[{"name":"f","input_schema":{}},{"name":"f","input_schema":{}}]}`,
+	}
+	for name, in := range cases {
+		err := mustFail(t, in)
+		code, field, ok := fieldErr(err, "tools")
+		if !ok || code != CodeField {
+			t.Fatalf("%s: want *convert.Error{%s, tools}, got code=%q field=%q", name, CodeField, code, field)
+		}
+	}
+	// The refusal names the offending tool, so the client can fix it.
+	err := mustFail(t, `{"model":"m","max_tokens":1,"messages":[],"tools":[{"name":"mcp__srv__tool.v2",`+
+		`"input_schema":{}}]}`)
+	if !strings.Contains(err.Error(), "mcp__srv__tool.v2") {
+		t.Fatalf("the refusal must name the tool: %v", err)
+	}
+	// drop_params: the tool is dropped, reported, and its siblings survive.
+	out, notes, err := MessagesToChat([]byte(`{"model":"m","max_tokens":1,"messages":[],"tools":[`+
+		`{"name":"keep","input_schema":{}},{"name":"bad.name","input_schema":{}}]}`),
+		Options{DropParams: true})
+	if err != nil {
+		t.Fatalf("drop_params: %v", err)
+	}
+	if len(notes) != 1 || notes[0] != "tools.bad.name=dropped" {
+		t.Fatalf("the dropped tool must be reported: %v", notes)
+	}
+	m := decode(t, out)
+	tools, _ := m["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("only the offending tool may leave: %+v", m["tools"])
+	}
+	// 64 bytes is the cap, not 63, and Anthropic's 128 must not be the limit we
+	// check against.
+	if _, _, err := MessagesToChat([]byte(`{"model":"m","max_tokens":1,"messages":[],"tools":[`+
+		`{"name":"`+strings.Repeat("m", 64)+`","input_schema":{}}]}`), Options{}); err != nil {
+		t.Fatalf("a 64-byte name is legal: %v", err)
+	}
+}
+
 func TestRequestDispatch(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[]}`)
 	// Identity plans return the bytes untouched — no re-marshal, no key reorder.

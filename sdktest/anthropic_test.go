@@ -197,10 +197,6 @@ func TestAnthropicErrorPassthrough(t *testing.T) {
 	}
 }
 
-// A backend that dies mid-generation must surface an error to the SDK client.
-// Before the fix, the proxy appended an OpenAI-style bare data: frame, which
-// the Anthropic SDK silently drops (unrecognized event type) — the client saw
-// a truncated message with stream.Err() == nil.
 // A chat-only backend, answering in Chat Completions shape.
 const chatCompletionJSON = `{"id":"chatcmpl-1","model":"` + targetModel + `",` +
 	`"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant",` +
@@ -379,19 +375,16 @@ func readStream(st *stack) streamReport {
 	return rep
 }
 
-// PARKED ITEM (task review of the streaming emitter), evidenced on a real client:
-// the emitter's fail-open forwards a data: frame it cannot parse as a chat chunk
-// VERBATIM (convert/stream.go reframe), while the spec's refusals item 3
-// prescribes a client-dialect MidStreamError for a frame the converter cannot
-// assemble, and forbids leaving the client a truncated answer with no error.
-// An unlabelled data: frame is exactly what the Anthropic SDK ignores:
-// packages/ssestream drops every event with no name (case "": continue), so it
-// never reaches Accumulate and stream.Err() stays nil. Pinned as OBSERVED, not
-// as a promise: where the forwarded frame is the one carrying the answer, the
-// SDK client is handed a closed, complete-looking message whose content is
-// missing that piece — the truncated answer with no error that the spec
-// forbids. The ruling on the emitter itself is a later decision; this test
-// records what a real client gets today.
+// PARKED ITEM (task review of the streaming emitter), resolved at the client layer:
+// the emitter's fail-open used to forward a data: frame it could not read as a
+// chat chunk VERBATIM, and an unlabelled data: frame is exactly what the Anthropic
+// SDK ignores (packages/ssestream drops every event with no name,
+// `case "": continue`), so a client was handed a closed, complete-looking message
+// whose content was missing that piece — the truncated answer with no error the
+// spec forbids. The emitter now classifies frames by dialect (R22): a frame in no
+// dialect it speaks ENDS the stream with the client's own `event: error`, which
+// this SDK raises. Pinned here as the client's view: the raw frame never reaches
+// the wire, the SDK reports an error, and the envelope is not closed as complete.
 func TestAnthropicStreamServedByChatBackendUnparseableFrame(t *testing.T) {
 	// The tail of the answer, in frames the emitter cannot read.
 	const foreignTailFrame = `data: {"type":"response.output_text.delta","item_id":"msg_1",` +
@@ -410,19 +403,19 @@ func TestAnthropicStreamServedByChatBackendUnparseableFrame(t *testing.T) {
 		rep := readStream(st)
 		t.Logf("events=%v text=%q stop=%q err=%v", rep.Events, rep.text(),
 			rep.Msg.StopReason, rep.Err)
-		// The frame reached the client verbatim (no event: line), which is why the
-		// SDK never dispatched it — this assertion is what makes the next two
-		// assertions mean "the SDK ignored it" and not "the emitter dropped it".
-		if got := string(st.clientBytes()); !strings.Contains(got,
-			"data: the worker died here, and this is not JSON\n\n") {
-			t.Errorf("the emitter stopped forwarding the frame it cannot parse:\n%s", got)
+		// The frame no longer rides through: an unlabelled data: frame is dropped on
+		// the client's floor, so forwarding it WAS the silent truncation.
+		if got := string(st.clientBytes()); strings.Contains(got, "the worker died here") {
+			t.Errorf("the emitter forwarded a frame in no dialect it speaks:\n%s", got)
 		}
-		// Nothing was lost (the frame carried no content) and nothing was reported.
-		if got := rep.text(); got != "Bonjour" {
-			t.Errorf("text = %q, want Bonjour", got)
+		if rep.Err == nil {
+			t.Fatal("stream.Err = nil, want the failure reported (a client must not read a cut stream as a complete answer)")
 		}
-		if rep.Err != nil {
-			t.Errorf("stream.Err = %v, want nil (the frame is invisible to the SDK)", rep.Err)
+		if slices.Contains(rep.Events, "message_stop") {
+			t.Errorf("an error event is terminal, the emitter closed the message anyway: %v", rep.Events)
+		}
+		if got := rep.text(); got != "Bon" {
+			t.Errorf("text = %q, want Bon (the stream ended at the bad frame)", got)
 		}
 	})
 
@@ -438,21 +431,52 @@ func TestAnthropicStreamServedByChatBackendUnparseableFrame(t *testing.T) {
 		rep := readStream(st)
 		t.Logf("events=%v text=%q stop=%q err=%v", rep.Events, rep.text(),
 			rep.Msg.StopReason, rep.Err)
-		if got := string(st.clientBytes()); !strings.Contains(got, foreignTailFrame[:len(foreignTailFrame)-2]) {
-			t.Errorf("the emitter stopped forwarding the frame it cannot parse:\n%s", got)
+		if got := string(st.clientBytes()); strings.Contains(got, "response.output_text.delta") {
+			t.Errorf("the emitter forwarded a frame in no dialect it speaks:\n%s", got)
 		}
-		// VERDICT: this is the outcome the spec forbids. The answer's tail left the
-		// client with the forwarded frame, the envelope closed normally around the
-		// hole (message_stop, stop_reason=end_turn), and stream.Err() is nil — a
-		// truncated answer, reported as a complete one, with no error.
+		// VERDICT (the spec's refusals item 3): the answer's tail rides a frame the
+		// converter cannot assemble, so the content IS lost — what must not be lost
+		// is the fact. The client's dialect ends the stream with an error event, the
+		// SDK raises it, and no normal close follows the hole.
+		if rep.Err == nil {
+			t.Fatal("stream.Err = nil, want the upstream failure (the answer's tail was untranslatable)")
+		}
+		if slices.Contains(rep.Events, "message_stop") {
+			t.Errorf("the truncated answer was reported as complete: %v", rep.Events)
+		}
 		if got := rep.text(); got != "Bon" {
-			t.Errorf("text = %q, want Bon (the tail rode the unparseable frame)", got)
+			t.Errorf("text = %q, want Bon (the tail rode the untranslatable frame)", got)
 		}
+	})
+
+	// A multimodal chat backend streams delta.content as a CONTENT-PARTS ARRAY. The
+	// emitter used to decide "is a chunk" by the inner field types, so every chunk
+	// of the answer failed its decode, went out native, and this SDK dropped them
+	// all: a message closed as a normal end_turn with no content at all.
+	t.Run("content-parts delta is translated", func(t *testing.T) {
+		st := newStack(t, sseBackend(
+			`data: {"id":"chatcmpl-1","model":"`+targetModel+`","object":"chat.completion.chunk",`+
+				`"choices":[{"index":0,"delta":{"role":"assistant",`+
+				`"content":[{"type":"text","text":"Bon"}]}}]}`+"\n\n",
+			`data: {"id":"chatcmpl-1","model":"`+targetModel+`","object":"chat.completion.chunk",`+
+				`"choices":[{"index":0,"delta":{"content":[{"type":"text","text":"jour"}]},`+
+				`"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`+"\n\n",
+			"data: [DONE]\n\n",
+		))
+		st.addRule([]string{anthropicModel}, targetModel)
+		st.declareProtocols("/v1/chat/completions")
+
+		rep := readStream(st)
+		t.Logf("events=%v text=%q stop=%q err=%v", rep.Events, rep.text(),
+			rep.Msg.StopReason, rep.Err)
 		if rep.Err != nil {
-			t.Errorf("stream.Err = %v, want nil (nothing told the client anything)", rep.Err)
+			t.Fatalf("stream.Err = %v, want nil", rep.Err)
 		}
-		if rep.Msg.StopReason != "end_turn" {
-			t.Errorf("stop_reason = %q, want end_turn", rep.Msg.StopReason)
+		if got := rep.text(); got != "Bonjour" {
+			t.Errorf("text = %q, want Bonjour (the answer went out untranslated)", got)
+		}
+		if !slices.Contains(rep.Events, "message_stop") {
+			t.Errorf("events = %v, want the message closed normally", rep.Events)
 		}
 	})
 

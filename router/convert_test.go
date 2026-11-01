@@ -277,10 +277,11 @@ func TestHandleRefusalTailReportsNoConversion(t *testing.T) {
 // chat, so without the off these two requests would be converted.
 func TestHandleConvertOff(t *testing.T) {
 	var hits int
-	var gotPath string
+	var gotPath, gotHeader string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
 		gotPath = r.URL.Path
+		gotHeader = r.Header.Get("X-Router-Convert")
 		_, _ = w.Write([]byte(`{"type":"message","role":"assistant","content":[],"model":"claude"}`))
 	}))
 	defer backend.Close()
@@ -312,6 +313,11 @@ func TestHandleConvertOff(t *testing.T) {
 	send(false) // the rule's own `convert: off`, same decision
 	if hits != 2 || gotPath != "/v1/messages" {
 		t.Fatalf("off must send the client's own request upstream: hits=%d path=%q", hits, gotPath)
+	}
+	// The override is the client's instruction to the router; a backend has no
+	// header by that name to honor, and the upstream request is a clone.
+	if gotHeader != "" {
+		t.Fatalf("the client's X-Router-Convert rode upstream: %q", gotHeader)
 	}
 }
 
@@ -729,6 +735,103 @@ func TestHandleConvertCountsOnlyUndecodedKeys(t *testing.T) {
 		if !slices.Contains(notes, want) {
 			t.Fatalf("notes = %q, want %s", notes, want)
 		}
+	}
+}
+
+// The response direction can not refuse (the answer is already at the client), so
+// notes are its only channel — and they must reach the recorded metric like the
+// request side's already do (R24). A refused answer arrives as an `end_turn`
+// completion, and the note is the only thing that says why it stopped; the parts
+// and choices the mapping had nowhere to put stay visible the same way. Pinned on
+// both response shapes, because JSON and SSE have separate producers.
+func TestHandleConvertReportsResponseNotes(t *testing.T) {
+	const jsonAnswer = `{"id":"c1","model":"claude","choices":[` +
+		`{"index":0,"message":{"role":"assistant","content":[{"type":"text","text":"hi"},` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}]},` +
+		`"finish_reason":"refusal"},` +
+		`{"index":1,"message":{"role":"assistant","content":"x"},"finish_reason":"stop"}]}`
+
+	t.Run("json", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(jsonAnswer))
+		}))
+		defer backend.Close()
+		r, store, ms, _ := newTestRouter(t)
+		convertChatFixture(t, store, backend.URL)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+			`{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+		if !strings.Contains(w.Body.String(), `"stop_reason":"end_turn"`) {
+			t.Fatalf("a refused answer must arrive as an end_turn completion: %s", w.Body.String())
+		}
+		rec := ms.Recent()
+		if len(rec) != 1 {
+			t.Fatalf("metrics: %+v", rec)
+		}
+		got := strings.Join(rec[0].ConvertNotes, ",")
+		for _, want := range []string{"finish_reason=refusal", "choices=dropped:1",
+			"content_part=dropped:image_url"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("the loss of %s must be on the metric, notes=%q", want, got)
+			}
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			f := w.(http.Flusher)
+			for _, frame := range []string{
+				`data: {"id":"c1","model":"claude","choices":[{"index":0,"delta":` +
+					`{"content":[{"type":"text","text":"hi"}]}}]}` + "\n\n",
+				`data: {"id":"c1","model":"claude","choices":[{"index":0,"delta":{"content":" there"},` +
+					`"finish_reason":"content_filter"}]}` + "\n\n",
+				"data: [DONE]\n\n",
+			} {
+				_, _ = w.Write([]byte(frame))
+				f.Flush()
+			}
+		}))
+		defer backend.Close()
+		r, store, ms, _ := newTestRouter(t)
+		convertChatFixture(t, store, backend.URL)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+			`{"model":"claude","max_tokens":10,"stream":true,`+
+				`"messages":[{"role":"user","content":"hi"}]}`))
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+		out := w.Body.String()
+		// A content-parts delta is translated, not forwarded native: the client reads
+		// the answer, and the note is what says a part was left out.
+		if !strings.Contains(out, `"text":"hi"`) || strings.Contains(out, `"content":[{`) {
+			t.Fatalf("a content-parts delta did not reach the client translated:\n%s", out)
+		}
+		rec := ms.Recent()
+		if len(rec) != 1 {
+			t.Fatalf("metrics: %+v", rec)
+		}
+		if got := strings.Join(rec[0].ConvertNotes, ","); !strings.Contains(got, "finish_reason=content_filter") {
+			t.Fatalf("the collapsed finish reason must be on the metric, notes=%q", got)
+		}
+	})
+}
+
+// convertChatFixture routes the incoming model `claude` to a chat-only declared
+// server, i.e. a `messages → chat` conversion.
+func convertChatFixture(t *testing.T, store *config.Store, url string) {
+	t.Helper()
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: url,
+		APITypes:  []domain.APIType{domain.APITypeOpenAI},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"}, ServerID: "s1",
+		TargetModel: "claude", NumRetries: -1, Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
 	}
 }
 

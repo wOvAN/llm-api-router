@@ -175,13 +175,14 @@ func (st *stack) lastRequest() (*http.Request, []byte) {
 	return st.lastReq, st.lastBody
 }
 
-// clientBytes returns everything the proxy has written to the client on the
-// most recent request — for the tests that must distinguish a frame the
-// emitter forwarded verbatim from one the SDK's decoder ignored.
+// clientBytes returns a copy of everything the proxy has written to the client so
+// far — for the tests that must distinguish a frame the emitter forwarded verbatim
+// from one the SDK's decoder ignored. A copy, not the live buffer: the request
+// goroutine keeps writing while the test reads.
 func (st *stack) clientBytes() []byte {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.clientBody.Bytes()
+	return bytes.Clone(st.clientBody.Bytes())
 }
 
 // assertUpstream verifies the proxy rewrote the request model to wantModel and

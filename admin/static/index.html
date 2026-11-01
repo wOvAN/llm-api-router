@@ -1454,9 +1454,11 @@ async function loadMetrics() {
     // translation had to drop along the way.
     let convertNote = '';
     if (r.convert) {
-      const parts = ['backend ' + (r.upstream_endpoint || '')];
+      // Notes join with ', ' like the jev and audio tooltips; the endpoint is
+      // always recorded, so the guard is belt-and-braces against a bare "backend ".
+      const parts = r.upstream_endpoint ? ['backend ' + r.upstream_endpoint] : [];
       (r.convert_notes || []).forEach(n => parts.push(n));
-      convertNote = `<br><span class="tag" style="background:#3a2a1a;color:#ffa657" title="${escAttr(parts.join(' · '))}">${esc(r.convert)}</span>`;
+      convertNote = `<br><span class="tag" style="background:#3a2a1a;color:#ffa657" title="${escAttr(parts.join(', '))}">${esc(r.convert)}</span>`;
     }
     const reasoning = r.reasoning_tokens || '-';
     const cacheNew = r.cache_creation_tokens || '-';

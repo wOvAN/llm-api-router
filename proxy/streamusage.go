@@ -153,18 +153,24 @@ func (s *sseRelay) finish() {
 
 // findSSEFrameEnd returns the index just past the end of the next complete SSE
 // frame (a blank-line-delimited event: "\n\n", "\r\n\r\n" or "\r\r"), or -1
-// when no complete frame is buffered yet.
+// when no complete frame is buffered yet. The LEFTMOST terminator, not the first
+// one searched: a backend that mixes terminators inside one stream (an LF-framed
+// event followed by a CRLF-framed one) must stay two frames, and searching for
+// the CRLF terminator across the whole buffer first glues them into one blob —
+// which every consumer downstream inherits (the converter's frame scanner applies
+// the same rule, and a glued blob is a frame it cannot parse).
 func findSSEFrameEnd(b []byte) int {
-	if i := bytes.Index(b, []byte("\r\n\r\n")); i >= 0 {
-		return i + 4
+	best := -1
+	size := 0
+	for _, term := range [...][]byte{[]byte("\r\n\r\n"), []byte("\n\n"), []byte("\r\r")} {
+		if i := bytes.Index(b, term); i >= 0 && (best < 0 || i < best) {
+			best, size = i, len(term)
+		}
 	}
-	if i := bytes.Index(b, []byte("\n\n")); i >= 0 {
-		return i + 2
+	if best < 0 {
+		return -1
 	}
-	if i := bytes.Index(b, []byte("\r\r")); i >= 0 {
-		return i + 2
-	}
-	return -1
+	return best + size
 }
 
 // isUsageArtifact reports whether an SSE frame is an injected stream-usage

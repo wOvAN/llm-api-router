@@ -283,15 +283,181 @@ func TestChatToMessagesStreamForwardsAnUpstreamErrorChunk(t *testing.T) {
 	}
 }
 
+// R22's branch 4: a frame whose `type` names an Anthropic stream event is already
+// in the client's dialect (a dual-protocol backend, the proxy's own frame), so it
+// goes out as it arrived — and it must not touch the emitter's recorded usage.
+// `message_delta` is the ONE Anthropic event that carries usage, so an emitter
+// that classifies by "has a usage key" reads the event as a chat chunk, emits
+// zero frames (no `choices`) and overwrites the real counts with zeros.
+func TestChatToMessagesStreamForwardsAnthropicEventsAndKeepsUsage(t *testing.T) {
+	s := NewChatToMessages()
+	s.WriteFrame([]byte(`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"x"}}],` +
+		`"usage":{"prompt_tokens":7,"completion_tokens":2}}` + "\n\n"))
+	got := s.WriteFrame([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},` +
+		`"usage":{"input_tokens":100,"output_tokens":200}}` + "\n\n"))
+	if len(got) != 1 || !strings.Contains(string(got[0]), `"stop_reason":"max_tokens"`) {
+		t.Fatalf("an upstream-authored Anthropic event was swallowed: %q", got)
+	}
+	var out strings.Builder
+	for _, f := range s.FinishFrames() {
+		out.Write(f)
+	}
+	if !strings.Contains(out.String(), `"input_tokens":7`) ||
+		!strings.Contains(out.String(), `"output_tokens":2`) {
+		t.Fatalf("the forwarded event overwrote the recorded usage:\n%s", out.String())
+	}
+}
+
+// R22's branch 7: a JSON object with no keys at all (a keep-alive `{}`) carries
+// nothing an Anthropic client can read, so it is inert — forwarding it puts an
+// unlabelled frame in the stream that the client's parser drops on the floor.
+func TestChatToMessagesStreamDropsAKeylessFrame(t *testing.T) {
+	s := NewChatToMessages()
+	for _, frame := range []string{"data: {}\n\n", "data:   \n\n"} {
+		if got := s.WriteFrame([]byte(frame)); len(got) != 0 {
+			t.Fatalf("%q forwarded to an Anthropic client: %q", frame, got)
+		}
+	}
+}
+
+// R22's branch 8: a frame in NO dialect the emitter speaks (garbage after
+// `data:`, or a foreign family like the Responses API's
+// `response.output_text.delta`) is not ours to forward: an unlabelled `data:`
+// frame is exactly what an Anthropic SDK ignores (`case "": continue`), so
+// forwarding the frame that carries the answer's tail leaves the client a
+// complete-looking message whose content is missing that piece and
+// `stream.Err() == nil` — the silent truncation the spec forbids. It ends the
+// stream with the client's own error event, and the note makes a backend that
+// does this every stream visible in the GUI.
+func TestChatToMessagesStreamEndsOnAFrameNoDialectOwns(t *testing.T) {
+	for _, frame := range []string{
+		`data: the worker died here, and this is not JSON` + "\n\n",
+		`data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"jour"}` + "\n\n",
+	} {
+		s := NewChatToMessages()
+		var out strings.Builder
+		for _, f := range s.WriteFrame([]byte(`data: {"id":"c1","choices":[{"index":0,` +
+			`"delta":{"content":"Bon"}}]}` + "\n\n")) {
+			out.Write(f)
+		}
+		for _, f := range s.WriteFrame([]byte(frame)) {
+			out.Write(f)
+		}
+		for _, f := range s.WriteFrame([]byte("data: [DONE]\n\n")) {
+			out.Write(f)
+		}
+		for _, f := range s.FinishFrames() {
+			out.Write(f)
+		}
+		got := out.String()
+		i := strings.Index(got, "event: error")
+		if i < 0 {
+			t.Fatalf("%s: a frame in no dialect the emitter speaks was swallowed:\n%s", frame, got)
+		}
+		if !strings.Contains(got[i:], `"type":"api_error"`) {
+			t.Fatalf("%s: the failure is not in the client's spelling:\n%s", frame, got[i:])
+		}
+		if strings.Contains(got[i:], "message_stop") {
+			t.Fatalf("%s: an error event is terminal, nothing may follow it:\n%s", frame, got[i:])
+		}
+		if !slices.Contains(s.Notes(), "frame=untranslated") {
+			t.Fatalf("%s: the untranslated frame must be reported: %v", frame, s.Notes())
+		}
+	}
+}
+
+// The string-shaped in-stream error is the other shape a backend gives up in
+// (`{"error":"upstream timeout"}`); it has no chunk content, so it must reach the
+// client as the client's own error event, not as a forwarded frame it ignores.
+func TestChatToMessagesStreamTranslatesAStringErrorChunk(t *testing.T) {
+	s := NewChatToMessages()
+	got := s.WriteFrame([]byte(`data: {"error":"upstream timeout"}` + "\n\n"))
+	if len(got) != 1 || !strings.Contains(string(got[0]), "event: error") {
+		t.Fatalf("a string-shaped in-stream error was not translated: %q", got)
+	}
+	if !strings.Contains(string(got[0]), `"message":"upstream timeout"`) {
+		t.Fatalf("the upstream error message was lost: %q", got)
+	}
+	for _, f := range s.WriteFrame([]byte("data: [DONE]\n\n")) {
+		t.Fatalf("a stream that ended in an error kept writing: %q", f)
+	}
+	if got := s.FinishFrames(); len(got) != 0 {
+		t.Fatalf("the normal close followed an error event: %q", got)
+	}
+}
+
+// A multimodal chat backend streams `delta.content` as a CONTENT-PARTS ARRAY
+// (`[{"type":"text","text":"…"}]`, llama.cpp and the OpenAI-fork builds do it).
+// Deciding "is a chunk" by the inner field types made such a chunk fail the typed
+// decode, so the whole chunk went out native: the client read an empty assistant
+// message closed as a normal end_turn, metered correctly in our own metrics and
+// invisible everywhere. Translate the text/refusal parts; note the rest.
+func TestChatToMessagesStreamTranslatesAContentPartsDelta(t *testing.T) {
+	s := NewChatToMessages()
+	out := emit(s,
+		`{"id":"c1","choices":[{"index":0,"delta":{"content":[{"type":"text","text":"Hi"}]}}]}`,
+		`{"id":"c1","choices":[{"index":0,"delta":{"content":[{"type":"refusal","text":" no"},`+
+			`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}]},`+
+			`"finish_reason":"stop"}]}`)
+
+	if !strings.Contains(out, `"text":"Hi"`) || !strings.Contains(out, `"text":" no"`) {
+		t.Fatalf("a content-parts delta was not translated:\n%s", out)
+	}
+	if strings.Contains(out, "image_url") || strings.Contains(out, `"object":"chat.completion.chunk"`) {
+		t.Fatalf("native frames leaked into a translated stream:\n%s", out)
+	}
+	if !strings.Contains(out, `"stop_reason":"end_turn"`) || !strings.Contains(out, "event: message_stop") {
+		t.Fatalf("the message was not closed:\n%s", out)
+	}
+	if !slices.Contains(s.Notes(), "content_part=dropped:image_url") {
+		t.Fatalf("the part the translator cannot read must be reported: %v", s.Notes())
+	}
+}
+
 // A JSON object with none of a Chat Completions chunk's keys is not ours to
-// translate — an upstream-authored Anthropic frame, a keep-alive object — so it
-// goes through untouched instead of being parsed into nothing and emitted as
-// nothing.
+// translate — an upstream-authored Anthropic frame — so it goes through untouched
+// instead of being parsed into nothing and emitted as nothing.
 func TestChatToMessagesStreamForwardsAFrameThatIsNotAChunk(t *testing.T) {
 	s := NewChatToMessages()
 	got := s.WriteFrame([]byte("data: {\"type\":\"content_block_delta\",\"index\":0}\n\n"))
 	if len(got) != 1 || !strings.Contains(string(got[0]), `"type":"content_block_delta"`) {
 		t.Fatalf("a foreign JSON frame was swallowed: %q", got)
+	}
+	// A forwarded frame carries exactly ONE terminator: the relay hands the
+	// terminator over inside the frame, so a re-terminating emitter that appends
+	// blindly writes the client a doubled blank line.
+	if got := string(got[0]); !strings.HasSuffix(got, "\n\n") || strings.HasSuffix(got, "\n\n\n\n") {
+		t.Fatalf("forwarded frame does not end in exactly one blank line: %q", got)
+	}
+}
+
+// A backend can mix terminators inside one stream (a proxy in front of the model
+// normalizing CRLF, a chunked writer flushing mid-event), and the relay hands the
+// translator the bytes as it framed them. Taking the FIRST terminator SEARCHED
+// rather than the leftmost one glues the LF-framed event onto the CRLF-framed
+// one: the glued blob parses as nothing, both events fall to the fail-open, and
+// the first event's content reaches the client native — silently lost.
+func TestChatToMessagesStreamMixedTerminators(t *testing.T) {
+	s := NewChatToMessages()
+	var out strings.Builder
+	for _, f := range s.WriteFrame([]byte(
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data: {"id":"c1","choices":[{"index":0,"delta":{"content":" there"},` +
+			`"finish_reason":"stop"}]}` + "\r\n\r\n")) {
+		out.Write(f)
+	}
+	for _, f := range s.FinishFrames() {
+		out.Write(f)
+	}
+	got := out.String()
+	if !strings.Contains(got, `"text":"Hi"`) {
+		t.Fatalf("the LF-framed event was glued to the next one and lost:\n%s", got)
+	}
+	if !strings.Contains(got, `"text":" there"`) {
+		t.Fatalf("the CRLF-framed event was lost:\n%s", got)
+	}
+	if n := strings.Count(got, "event: content_block_delta"); n != 2 {
+		t.Fatalf("content_block_delta x%d, want one per upstream event:\n%s", n, got)
 	}
 }
 

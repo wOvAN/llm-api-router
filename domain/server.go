@@ -12,7 +12,9 @@ const (
 
 // ServerProtocol declares one endpoint a backend serves. State records whether the
 // backend keeps server-side conversation state (`previous_response_id`), which no
-// local engine does by default; the router never assumes it.
+// local engine does by default; the router never assumes it. Declared scaffolding
+// for the capability-probe phase — no consumer reads it yet, and the `state`
+// refusal is planned with it (the `convert.CodeState` code is its twin).
 type ServerProtocol struct {
 	Path  string `json:"path"`
 	State bool   `json:"state,omitempty"`

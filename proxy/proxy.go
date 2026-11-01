@@ -1096,6 +1096,9 @@ func (t *translateWriter) passthrough() {
 }
 
 func (t *translateWriter) Write(data []byte) (int, error) {
+	if t == nil {
+		return len(data), nil
+	}
 	if t.pass {
 		return t.ResponseWriter.Write(data)
 	}
