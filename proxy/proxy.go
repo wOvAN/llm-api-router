@@ -299,7 +299,28 @@ type RouterHeaders struct {
 	// Trace is the per-request trace capture (nil = tracing off). Not a
 	// client-visible header, like Proxy.
 	Trace TraceTap
+	// Translate is the per-attempt response translator (nil = passthrough). Not a
+	// client-visible header, like Trace.
+	Translate StreamTranslator
 }
+
+// StreamTranslator converts the response from the backend's dialect into the
+// client's: whole SSE frames in, whole SSE frames out, and a whole JSON body for
+// a non-streamed answer. Declared here so proxy stays ignorant of convert (no
+// import, no cycle), exactly as with TraceTap; a nil translator costs one branch
+// on the relay path.
+type StreamTranslator interface {
+	WriteFrame(frame []byte) [][]byte
+	FinishFrames() [][]byte
+	TranslateJSON(body []byte) ([]byte, error)
+	Notes() []string
+}
+
+// MaxTranslatedBody bounds how much of a non-streamed JSON response the
+// translator may buffer to rewrite it. A larger body is relayed untranslated (with
+// a log line): holding a multi-megabyte answer to restyle a dialect is worse than
+// the client seeing the backend's shape.
+const MaxTranslatedBody = 8 << 20
 
 // TraceTap is the slice of a request trace capture StreamProxy writes into: the
 // response content type at header time, every response chunk after. The proxy
@@ -993,6 +1014,96 @@ func (d *loopDetector) sendLoopError() error {
 	return err
 }
 
+// translateWriter sits between the SSE relay (which hands it complete
+// blank-line-terminated frames) and the heartbeat writers. SSE frames are
+// translated frame by frame; a JSON body is buffered to the end and translated in
+// one pass, because an Anthropic client can not parse a partial Chat Completions
+// object.
+type translateWriter struct {
+	http.ResponseWriter
+	tr      StreamTranslator
+	json    bool
+	jsonBuf []byte
+	pass    bool
+}
+
+func newTranslateWriter(w http.ResponseWriter, tr StreamTranslator) *translateWriter {
+	return &translateWriter{ResponseWriter: w, tr: tr}
+}
+
+// setJSON arms JSON buffering. StreamProxy already learns the response kind from
+// the upstream headers and arms the relay the same way.
+func (t *translateWriter) setJSON(on bool) { t.json = on && t.tr != nil }
+
+// passthrough stops translating: an upstream-authored error frame is already in
+// the client's dialect (sendMidStreamError keys on the client's path).
+func (t *translateWriter) passthrough() { t.pass = true }
+
+func (t *translateWriter) Write(data []byte) (int, error) {
+	if t.tr == nil || t.pass {
+		return t.ResponseWriter.Write(data)
+	}
+	if !t.json {
+		for _, frame := range t.tr.WriteFrame(data) {
+			if _, err := t.ResponseWriter.Write(frame); err != nil {
+				return 0, err
+			}
+		}
+		return len(data), nil
+	}
+	if len(t.jsonBuf)+len(data) > MaxTranslatedBody {
+		log.Warnf("translateWriter: response exceeds %d bytes, relaying untranslated", MaxTranslatedBody)
+		t.pass = true
+		// The chunk that crossed the threshold goes out with the prefix it
+		// follows — relaying the response untranslated means relaying all of it.
+		_, err := t.ResponseWriter.Write(append(t.takeBuf(), data...))
+		return len(data), err
+	}
+	t.jsonBuf = append(t.jsonBuf, data...)
+	return len(data), nil
+}
+
+func (t *translateWriter) takeBuf() []byte {
+	b := t.jsonBuf
+	t.jsonBuf = nil
+	return b
+}
+
+// Flush forwards the flush downstream without translating anything. Embedding
+// http.ResponseWriter does NOT put Flush in this type's method set, so without
+// this the relay's per-frame write+flush would stop at this writer and the client
+// would receive the whole stream as one lump at stream end.
+func (t *translateWriter) Flush() {
+	if f, ok := t.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// finish delivers what the translator still owes: the frames that close open
+// blocks, or the translated JSON body.
+func (t *translateWriter) finish() {
+	if t.tr == nil || t.pass {
+		return
+	}
+	if !t.json {
+		for _, frame := range t.tr.FinishFrames() {
+			if _, err := t.ResponseWriter.Write(frame); err != nil {
+				log.Warnf("translateWriter: frame write failed: %v", err)
+			}
+		}
+	} else if b := t.takeBuf(); len(b) > 0 {
+		translated, err := t.tr.TranslateJSON(b)
+		if err != nil {
+			log.Warnf("translateWriter: json translation failed, relaying native body: %v", err)
+			translated = b
+		}
+		_, _ = t.ResponseWriter.Write(translated)
+	}
+	if f, ok := t.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // extractSSEContents extracts text content from SSE data events.
 // It handles both OpenAI (delta.content) and Anthropic (delta.text) formats.
 func extractSSEContents(data []byte) []string {
@@ -1213,7 +1324,17 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// "Request timed out" retries that waste work.
 	ws := newSilenceWriter(baseW, WaitSignalIdle, ping)
 	defer ws.Stop()
-	clientW := newSSERelay(ws, strip)
+	// The translator is the last writer that restyles bytes: it sits above the
+	// relay (so it sees whole frames, not TCP chunks) and below both silence
+	// writers (so a heartbeat is emitted in the client's dialect and never
+	// re-enters the translator), while metricsWriter, modelRewriteWriter and the
+	// trace tap stay on the native side of it.
+	var translator StreamTranslator
+	if rh != nil {
+		translator = rh.Translate
+	}
+	tw := newTranslateWriter(ws, translator)
+	clientW := newSSERelay(tw, strip)
 	mw := newMetricsWriter(clientW, start)
 	defer bufPool.Put(mw.bodyBuffer) //nolint:errcheck
 	mrw := newModelRewriteWriter(mw, targetModel, originalModel)
@@ -1339,6 +1460,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// to split: framing them would hold bytes for a blank line that never
 	// arrives, turning a streamed clip into one delivery at stream end.
 	clientW.setRaw(!isStream)
+	tw.setJSON(!isStream)
 
 	// Write status code (triggers TTFB and X-Router-Status injection)
 	ld.WriteHeader(upstreamResp.StatusCode)
@@ -1415,6 +1537,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 				return &m, ctx.Err()
 			}
 			// Send error event to the client (protocol-appropriate frame)
+			tw.passthrough()
 			sendMidStreamError(ld, readErr, strings.Contains(req.URL.Path, "/messages"))
 			m := mw.metrics()
 			m.BackendModel = mrw.capturedModel
@@ -1437,6 +1560,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// delivers whatever that leaves pending.
 	mrw.Finish()
 	clientW.finish()
+	tw.finish()
 
 	m := mw.metrics()
 	m.BackendModel = mrw.capturedModel

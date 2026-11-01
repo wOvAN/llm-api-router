@@ -54,6 +54,9 @@ type reqMeta struct {
 	upstreamPath string
 	convert      string
 	convertNotes []string
+	// translator is the serving attempt's response translator (nil =
+	// passthrough), kept so record can merge the notes the response side cost.
+	translator proxy.StreamTranslator
 }
 
 // serverAttempt is one proxy target: a backend server plus the model to send it.
@@ -316,7 +319,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		}
 		// Assigned on every attempt so the recorded metric describes the attempt
 		// that served, never an earlier failed one.
-		meta.upstreamPath, meta.convert, meta.convertNotes = plan.Path, plan.Edge(), nil
+		meta.upstreamPath, meta.convert, meta.convertNotes, meta.translator = plan.Path, plan.Edge(), nil, nil
 
 		rewrittenBody, err := rewriteAttemptBody(req, body, targetModel)
 		if err != nil {
@@ -407,6 +410,13 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		}
 		if meta.capture != nil {
 			rh.Trace = meta.capture
+		}
+		// A converted attempt answers in the backend's dialect, so its response
+		// must be translated back. Per attempt (the translator describes the
+		// serving one), and only when the plan says anything changes.
+		if meta.convert != "" {
+			rh.Translate = newResponseTranslator(plan)
+			meta.translator = rh.Translate
 		}
 
 		// Retry-before-fallback: on transport (pre-response) errors retry the
@@ -589,6 +599,12 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 		ClientIP:              clientIP(req),
 	}
 	m.Class, m.Features = meta.class, meta.features
+	// What the response translation dropped joins what the request translation
+	// dropped; the metric (and the tooltip it feeds) carries both, bounded.
+	if meta.translator != nil {
+		m.ConvertNotes = append(m.ConvertNotes, meta.translator.Notes()...)
+	}
+	m.ConvertNotes = capNotes(m.ConvertNotes)
 	if wasFallback {
 		m.Features = append(m.Features, "fallback")
 	}

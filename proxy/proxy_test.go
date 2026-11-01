@@ -1905,3 +1905,102 @@ func TestStreamProxyWithoutTraceIsUnchanged(t *testing.T) {
 		t.Errorf("metrics = %+v, want a served request", pm)
 	}
 }
+
+// dropAllTranslator is a StreamTranslator stub that swallows every SSE frame and
+// rewrites every JSON body, so a test can see exactly what the writer chain hands
+// the translator and what must bypass it.
+type dropAllTranslator struct{ bodies [][]byte }
+
+func (d *dropAllTranslator) WriteFrame([]byte) [][]byte { return nil }
+func (d *dropAllTranslator) FinishFrames() [][]byte     { return nil }
+func (d *dropAllTranslator) TranslateJSON(b []byte) ([]byte, error) {
+	d.bodies = append(d.bodies, b)
+	return []byte(`{"type":"message","content":[{"type":"text","text":"translated"}]}`), nil
+}
+func (d *dropAllTranslator) Notes() []string { return nil }
+
+// A non-streamed body on a converted attempt is buffered and translated in one
+// pass (an Anthropic client can not parse a partial Chat Completions object),
+// while metrics keep reading the native bytes.
+func TestStreamProxyTranslatesJSONBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"hi"}}],` +
+			`"usage":{"prompt_tokens":7,"completion_tokens":2}}`))
+	}))
+	defer backend.Close()
+
+	tr := &dropAllTranslator{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	req.Body = io.NopCloser(req.Body)
+	w := httptest.NewRecorder()
+	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "m", "m",
+		&RouterHeaders{ServerID: "s1", Translate: tr}, false, nil)
+	if err != nil {
+		t.Fatalf("StreamProxy: %v", err)
+	}
+	if len(tr.bodies) != 1 {
+		t.Fatalf("translator got %d bodies, want the whole response once", len(tr.bodies))
+	}
+	if !strings.Contains(string(tr.bodies[0]), `"prompt_tokens":7`) {
+		t.Fatalf("the translator must receive native bytes: %s", tr.bodies[0])
+	}
+	if body := w.Body.String(); !strings.Contains(body, "translated") {
+		t.Fatalf("client got the native body: %s", body)
+	}
+	if pm.PromptTokens != 7 || pm.CompletionTokens != 2 {
+		t.Fatalf("usage must be read from the native body: %+v", pm)
+	}
+}
+
+// The proxy's own mid-stream error frame is already written in the client's
+// dialect, so it must reach the client even when the translator swallows
+// everything: a frame the translator cannot parse is never swallowed into silence.
+func TestStreamProxyMidStreamErrorBypassesTranslator(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")) //nolint:errcheck
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m"}`))
+	req.Body = io.NopCloser(req.Body)
+	w := httptest.NewRecorder()
+	_, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "m", "m",
+		&RouterHeaders{ServerID: "s1", Translate: &dropAllTranslator{}}, false, nil)
+	if _, ok := errors.AsType[*MidStreamError](err); !ok {
+		t.Skipf("backend did not break the stream (err=%v)", err)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "event: error") {
+		t.Fatalf("the error frame was swallowed by the translator: %s", body)
+	}
+}
+
+// A non-streamed answer past MaxTranslatedBody is relayed untranslated — and
+// relayed COMPLETELY: the chunk that crossed the threshold must ride out with the
+// prefix it follows, and so must everything after it.
+func TestTranslateWriterOverflowRelaysWholeBody(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tw := newTranslateWriter(rec, &dropAllTranslator{})
+	tw.setJSON(true)
+
+	chunk := bytes.Repeat([]byte("x"), MaxTranslatedBody/2)
+	for i := 0; i < 4; i++ {
+		if _, err := tw.Write(chunk); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	tw.finish()
+
+	if got := rec.Body.Len(); got != 4*len(chunk) {
+		t.Fatalf("client received %d of %d bytes", got, 4*len(chunk))
+	}
+	if !bytes.Equal(rec.Body.Bytes()[:len(chunk)], chunk) {
+		t.Fatal("the relayed prefix is not the native body")
+	}
+}

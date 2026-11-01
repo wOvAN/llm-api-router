@@ -280,3 +280,87 @@ func TestHandleChatStreamStillInjectsUsage(t *testing.T) {
 		t.Fatalf("injection lost: %s", gotBody)
 	}
 }
+
+// The first usable slice: an Anthropic client, a chat-only backend, a non-streamed
+// answer. The client must receive an Anthropic message object.
+func TestHandleMessagesServedByChatBackend(t *testing.T) {
+	var gotPath, gotBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotPath, gotBody = r.URL.Path, string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","model":"claude","choices":[{"index":0,` +
+			`"message":{"role":"assistant","content":"hi there"},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":12,"completion_tokens":3}}`))
+	}))
+	defer backend.Close()
+
+	r, store, ms, _ := newTestRouter(t)
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: backend.URL,
+		APITypes:  []domain.APIType{domain.APITypeOpenAI},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"}, ServerID: "s1",
+		TargetModel: "claude", NumRetries: -1, Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Result().StatusCode, w.Body.String())
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("backend path = %q", gotPath)
+	}
+	if !strings.Contains(gotBody, `"max_tokens":10`) {
+		t.Fatalf("anthropic max_tokens not carried over: %s", gotBody)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"type":"message"`) || !strings.Contains(body, `"stop_reason":"end_turn"`) {
+		t.Fatalf("client did not get an Anthropic message: %s", body)
+	}
+	if h := w.Result().Header.Get("X-Router-Convert"); h != "messages>chat" {
+		t.Fatalf("X-Router-Convert = %q", h)
+	}
+	rec := ms.Recent()
+	if len(rec) != 1 || rec[0].Convert != "messages>chat" || rec[0].UpstreamEndpoint != "/v1/chat/completions" {
+		t.Fatalf("metric not annotated: %+v", rec)
+	}
+	// Usage is read from the native response: the translator runs after
+	// metricsWriter, so extraction never sees translated bytes.
+	if rec[0].PromptTokens != 12 || rec[0].CompletionTokens != 3 {
+		t.Fatalf("usage lost: %+v", rec[0])
+	}
+}
+
+// The metric's notes list is bounded (the spec's ≤ 512B): whole notes are kept,
+// the tail dropped, and a list that fits is untouched.
+func TestCapNotesBoundsTheTail(t *testing.T) {
+	if got := capNotes(nil); len(got) != 0 {
+		t.Fatalf("nil notes: %v", got)
+	}
+	short := []string{"thinking=off", "stop_dropped"}
+	if got := capNotes(short); len(got) != 2 {
+		t.Fatalf("a list that fits must be untouched: %v", got)
+	}
+	long := []string{}
+	n := 0
+	for i := 0; n <= maxConvertNotesBytes; i++ {
+		s := strings.Repeat("x", 100)
+		long = append(long, s)
+		n += len(s)
+	}
+	got := capNotes(long)
+	total := 0
+	for _, s := range got {
+		total += len(s)
+	}
+	if len(got) != len(long)-1 || total > maxConvertNotesBytes {
+		t.Fatalf("capNotes kept %d of %d notes (%d bytes, limit %d)",
+			len(got), len(long), total, maxConvertNotesBytes)
+	}
+}
