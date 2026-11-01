@@ -38,25 +38,53 @@ func (t *responseTranslator) FinishFrames() [][]byte { return nil }
 
 func (t *responseTranslator) Notes() []string { return t.notes }
 
-// droppedKeys reports the top-level fields a converted request lost without a
-// per-field drop. The spoke marshals a whitelist, so a key it never decodes — a
-// field Anthropic ships next month, a stray client key — disappears with nothing
-// to say so, and the spec forbids silent loss. Counting keys in against keys out
-// is the visibility the operator needs (a refusal would 400 real traffic on every
-// new Anthropic field, leaving `convert: off` as the only escape). A request
-// whose keys all map reports nothing.
+// convertedRequestKeys are the top-level fields the request spoke decodes — the
+// json tags of its own request struct. A spoke marshals a whitelist, so a key it
+// never decodes vanishes with nothing to say so: no note, no refusal. The spec
+// forbids silent loss, and a refusal would 400 real traffic on every field the
+// providers ship next month (leaving `convert: off` as the only escape), so the
+// routed path counts them: `keys:<n>dropped`.
+//
+// The list is the spoke's decoder set, not a guess at what clients send: a key on
+// it is a key the spoke handled — mapped straight through (present on the way out,
+// so never counted), folded into another key (`system` into `messages`), renamed
+// (`stop_sequences` into `stop`), or dropped under a `field=dropped` note. Counting
+// it would report the plain system prompt of every Anthropic client as a loss. Keep
+// it in sync with the spoke's request struct: a field missing here reads as a loss,
+// a field listed here that the spoke stops decoding goes silent again.
+var convertedRequestKeys = map[string]bool{
+	"model": true, "system": true, "messages": true, "max_tokens": true,
+	"stop_sequences": true, "temperature": true, "top_p": true, "top_k": true,
+	"stream": true, "tools": true, "tool_choice": true, "output_format": true,
+	"thinking": true, "metadata": true,
+}
+
+// droppedKeys compares what the client sent against what the backend will see and
+// reports the keys that left with no per-field note to explain them. The preview
+// path (admin, which calls convert.Request directly) reports no such note: it shows
+// the client its own fields, one by one, and has no routed attempt to account for.
 func droppedKeys(in, out []byte) []string {
-	n := keyCount(in) - keyCount(out)
-	if n <= 0 {
+	inKeys, outKeys := keySet(in), keySet(out)
+	if inKeys == nil {
+		return nil
+	}
+	n := 0
+	for k := range inKeys {
+		if _, kept := outKeys[k]; kept || convertedRequestKeys[k] {
+			continue
+		}
+		n++
+	}
+	if n == 0 {
 		return nil
 	}
 	return []string{fmt.Sprintf("keys:%ddropped", n)}
 }
 
-func keyCount(body []byte) int {
+func keySet(body []byte) map[string]json.RawMessage {
 	var m map[string]json.RawMessage
 	if json.Unmarshal(body, &m) != nil {
-		return 0
+		return nil
 	}
-	return len(m)
+	return m
 }

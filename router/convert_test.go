@@ -4,12 +4,36 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"llm-api-router/config"
 	"llm-api-router/domain"
+	"llm-api-router/metrics"
 	"llm-api-router/proxy"
+	"llm-api-router/trace"
 )
+
+// newRouterWithSettings is newTestRouter over a config that carries settings — the
+// conversion knobs (`drop_params`) are config-level, so the loss-policy fixtures
+// need a store built from a file.
+func newRouterWithSettings(t *testing.T, configJSON string) (*Router, *config.Store, *metrics.Store, *trace.Store) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(configJSON), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ms := metrics.New(100)
+	ts := trace.New(100, domain.TraceSettings{})
+	return New(store, ms, nil, nil, nil, ts), store, ms, ts
+}
 
 // A backend that declares nothing is byte-for-byte passthrough: the client's path
 // and body reach it untouched, and no conversion is reported.
@@ -495,6 +519,57 @@ func TestHandleConvertReportsDroppedKeys(t *testing.T) {
 	rec := ms.Recent()
 	if len(rec) != 1 || !strings.Contains(strings.Join(rec[0].ConvertNotes, ","), "keys:1dropped") {
 		t.Fatalf("the metric must carry it too: %+v", rec)
+	}
+}
+
+// The bulk note counts the keys NOTHING accounts for. A field the spoke renames
+// (`stop_sequences`→`stop`), folds (`system` into `messages`), maps
+// (`output_format`→`response_format`) or names when it drops (`top_k=dropped`) is
+// accounted for: counting it too would report the plain system prompt of every
+// Anthropic client as a loss, and would make the operator count a field twice.
+// Only the undecoded key — `service_tier`, invisible to the spoke — is left.
+func TestHandleConvertCountsOnlyUndecodedKeys(t *testing.T) {
+	var gotBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"id":"c1","model":"claude","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer backend.Close()
+
+	r, store, _, _ := newRouterWithSettings(t, `{"settings":{"convert":{"drop_params":true}}}`)
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: backend.URL,
+		APITypes:  []domain.APIType{domain.APITypeOpenAI},
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"claude"}, ServerID: "s1",
+		TargetModel: "claude", NumRetries: -1, Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"claude","max_tokens":10,"system":"be brief","stop_sequences":["END"],`+
+			`"top_k":40,"thinking":{"type":"enabled","budget_tokens":1024},`+
+			`"output_format":{"type":"json_schema","name":"answer","schema":{"type":"object"}},`+
+			`"service_tier":"priority","messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	for _, gone := range []string{"top_k", "thinking", "service_tier", "stop_sequences", "output_format"} {
+		if strings.Contains(gotBody, `"`+gone+`"`) {
+			t.Fatalf("%s must not reach the chat backend: %s", gone, gotBody)
+		}
+	}
+	for _, kept := range []string{`"role":"system"`, `"stop":["END"]`, `"response_format"`, `"max_tokens":10`} {
+		if !strings.Contains(gotBody, kept) {
+			t.Fatalf("converted request lost %s: %s", kept, gotBody)
+		}
+	}
+	notes := strings.Split(w.Result().Header.Get("X-Router-Convert-Notes"), ", ")
+	for _, want := range []string{"top_k=dropped", "thinking=dropped", "keys:1dropped"} {
+		if !slices.Contains(notes, want) {
+			t.Fatalf("notes = %q, want %s", notes, want)
+		}
 	}
 }
 

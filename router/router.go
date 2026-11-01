@@ -346,9 +346,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				break
 			}
 			rewrittenBody = converted
-			// Undecoded top-level fields vanish without a per-field drop; the
-			// routed path reports the difference (the preview path deliberately
-			// does not — it calls convert.Request directly).
+			// A top-level field the spoke never decodes vanishes without a
+			// per-field drop; the routed path reports the difference (the preview
+			// path calls convert.Request directly and deliberately does not).
 			meta.convertNotes = append(notes, droppedKeys(body, converted)...)
 		}
 
