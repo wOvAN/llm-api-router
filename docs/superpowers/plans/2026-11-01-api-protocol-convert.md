@@ -31,6 +31,7 @@
 - **A stream split across arbitrary read boundaries**: `sseRelay` hands the translator complete `\n\n`-terminated frames; the translator must never emit a partial frame, and `FinishFrames()` must close every block it opened (a backend that dies mid-generation must not leave an unterminated Anthropic message).
 - **A converted stream that dies mid-generation, or a backend that emits its own error frame**: `sendMidStreamError` authors the frame in the *client's* dialect (it keys on `req.URL.Path`, which the proxy never rewrites), so the translator must pass frames it cannot parse as Chat Completions chunks straight through — swallowing them would leave an Anthropic SDK with a truncated message and no error.
 - **A request that falls back across dialects**: the plan, the headers, the metrics and the translator are per-attempt, so the plan recorded must be the serving attempt's — a converted first attempt must not leak its plan into a passthrough second attempt.
+- **A converted request whose backend answers with an error**: HTTP 5xx is not an error to this proxy — the body is forwarded as-is — so after conversion it reaches the client in a shape its SDK cannot read, and the backend's actual reason is lost inside a parse failure. An envelope of the other dialect's error shape is translated, not relayed.
 
 ---
 
@@ -831,6 +832,7 @@ Add to the `rh := &proxy.RouterHeaders{...}` literal (`router.go:348`):
 ```go
 			UpstreamPath: plan.Path,
 			Convert:      meta.convert,
+			ConvertNotes: meta.convertNotes,
 ```
 
 Before the tail's all-backends-failed `r.record(...)`/`http.Error(...)` (`router.go:483-490`), insert:
@@ -862,6 +864,8 @@ and in `record`, add to the `domain.RequestMetric` literal:
 	UpstreamPath string
 	// Convert names the conversion in flight (`messages>chat`) → X-Router-Convert.
 	Convert string
+	// ConvertNotes lists what a deliberate drop cost → X-Router-Convert-Notes.
+	ConvertNotes []string
 ```
 
 `SetRouterHeaders`, beside the other conditional sets:
@@ -869,6 +873,18 @@ and in `record`, add to the `domain.RequestMetric` literal:
 ```go
 	if h.Convert != "" {
 		w.Header().Set("X-Router-Convert", h.Convert)
+	}
+	if len(h.ConvertNotes) > 0 {
+		w.Header().Set("X-Router-Convert-Notes", strings.Join(h.ConvertNotes, ", "))
+	}
+```
+
+The header map persists across attempts (`X-Router-Retries` note in CLAUDE.md), so `SetRouterHeaders` must *delete* the two convert headers when the current attempt has none — a dropped field from a refused first attempt must not ride on a passthrough second attempt:
+
+```go
+	if h.Convert == "" {
+		w.Header().Del("X-Router-Convert")
+		w.Header().Del("X-Router-Convert-Notes")
 	}
 ```
 
@@ -1934,12 +1950,39 @@ func TestResponseDispatch(t *testing.T) {
 		t.Fatal("an unimplemented response pair must refuse")
 	}
 }
+
+// A backend's 4xx/5xx body rides the same JSON path as an answer (HTTP 5xx is not
+// an error to this proxy — it is forwarded as-is). An Anthropic SDK can not read
+// OpenAI's `{"error":{"message":…}}`, so an untranslated error body reaches the
+// client as a parse failure that hides the backend's actual reason.
+func TestResponseTranslatesErrorEnvelope(t *testing.T) {
+	out, _, err := Response(Plan{From: Messages, Dialect: Chat},
+		[]byte(`{"error":{"message":"model not found","type":"invalid_request_error"}}`))
+	if err != nil {
+		t.Fatalf("Response: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("not JSON: %s", out)
+	}
+	if m["type"] != "error" {
+		t.Fatalf("not an Anthropic error envelope: %s", out)
+	}
+	e, _ := m["error"].(map[string]any)
+	if e["type"] != "invalid_request_error" || e["message"] != "model not found" {
+		t.Fatalf("error fields lost: %s", out)
+	}
+	// A body that is not an error envelope goes to the normal path.
+	if _, ok, _ := chatErrorToMessages([]byte(`{"choices":[]}`)); ok {
+		t.Fatal("a chat answer must not match the error path")
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `go test ./convert -run 'ChatToMessages|ResponseDispatch' -v`
-Expected: FAIL — `undefined: ChatToMessages`, `undefined: Response`.
+Run: `go test ./convert -run 'ChatToMessages|ResponseDispatch|ResponseTranslatesErrorEnvelope' -v`
+Expected: FAIL — `undefined: ChatToMessages`, `undefined: Response`, `undefined: chatErrorToMessages`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1956,16 +1999,44 @@ import (
 )
 
 // Response translates a non-streamed answer from the dialect the backend answered
-// in to the dialect the client asked in.
+// in to the dialect the client asked in. An upstream error envelope is translated
+// too (the proxy forwards 4xx/5xx bodies as-is, and an Anthropic SDK can not read
+// OpenAI's shape).
 func Response(p Plan, body []byte) ([]byte, []string, error) {
 	if p.Dialect == p.From || p.From == "" {
 		return body, nil, nil
 	}
 	if p.Dialect == Messages && p.From == Chat {
+		if b, ok, err := chatErrorToMessages(body); ok || err != nil {
+			return b, nil, err
+		}
 		return ChatToMessages(body)
 	}
 	return nil, nil, &Error{Code: CodeNoDialect, Msg: "response conversion " + string(p.From) + ">" +
 		string(p.Dialect) + " is not supported"}
+}
+
+// chatErrorToMessages rewrites an OpenAI error envelope into Anthropic's. ok is
+// false when the body is not one, leaving it to the answer path. `type` is
+// copied when present (invalid_request_error / rate_limit_exceeded / …), else
+// api_error, the Anthropic SDK's catch-all.
+func chatErrorToMessages(body []byte) ([]byte, bool, error) {
+	var in struct {
+		Error *struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &in) != nil || in.Error == nil {
+		return nil, false, nil
+	}
+	typ := in.Error.Type
+	if typ == "" {
+		typ = "api_error"
+	}
+	b, err := json.Marshal(map[string]any{"type": "error",
+		"error": map[string]any{"type": typ, "message": in.Error.Message}})
+	return b, true, err
 }
 
 type cResponse struct {
@@ -2433,6 +2504,12 @@ func TestChatToMessagesStreamText(t *testing.T) {
 	if !strings.Contains(out, `"output_tokens":2`) {
 		t.Fatalf("usage must ride message_delta:\n%s", out)
 	}
+	// A chat backend learns prompt tokens only at the end, and Anthropic reports
+	// them in message_start: message_delta must restate them, or a client that
+	// shows cost reads a permanent zero.
+	if !strings.Contains(out, `"input_tokens":7`) {
+		t.Fatalf("input tokens lost:\n%s", out)
+	}
 }
 
 func TestChatToMessagesStreamToolCallsAndThinking(t *testing.T) {
@@ -2740,8 +2817,20 @@ func (c *chatToMessages) finish(fr string) [][]byte {
 		c.close(),
 		frame("message_delta", map[string]any{"type": "message_delta",
 			"delta": map[string]any{"stop_reason": stopReason(fr), "stop_sequence": nil},
-			"usage": map[string]any{"output_tokens": c.outputToks}}),
+			"usage": c.deltaUsage()}),
 	}
+}
+
+// deltaUsage carries the output count, and the input count when a usage chunk
+// supplied one. Anthropic's own streams report input tokens in message_start,
+// which a chat backend only knows at the end — so message_delta restates it and a
+// client that shows cost never reads a permanent zero.
+func (c *chatToMessages) deltaUsage() map[string]any {
+	u := map[string]any{"output_tokens": c.outputToks}
+	if c.inputTok >= 0 {
+		u["input_tokens"] = c.inputTok
+	}
+	return u
 }
 
 // FinishFrames closes a stream that ended without a finish_reason (a backend that
@@ -3336,7 +3425,7 @@ git add admin/ && git commit -m "feat(admin): conversion tag with dropped-field 
 In **Critical Behavior Notes**, after the audio-endpoints bullet, add:
 
 ```markdown
-- **Protocol conversion (`convert`, opt-in per server)**: a rule can route a request to a backend that does not speak the client's dialect. Capability is declared in `Server.Protocols` (`[{path, state}]`); **an undeclared server stays byte-for-byte passthrough, exactly as before the feature** — `api_types` keeps its meaning as the per-protocol URL selector and never triggers conversion. The hub is `chat`: the implemented spoke is `messages → chat` (an Anthropic client on an OpenAI-only backend, JSON and SSE); `responses`, `/v1/completions` and every other family are refused with a 400 naming the field, never guessed. The decision is **per attempt** (a fallback server and a jev candidate carry their own `convert`, and the request header `X-Router-Convert: off` outranks config), so the plan, `X-Router-Convert`, `RequestMetric.UpstreamEndpoint/Convert/ConvertNotes` and the translator all describe the attempt that served. The translator sits at the bottom of the writer chain — after `metricsWriter`, `modelRewriteWriter` and `sseRelay`'s frame buffer, above the heartbeat writers — so usage/native-timing extraction, model rewriting and the trace keep seeing the backend's native bytes, the emitter never sees a partial frame or the stripped usage artifact, and heartbeats stay in the client's dialect. A frame the emitter cannot parse as a chat chunk (an upstream error object) is passed through untouched, and the proxy's own mid-stream error frame bypasses the translator entirely — swallowing either would leave a client with a truncated message and no error. `settings.convert.max_tokens_default` (4096) supplies the output budget Anthropic requires and OpenAI clients omit; `drop_params` turns the default refusal into a reported drop; `thinking` is refused even under `drop_params` (signed thinking blocks can not round-trip). `POST /admin/api/convert/preview` dry-runs the transform for one hypothetical request, at zero cost to the backend. Covered by `TestDecide*`, `TestMessagesToChat*`, `TestChatToMessages*`, `TestRequestDispatch`, `TestResponseDispatch`, `TestNewStream*`, `TestHandleMessagesServedByChatBackend*`, `TestHandleProtocolMismatch*`, `TestHandleConvertOff`, `TestHandleJevCandidate*`, `TestConvertPreview*`, `TestServerProtocolsAndRuleConvertSurviveClone`.
+- **Protocol conversion (`convert`, opt-in per server)**: a rule can route a request to a backend that does not speak the client's dialect. Capability is declared in `Server.Protocols` (`[{path, state}]`); **an undeclared server stays byte-for-byte passthrough, exactly as before the feature** — `api_types` keeps its meaning as the per-protocol URL selector and never triggers conversion. The hub is `chat`: the implemented spoke is `messages → chat` (an Anthropic client on an OpenAI-only backend, JSON and SSE); `responses`, `/v1/completions` and every other family are refused with a 400 naming the field, never guessed. The decision is **per attempt** (a fallback server and a jev candidate carry their own `convert`, and the request header `X-Router-Convert: off` outranks config), so the plan, `X-Router-Convert`, `RequestMetric.UpstreamEndpoint/Convert/ConvertNotes` and the translator all describe the attempt that served. The translator sits at the bottom of the writer chain — after `metricsWriter`, `modelRewriteWriter` and `sseRelay`'s frame buffer, above the heartbeat writers — so usage/native-timing extraction, model rewriting and the trace keep seeing the backend's native bytes, the emitter never sees a partial frame or the stripped usage artifact, and heartbeats stay in the client's dialect. A frame the emitter cannot parse as a chat chunk (an upstream error object) is passed through untouched, and the proxy's own mid-stream error frame bypasses the translator entirely — swallowing either would leave a client with a truncated message and no error. `settings.convert.max_tokens_default` (4096) supplies the output budget Anthropic requires and OpenAI clients omit; `drop_params` turns the default refusal into a reported drop; `thinking` is refused even under `drop_params` (signed thinking blocks can not round-trip). `POST /admin/api/convert/preview` dry-runs the transform for one hypothetical request, at zero cost to the backend. A backend 4xx/5xx body on a converted attempt is translated too (`{"error":{…}}` → `{"type":"error","error":{…}}`), because an SDK that cannot read the error reports a parse failure and loses the reason. Covered by `TestDecide*`, `TestMessagesToChat*`, `TestChatToMessages*`, `TestRequestDispatch`, `TestResponseDispatch`, `TestResponseTranslatesErrorEnvelope`, `TestNewStream*`, `TestHandleMessagesServedByChatBackend*`, `TestHandleProtocolMismatch*`, `TestHandleConvertOff`, `TestHandleJevCandidate*`, `TestConvertPreview*`, `TestServerProtocolsAndRuleConvertSurviveClone`, and in `sdktest/` by `TestAnthropic*ServedByChatBackend`.
 ```
 
 In the **Packages** table add:
@@ -3355,10 +3444,167 @@ In **Key URLs** add:
 
 `AGENTS.md` is the condensed duplicate: add the package row, the URL row, and a four-line digest of the bullet (declared capability, undeclared = passthrough; hub is chat, refusal names the field; per-attempt decision and per-attempt observability; translator below the metrics writer, above the heartbeats).
 
-- [ ] **Step 3: Verify the two files agree, and commit**
+- [ ] **Step 3: Verify the two files agree**
 
-Read both new sections side by side and confirm they say the same thing (the length differs, the claims must not), then
+Read both new sections side by side and confirm they say the same thing (the length differs, the claims must not).
+
+`CLAUDE.md` and `AGENTS.md` are gitignored in this repo (`git ls-files` lists neither) — they are local operator docs, not versioned files. There is therefore **nothing to commit** for this task; the verification above is the deliverable. Do not `git add -f` them.
+
+---
+
+### Task 13: SDK wire compliance — the official Anthropic SDK against a chat-only backend
+
+**Files:**
+- Modify: `sdktest/harness_test.go` (one helper, after `addRule`)
+- Modify: `sdktest/anthropic_test.go` (append two tests + the chat payloads)
+
+**Interfaces:**
+- Consumes: the whole converter chain (Tasks 3–9) behind the real router; the `stack` harness (`newStack`, `addRule`, `lastRequest`, `lastMetric`, `accumulateStream`, `jsonBackend`, `sseBackend`); `config.Store.GetServer`/`UpdateServer` to declare the fake backend's protocols.
+- Produces: proof that the emitter's frames parse in `anthropic-sdk-go` — `Message.Accumulate` over `Messages.NewStreaming`, with `stream.Err()` as the gate. This is the layer the spec calls the main one: our own Go tests assert strings, this asserts the wire format a real client reads.
+
+`sdktest` is a separate module that builds only where the gitignored `.info/apis/` SDK clones exist — local-only, never CI. Run it from `sdktest/`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `sdktest/anthropic_test.go`:
+
+```go
+// A chat-only backend, answering in Chat Completions shape.
+const chatCompletionJSON = `{"id":"chatcmpl-1","model":"` + targetModel + `",` +
+	`"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant",` +
+	`"content":"Bonjour from fake backend"},"finish_reason":"stop"}],` +
+	`"usage":{"prompt_tokens":10,"completion_tokens":5}}`
+
+var chatStreamFrames = []string{
+	"data: {\"id\":\"chatcmpl-1\",\"model\":\"" + targetModel +
+		"\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," +
+		"\"delta\":{\"role\":\"assistant\",\"content\":\"Bon\"}}]}\n\n",
+	"data: {\"id\":\"chatcmpl-1\",\"model\":\"" + targetModel +
+		"\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0," +
+		"\"delta\":{\"content\":\"jour\"},\"finish_reason\":\"stop\"}]," +
+		"\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+	"data: [DONE]\n\n",
+}
+
+// The phase-2 promise, checked by the official SDK: an Anthropic client, a
+// chat-only backend, and the SDK's own JSON decoding accepts the translated
+// answer — including the model name rewritten back to the client's.
+func TestAnthropicMessagesJSONServedByChatBackend(t *testing.T) {
+	st := newStack(t, jsonBackend(http.StatusOK, chatCompletionJSON))
+	st.addRule([]string{anthropicModel}, targetModel)
+	st.declareProtocols("/v1/chat/completions")
+
+	resp, err := st.anthropic.Messages.New(context.Background(), anthropicParams())
+	if err != nil {
+		t.Fatalf("Messages.New: %v", err)
+	}
+	req, body := st.lastRequest()
+	if req == nil {
+		t.Fatal("fake backend saw no request")
+	}
+	if req.URL.Path != "/v1/chat/completions" {
+		t.Errorf("upstream path = %q, want /v1/chat/completions", req.URL.Path)
+	}
+	if !strings.Contains(string(body), `"max_tokens":100`) {
+		t.Errorf("client max_tokens not carried into the chat request: %s", body)
+	}
+	if resp.Model != anthropicModel {
+		t.Errorf("Model = %q, want %q (response rewrite)", resp.Model, anthropicModel)
+	}
+	if len(resp.Content) != 1 {
+		t.Fatalf("content blocks = %d, want 1: %+v", len(resp.Content), resp.Content)
+	}
+	if got := resp.Content[0].AsText().Text; got != "Bonjour from fake backend" {
+		t.Errorf("content = %q", got)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Errorf("stop_reason = %q, want end_turn", resp.StopReason)
+	}
+	if resp.Usage.InputTokens != 10 || resp.Usage.OutputTokens != 5 {
+		t.Errorf("usage = in %d out %d, want 10/5", resp.Usage.InputTokens, resp.Usage.OutputTokens)
+	}
+
+	m := st.lastMetric()
+	if m.Convert != "messages>chat" || m.UpstreamEndpoint != "/v1/chat/completions" {
+		t.Errorf("metric convert = %q upstream = %q, want messages>chat / /v1/chat/completions",
+			m.Convert, m.UpstreamEndpoint)
+	}
+	// Usage is read from the native bytes, above the translator.
+	if m.PromptTokens != 10 || m.CompletionTokens != 5 {
+		t.Errorf("metric tokens = %d/%d, want 10/5", m.PromptTokens, m.CompletionTokens)
+	}
+}
+
+// The stream half: every frame the emitter authored must survive
+// `Message.Accumulate`, and `stream.Err()` is the gate that says the SDK parsed
+// them — a frame with a wrong event name or a missing field fails there.
+func TestAnthropicStreamServedByChatBackend(t *testing.T) {
+	st := newStack(t, sseBackend(chatStreamFrames...))
+	st.addRule([]string{anthropicModel}, targetModel)
+	st.declareProtocols("/v1/chat/completions")
+
+	stream := st.anthropic.Messages.NewStreaming(context.Background(), anthropicParams())
+	msg := accumulateStream(t, stream)
+
+	if msg.Model != anthropicModel {
+		t.Errorf("streamed Model = %q, want %q", msg.Model, anthropicModel)
+	}
+	if msg.ID != "chatcmpl-1" {
+		t.Errorf("streamed ID = %q, want chatcmpl-1", msg.ID)
+	}
+	if len(msg.Content) != 1 {
+		t.Fatalf("content blocks = %d, want 1: %+v", len(msg.Content), msg.Content)
+	}
+	if got := msg.Content[0].AsText().Text; got != "Bonjour" {
+		t.Errorf("streamed content = %q, want Bonjour", got)
+	}
+	if msg.StopReason != "end_turn" {
+		t.Errorf("stop_reason = %q, want end_turn", msg.StopReason)
+	}
+	if msg.Usage.OutputTokens != 5 {
+		t.Errorf("output_tokens = %d, want 5 (from message_delta)", msg.Usage.OutputTokens)
+	}
+	if msg.Usage.InputTokens != 10 {
+		t.Errorf("input_tokens = %d, want 10 (restated in message_delta)", msg.Usage.InputTokens)
+	}
+}
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd sdktest && go test ./... -run 'ServedByChatBackend' -v`
+Expected: FAIL — `st.declareProtocols undefined` (the helper lands in Step 3).
+
+- [ ] **Step 3: Write the harness helper**
+
+Append to `sdktest/harness_test.go`, after `addRule`:
+
+```go
+// declareProtocols declares the endpoints the fake backend serves, which is what
+// decides whether the router converts the request (see convert.Decide). The
+// default stack declares nothing, so every existing test stays a passthrough.
+func (st *stack) declareProtocols(paths ...string) {
+	st.t.Helper()
+	srv, ok := st.store.GetServer("srv1")
+	if !ok {
+		st.t.Fatalf("server srv1 not found")
+	}
+	for _, p := range paths {
+		srv.Protocols = append(srv.Protocols, domain.ServerProtocol{Path: p})
+	}
+	if err := st.store.UpdateServer("srv1", srv); err != nil {
+		st.t.Fatalf("UpdateServer: %v", err)
+	}
+}
+```
+
+- [ ] **Step 4: Run the whole module**
+
+Run: `cd sdktest && go test ./...`
+Expected: PASS — the two new tests plus every pre-existing SDK test (the declared-protocol stack is opt-in, so passthrough behavior must be untouched).
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add CLAUDE.md AGENTS.md && git commit -m "docs: protocol conversion in CLAUDE.md and AGENTS.md"
+git add sdktest/ && git commit -m "test(sdktest): anthropic SDK served by a chat-only backend, json and stream"
 ```
