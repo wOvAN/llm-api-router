@@ -36,6 +36,11 @@ type RequestMetric struct {
 
 	ClientIP string `json:"client_ip"`
 
+	// RequestID correlates a metric row with the client's own log: the client's
+	// X-Request-ID when it sent one, else the id the router generated (the same
+	// value the X-Router-Request-Id response header carries).
+	RequestID string `json:"request_id,omitempty"`
+
 	// Request shape, classified by heuristic on every request (0 tokens):
 	// the endpoint class plus the signs a byte scan saw (stream, tools:<n>,
 	// images:<n>, …). Aggregated into `class:<label>` summaries.

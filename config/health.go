@@ -123,7 +123,20 @@ func (t *HealthTracker) checkServer(srv *domain.Server) bool {
 	if err := resp.Body.Close(); err != nil {
 		log.Warnf("[health] %s: failed to close probe response body: %v", srv.Name, err)
 	}
-	return resp.StatusCode == http.StatusOK
+	// An HTTP answer is not an outage. 401/403/429 say the backend is up and
+	// refusing us — a missing/expired api_key, a throttled probe endpoint — and
+	// the rate limiter reports that with the status as its reason, where the GUI
+	// can show it. Marking it down instead leaves a red "down" server that has
+	// been answering every probe all along.
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		if resp.StatusCode != http.StatusOK {
+			log.Warnf("[health] %s is up but answers %s to the probe — check its api_key",
+				srv.Name, http.StatusText(resp.StatusCode))
+		}
+		return true
+	}
+	return false
 }
 
 // IsHealthy reports whether the server is currently considered healthy.

@@ -1682,6 +1682,7 @@ func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
 	var primaryCalls atomic.Int32
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		primaryCalls.Add(1)
+		w.Header().Set("Retry-After", "20")
 		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error"}}`)) //nolint:errcheck
 	}))
@@ -1737,6 +1738,11 @@ func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
 	w1 := doRequest()
 	if got := w1.Result().StatusCode; got != http.StatusTooManyRequests {
 		t.Fatalf("first request status = %d, want 429", got)
+	}
+	// The backend said 20s, so 20s is the cooldown — not the 5min default, which
+	// would bench a merely-busy server for ten times its own stated pause.
+	if d := rl.CooldownRemaining("primary"); d > 21*time.Second || d <= 0 {
+		t.Errorf("cooldown = %v, want the backend's Retry-After (20s)", d)
 	}
 
 	// Second request: primary in cooldown → fallback serves it

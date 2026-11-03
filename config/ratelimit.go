@@ -43,6 +43,7 @@ type RateLimiter struct {
 	mu          sync.RWMutex
 	failures    map[string][]failEntry        // per-server failure entries
 	cooldown    map[string]time.Time          // per-server cooldown expiry
+	reason      map[string]string             // why each server is cooling down
 	maxFails    int                           // server-side failures within window to trigger cooldown
 	maxFails4xx int                           // lenient threshold for client-side (other 4xx) failures
 	window      time.Duration                 // time window for counting failures
@@ -57,6 +58,7 @@ func NewRateLimiter(maxFails int, window, cooldownDur time.Duration) *RateLimite
 	return &RateLimiter{
 		failures:    make(map[string][]failEntry),
 		cooldown:    make(map[string]time.Time),
+		reason:      make(map[string]string),
 		maxFails:    maxFails,
 		maxFails4xx: maxFails * 2,
 		window:      window,
@@ -86,6 +88,13 @@ func (rl *RateLimiter) cooldownDuration(id string) time.Duration {
 	return rl.cooldownDur
 }
 
+// hasCooldownOverride reports whether the server has an explicit per-server
+// cooldown configured (as opposed to falling through to the global default via a
+// nil/zero override). Callers must hold rl.mu.
+func (rl *RateLimiter) hasCooldownOverride(id string) bool {
+	return rl.cooldownFor != nil && rl.cooldownFor(id) > 0
+}
+
 // ShouldSkip reports whether the server should be skipped due to cooldown.
 func (rl *RateLimiter) ShouldSkip(id string) bool {
 	if rl == nil {
@@ -109,6 +118,7 @@ func (rl *RateLimiter) RecordSuccess(id string) {
 	defer rl.mu.Unlock()
 	delete(rl.failures, id)
 	delete(rl.cooldown, id)
+	delete(rl.reason, id)
 }
 
 // RecordFailure records a failed request to a server with its HTTP status
@@ -119,8 +129,14 @@ func (rl *RateLimiter) RecordSuccess(id string) {
 //   - transport errors (status 0) and 5xx → cooldown after maxFails failures in window
 //   - other 4xx → cooldown after maxFails4xx failures in window
 //
+// A trailing retryAfter is the backend's own Retry-After hint (0/absent = none):
+// for an immediate-cooldown status it replaces the configured duration, because
+// the backend just told us when to come back and a 5min default would bench it
+// for ten times its own stated pause. Clamped to [1s, 1h] so a hostile or broken
+// header can neither park a server for a day nor for nothing.
+//
 // Returns true if the server was just put into cooldown.
-func (rl *RateLimiter) RecordFailure(id string, status int) bool {
+func (rl *RateLimiter) RecordFailure(id string, status int, retryAfter ...time.Duration) bool {
 	if rl == nil {
 		return false
 	}
@@ -155,18 +171,43 @@ func (rl *RateLimiter) RecordFailure(id string, status int) bool {
 	if kind == kindImmediate || count >= threshold {
 		expiry, wasCooling := rl.cooldown[id]
 		if !wasCooling || now.After(expiry) {
-			dur := rl.cooldownDuration(id)
-			rl.cooldown[id] = now.Add(dur)
 			reason := "failures"
+			dur := rl.cooldownDuration(id)
 			if kind == kindImmediate {
 				reason = "status " + http.StatusText(status)
+				// Precedence (LiteLLM's): an operator's explicit per-server
+				// cooldown_time outranks a header any backend can send; the hint
+				// replaces only the global default.
+				if hint := clampHint(retryAfter); hint > 0 && !rl.hasCooldownOverride(id) {
+					dur = hint
+				}
 			}
+			rl.cooldown[id] = now.Add(dur)
+			rl.reason[id] = reason
 			log.Warnf("[ratelimit] %s put into cooldown (%s, %d in %v, cooldown %v)",
 				id, reason, count, rl.window, dur)
 			return true
 		}
 	}
 	return false
+}
+
+// clampHint bounds a backend-supplied Retry-After hint. Callers must hold rl.mu
+// (it reads no state; it lives here so the cooldown path has one clamp).
+func clampHint(hints []time.Duration) time.Duration {
+	if len(hints) == 0 {
+		return 0
+	}
+	d := hints[0]
+	switch {
+	case d <= 0:
+		return 0
+	case d < time.Second:
+		return time.Second
+	case d > time.Hour:
+		return time.Hour
+	}
+	return d
 }
 
 // classifyFailure maps an HTTP status (0 = transport) to a failKind.
@@ -200,6 +241,7 @@ func (rl *RateLimiter) ClearCooldown(id string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	delete(rl.cooldown, id)
+	delete(rl.reason, id)
 	delete(rl.failures, id)
 }
 
@@ -220,6 +262,24 @@ func (rl *RateLimiter) CooldownRemaining(id string) time.Duration {
 		return 0
 	}
 	return remaining
+}
+
+// Cooldown reports when a server's cooldown expires and what put it there
+// ("status Too Many Requests", "status Unauthorized", "failures"). The ok
+// result is false for a server that is not cooling down. This is what the admin
+// API/GUI show, so a server skipped for a bad api_key is visible as that, and
+// not as an unexplained healthy-and-idle one.
+func (rl *RateLimiter) Cooldown(id string) (time.Time, string, bool) {
+	if rl == nil {
+		return time.Time{}, "", false
+	}
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+	expiry, ok := rl.cooldown[id]
+	if !ok || !time.Now().Before(expiry) {
+		return time.Time{}, "", false
+	}
+	return expiry, rl.reason[id], true
 }
 
 // FailureCount returns the number of recent failures for a server.

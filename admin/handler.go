@@ -29,15 +29,23 @@ func probeClient(srv *domain.Server) (*http.Client, error) {
 
 // Handler serves the admin API for managing servers and routing rules.
 type Handler struct {
-	store   *config.Store
-	metrics *metrics.Store
-	health  *config.HealthTracker
-	trace   *trace.Store
+	store     *config.Store
+	metrics   *metrics.Store
+	health    *config.HealthTracker
+	rateLimit *config.RateLimiter
+	trace     *trace.Store
 }
 
 // NewHandler creates a new admin handler.
 func NewHandler(store *config.Store, m *metrics.Store, health *config.HealthTracker, tr *trace.Store) *Handler {
 	return &Handler{store: store, metrics: m, health: health, trace: tr}
+}
+
+// SetRateLimiter installs the rate limiter whose cooldown the server list
+// reports. Installed separately (like the per-server limit overrides) so the
+// handler's existing call sites stay as they are.
+func (h *Handler) SetRateLimiter(rl *config.RateLimiter) {
+	h.rateLimit = rl
 }
 
 // ServeHTTP routes admin API requests.
@@ -120,10 +128,15 @@ func (h *Handler) listServers(w http.ResponseWriter, req *http.Request) {
 	}
 	servers := make([]serverResponse, 0, len(cfg.Servers))
 	for _, srv := range cfg.Servers {
-		servers = append(servers, serverResponse{
-			Server:  *srv,
-			Healthy: status[srv.ID],
-		})
+		resp := serverResponse{Server: *srv, Healthy: status[srv.ID]}
+		// A cooling-down server is skipped by the router while the probe calls it
+		// healthy, so report both the fact and the reason — "healthy" alone is a
+		// server that answers nothing, with no clue why.
+		if expiry, reason, ok := h.rateLimit.Cooldown(srv.ID); ok {
+			resp.CooldownSeconds = int(time.Until(expiry).Round(time.Second).Seconds())
+			resp.CooldownReason = reason
+		}
+		servers = append(servers, resp)
 	}
 	writeJSON(w, http.StatusOK, servers)
 }
@@ -131,7 +144,9 @@ func (h *Handler) listServers(w http.ResponseWriter, req *http.Request) {
 // serverResponse wraps a Server with its health status.
 type serverResponse struct {
 	domain.Server
-	Healthy bool `json:"healthy"`
+	Healthy         bool   `json:"healthy"`
+	CooldownSeconds int    `json:"cooldown_seconds,omitempty"`
+	CooldownReason  string `json:"cooldown_reason,omitempty"`
 }
 
 func (h *Handler) addServer(w http.ResponseWriter, req *http.Request) {

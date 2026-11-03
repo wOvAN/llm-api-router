@@ -267,6 +267,11 @@ type ProxyMetrics struct {
 	// the length of the audio and how fast it was produced.
 	AudioDurationMs int64   // audio.cpp timing.audio_duration_ms
 	AudioRTF        float64 // audio.cpp timing.rtf (wall ms per ms of audio)
+	// RetryAfterMs is the backend's Retry-After hint (429 and friends), in
+	// milliseconds; 0 = the backend said nothing. The router makes it the
+	// cooldown length, so a busy backend is benched for exactly as long as it
+	// asked for.
+	RetryAfterMs int64
 }
 
 // RouterHeaders are custom response headers injected by the router
@@ -392,6 +397,27 @@ func CapConvertNotes(notes []string) []string {
 	return notes
 }
 
+// parseRetryAfter reads a Retry-After header, which RFC 9110 allows in two
+// shapes: delta-seconds, or an HTTP-date to retry at. Absent, unparseable, or a
+// date already past is 0 (no hint) — the caller falls back to its own default.
+func parseRetryAfter(v string) time.Duration {
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if when, err := http.ParseTime(v); err == nil {
+		if d := time.Until(when); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 // metricsWriter wraps an http.ResponseWriter to track TTFB and response size.
 type metricsWriter struct {
 	http.ResponseWriter
@@ -402,8 +428,9 @@ type metricsWriter struct {
 	bodyBuffer      *bytes.Buffer
 	contentType     string
 	contentEncoding string
-	trace           TraceTap // per-request trace capture (nil = off)
-	injectStatus    bool     // set X-Router-Status at WriteHeader (router mode)
+	retryAfter      time.Duration // backend's Retry-After hint (0 = none)
+	trace           TraceTap      // per-request trace capture (nil = off)
+	injectStatus    bool          // set X-Router-Status at WriteHeader (router mode)
 }
 
 func newMetricsWriter(w http.ResponseWriter, start time.Time) *metricsWriter {
@@ -421,6 +448,7 @@ func (m *metricsWriter) WriteHeader(code int) {
 	m.statusCode = code
 	m.contentType = m.ResponseWriter.Header().Get("Content-Type")
 	m.contentEncoding = m.ResponseWriter.Header().Get("Content-Encoding")
+	m.retryAfter = parseRetryAfter(m.ResponseWriter.Header().Get("Retry-After"))
 	if m.trace != nil {
 		// A compressed body is bytes: the relay forwards it as-is and only the
 		// metrics extractor decompresses it, so the trace stubs it (with size +
@@ -482,6 +510,7 @@ func (m *metricsWriter) metrics() ProxyMetrics {
 	}
 	pm.TTFBMs = ttfb
 	pm.ResponseSize = m.responseSize
+	pm.RetryAfterMs = m.retryAfter.Milliseconds()
 
 	// A binary audio response (audio.cpp TTS with the default WAV output) has no
 	// body to parse, so the backend reports its timing in headers instead.

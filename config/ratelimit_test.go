@@ -288,3 +288,71 @@ func TestRateLimiterPerServerCooldownOverride(t *testing.T) {
 		t.Error("should be in cooldown with default duration")
 	}
 }
+
+// A 429 that says "come back in 30s" must not bench the server for the full
+// 5-minute default: the backend's own hint replaces it, clamped so a hostile or
+// broken header can not park a server for a day (or for zero).
+func TestRateLimiterHonoursRetryAfter(t *testing.T) {
+	rl := NewRateLimiter(3, 30*time.Second, 5*time.Minute)
+
+	rl.RecordFailure("srv-1", 429, 30*time.Second)
+	if !rl.ShouldSkip("srv-1") {
+		t.Fatal("429 must cool the server down")
+	}
+	if d := rl.CooldownRemaining("srv-1"); d > 31*time.Second || d < 25*time.Second {
+		t.Errorf("cooldown = %v, want the backend's 30s hint (not the 5min default)", d)
+	}
+
+	// Out-of-range hints are clamped, never taken literally.
+	rl.RecordSuccess("srv-1")
+	rl.RecordFailure("srv-2", 429, 24*time.Hour)
+	if d := rl.CooldownRemaining("srv-2"); d > time.Hour {
+		t.Errorf("cooldown = %v, want clamped to 1h", d)
+	}
+	rl.RecordSuccess("srv-2")
+	rl.RecordFailure("srv-3", 429, time.Millisecond)
+	if d := rl.CooldownRemaining("srv-3"); d < 500*time.Millisecond {
+		t.Errorf("cooldown = %v, want the 1s floor", d)
+	}
+}
+
+// The GUI has to say why a server is being skipped. "unhealthy" is the wrong
+// answer for a server that answers every request with 401 — the operator needs
+// to know it is a key problem, not an outage.
+func TestRateLimiterReportsCooldownReason(t *testing.T) {
+	rl := NewRateLimiter(2, 30*time.Second, 5*time.Minute)
+
+	rl.RecordFailure("auth", 401)
+	if _, reason, ok := rl.Cooldown("auth"); !ok || reason != "status Unauthorized" {
+		t.Errorf("reason = %q, want the status that triggered it", reason)
+	}
+
+	for range 2 {
+		rl.RecordFailure("flaky", 500)
+	}
+	if _, reason, _ := rl.Cooldown("flaky"); reason != "failures" {
+		t.Errorf("reason = %q, want %q", reason, "failures")
+	}
+
+	if _, _, ok := rl.Cooldown("healthy-one"); ok {
+		t.Error("a server that never failed must not report a cooldown")
+	}
+}
+
+// An operator who set cooldown_time on a server said so deliberately; a header
+// any backend can send must not undo it (LiteLLM's precedence: deployment config
+// > Retry-After > router default).
+func TestRateLimiterCooldownOverrideBeatsRetryAfter(t *testing.T) {
+	rl := NewRateLimiter(3, 30*time.Second, 5*time.Minute)
+	rl.SetCooldownOverride(func(id string) time.Duration {
+		if id == "configured" {
+			return 40 * time.Second
+		}
+		return 0
+	})
+
+	rl.RecordFailure("configured", 429, 5*time.Second)
+	if d := rl.CooldownRemaining("configured"); d < 35*time.Second {
+		t.Errorf("cooldown = %v, want the configured 40s to beat the 5s hint", d)
+	}
+}

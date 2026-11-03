@@ -101,3 +101,35 @@ func TestGUIShowsConversion(t *testing.T) {
 		t.Error("the conversion notes go into a title attribute unescaped")
 	}
 }
+
+// Recent Requests rows are correlated with the client's own logs by request id,
+// and the row is built by concatenation — an unescaped value lands in a title
+// attribute verbatim.
+func TestGUIShowsRequestID(t *testing.T) {
+	src := guiSource(t)
+	i := strings.Index(src, "request id:")
+	if i < 0 {
+		t.Fatal("a recent request carries no request id, so a client cannot quote one")
+	}
+	if !strings.Contains(src[i:i+120], "esc(r.request_id") {
+		t.Errorf("the request id is not rendered/escaped: %s", src[i:i+120])
+	}
+}
+
+// A server in its rate-limit cooldown is skipped by the router while the health
+// probe still calls it healthy — without a third state the GUI shows a healthy
+// server that answers nothing, and the reason (a 401 key problem, a 429 hint)
+// never reaches the operator.
+func TestGUIShowsCooldown(t *testing.T) {
+	src := guiSource(t)
+	i := strings.Index(src, "cooldown_seconds")
+	if i < 0 {
+		t.Fatal("the servers table never reports a rate-limit cooldown")
+	}
+	window := src[i-400 : min(i+400, len(src))]
+	for _, want := range []string{"cooldown_reason", "esc("} {
+		if !strings.Contains(window, want) {
+			t.Errorf("the cooldown tag lacks %s", want)
+		}
+	}
+}

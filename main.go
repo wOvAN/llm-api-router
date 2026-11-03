@@ -89,6 +89,8 @@ func main() {
 
 	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter, quotaTracker, traceStore)
 	adminHandler := admin.NewHandler(store, metricsStore, healthTracker, traceStore)
+	// The GUI reports which servers are in their rate-limit cooldown, and why.
+	adminHandler.SetRateLimiter(rateLimiter)
 
 	adminStatic, err := fs.Sub(staticFS, "admin/static")
 	if err != nil {
@@ -151,8 +153,14 @@ func main() {
 	addr := ":" + port
 
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr: addr,
+		// Bound the header read: without it a client that opens a connection and
+		// dribbles bytes (Slowloris) holds a connection slot forever. The body and
+		// the response stay unbounded on purpose — a long generation is normal
+		// here, and the upstream side has its own bounds
+		// (proxy.ResponseHeaderTimeout, the drain cap).
+		ReadHeaderTimeout: 10 * time.Second,
+		Handler:           mux,
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM

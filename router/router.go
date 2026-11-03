@@ -2,7 +2,10 @@ package router
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"llm-api-router/config"
@@ -47,6 +51,7 @@ func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, ra
 // classification (always, 0 tokens) and the trace capture (only inside the
 // window). It rides into record so the metric and the trace entry agree.
 type reqMeta struct {
+	requestID    string
 	class        string
 	features     []string
 	capture      *trace.Capture
@@ -154,6 +159,15 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	// Classification is always on and costs a byte scan: metrics, the trace and
 	// the GUI then describe a request with the same words.
 	meta := &reqMeta{}
+	// Every response carries a request id and the metric carries the same one, so
+	// a client can quote a number in a bug report without the trace window being
+	// armed. A client that already has an id keeps it: its logs and the router's
+	// then agree.
+	meta.requestID = strings.TrimSpace(req.Header.Get("X-Request-ID"))
+	if meta.requestID == "" {
+		meta.requestID = newRequestID()
+	}
+	w.Header().Set("X-Router-Request-Id", meta.requestID)
 	meta.class, meta.features = trace.Classify(req.URL.Path, req.Header.Get("Content-Type"), body)
 
 	model, err := extractModel(body)
@@ -488,7 +502,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				}
 				if r.rateLimit != nil {
 					if pm.StatusCode >= 400 {
-						r.rateLimit.RecordFailure(srv.ID, pm.StatusCode)
+						// The backend's Retry-After (429) is the cooldown length
+						// when it sent one — a busy server is benched for exactly
+						// as long as it asked for, not for the 5min default.
+						r.rateLimit.RecordFailure(srv.ID, pm.StatusCode,
+							time.Duration(pm.RetryAfterMs)*time.Millisecond)
 					} else {
 						r.rateLimit.RecordSuccess(srv.ID)
 					}
@@ -537,7 +555,8 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					r.health.MarkUnhealthy(srv.ID)
 				}
 				if r.rateLimit != nil {
-					r.rateLimit.RecordFailure(srv.ID, pm.StatusCode)
+					r.rateLimit.RecordFailure(srv.ID, pm.StatusCode,
+						time.Duration(pm.RetryAfterMs)*time.Millisecond)
 				}
 				if r.quota != nil {
 					r.quota.Complete(srv.ID, reservedTokens, int64(pm.TotalTokens))
@@ -552,7 +571,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			// Transport error (pre-response): retry same server if retries left,
 			// otherwise mark unhealthy and fall through to the next server.
 			lastErr = err
-			if retry < numRetries {
+			if retry < sameServerRetries(err, numRetries) {
 				log.Warnf("[%s] model=%q — retrying %s (%d/%d): %v",
 					req.URL.Path, model, srv.Name, retry+1, numRetries, err)
 				select {
@@ -610,6 +629,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 func (r *Router) record(req *http.Request, requestStart time.Time, model, targetModel, serverID string, pm proxy.ProxyMetrics, statusCode int, errorBody string, wasFallback bool, apiType domain.APIType, jev *jevOutcome, meta *reqMeta) {
 	m := domain.RequestMetric{
 		Timestamp:             requestStart,
+		RequestID:             meta.requestID,
 		Model:                 model,
 		TargetModel:           targetModel,
 		BackendModel:          pm.BackendModel,
@@ -697,6 +717,36 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 const defaultNumRetries = 10 // retryBackoff returns the delay before retry attempt n (0-based): 100ms, 250ms,
 // 500ms, then capped at 1s. Keeps retries fast but avoids hammering a failing
 // backend.
+// sameServerRetries caps the retry loop by what the transport actually reported,
+// because the generous default (absorb a backend that is restarting) is the wrong
+// answer to a backend that is not there:
+//
+//   - refused / unreachable: nothing is listening, and it will not start
+//     listening inside one request. Zero retries — fall over to the next attempt
+//     now instead of burning ~8s of backoff in front of a fallback that answers.
+//
+// Deliberately not capped for a connection accepted then closed (`ECONNRESET`,
+// EOF): that is a backend mid-restart, which closes *every* pooled connection in
+// turn, so the generous default is what recovers it. Everything else (dial and
+// response timeouts, TLS, mid-body truncation) keeps the configured budget.
+func sameServerRetries(err error, configured int) int {
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.ENETDOWN) || errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return min(configured, 0)
+	}
+	return configured
+}
+
+// newRequestID is a 16-hex-char correlation id (8 bytes of crypto/rand).
+func newRequestID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b[:])
+}
+
 func retryBackoff(n int) time.Duration {
 	switch {
 	case n <= 0:

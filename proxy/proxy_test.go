@@ -2095,3 +2095,48 @@ func TestSetRouterHeadersCapsConvertNotes(t *testing.T) {
 		t.Fatalf("notes must survive up to the bound: %q", got)
 	}
 }
+
+// A backend that answers 429 usually says when to come back. The router turns
+// that hint into the cooldown length, so a 5-minute default cooldown does not
+// bench a backend that only needed 7 seconds. Both wire shapes are the ones
+// RFC 9110 allows: delta-seconds, and an HTTP-date.
+func TestStreamProxyReportsRetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name, header string
+		want         int64
+	}{
+		{"seconds", "7", 7000},
+		{"http-date", time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat), 29000},
+		{"garbage", "soon", 0},
+		{"absent", "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.header != "" {
+					w.Header().Set("Retry-After", tc.header)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":{"message":"slow down"}}`))
+			}))
+			defer backend.Close()
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+				strings.NewReader(`{"model":"gpt-4"}`))
+			w := httptest.NewRecorder()
+
+			pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
+			if err != nil {
+				t.Fatalf("StreamProxy: %v", err)
+			}
+			if pm.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("StatusCode = %d, want 429", pm.StatusCode)
+			}
+			if pm.RetryAfterMs < tc.want {
+				t.Fatalf("RetryAfterMs = %d, want >= %d", pm.RetryAfterMs, tc.want)
+			}
+			if tc.want == 0 && pm.RetryAfterMs != 0 {
+				t.Fatalf("RetryAfterMs = %d, want 0", pm.RetryAfterMs)
+			}
+		})
+	}
+}

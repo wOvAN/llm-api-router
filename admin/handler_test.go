@@ -761,3 +761,34 @@ func TestTraceResetKeepsWindow(t *testing.T) {
 		t.Error("clearing the ring must not switch collection off")
 	}
 }
+
+// A server sitting in its cooldown is invisible in the GUI: the router skips it,
+// the operator sees "healthy" and finds nothing. The listing carries the cooldown
+// with the reason that triggered it, so a bad api_key reads as a key problem.
+func TestListServersReportsCooldown(t *testing.T) {
+	h, store, _ := newTestHandler(t)
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "n", URL: "http://x"}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	rl := config.NewRateLimiter(5, 60*time.Second, 5*time.Minute)
+	h.SetRateLimiter(rl)
+	rl.RecordFailure("s1", http.StatusTooManyRequests, 30*time.Second)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/servers", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var servers []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&servers); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("got %d servers, want 1", len(servers))
+	}
+	if got := servers[0]["cooldown_seconds"]; got != float64(30) {
+		t.Errorf("cooldown_seconds = %v, want 30", got)
+	}
+	if got, _ := servers[0]["cooldown_reason"].(string); got != "status Too Many Requests" {
+		t.Errorf("cooldown_reason = %q, want the triggering status", got)
+	}
+}
