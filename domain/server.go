@@ -98,6 +98,11 @@ type FallbackEntry struct {
 	// the target's declared protocols), "off" (never convert), or an explicit
 	// "messages>chat".
 	Convert string `json:"convert,omitempty"`
+	// ContextWindow is the context size this member declares (tokens). Like
+	// RoutingRule.ContextWindow it is exposed in /v1/models, and the router uses
+	// it to skip an attempt whose window can not fit the request's estimated
+	// prompt (0 = unknown = never skipped).
+	ContextWindow int `json:"context_window,omitempty"`
 	// Weight is this member's share of the traffic when the rule balances
 	// (0 = 1, and a rule that does not balance ignores it entirely — there,
 	// order is the whole story). A 4-GPU replica beside a 1-GPU one declares 4.

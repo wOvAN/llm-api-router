@@ -292,7 +292,12 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 		if tm == "" {
 			tm = rule.TargetModel
 		}
-		attempts = append(attempts, serverAttempt{server: srv, targetModel: tm, convert: pool[i].Convert})
+		window := pool[i].ContextWindow
+		if window == 0 {
+			window = rule.ContextWindow
+		}
+		attempts = append(attempts, serverAttempt{server: srv, targetModel: tm,
+			convert: pool[i].Convert, contextWindow: window})
 	}
 	return attempts, out
 }

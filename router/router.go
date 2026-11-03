@@ -71,6 +71,9 @@ type serverAttempt struct {
 	server      *domain.Server
 	targetModel string
 	convert     string // the attempt's own `convert` value ("" = "auto")
+	// contextWindow is what this backend declares it can fit (tokens); 0 =
+	// unknown, which gates nothing.
+	contextWindow int
 }
 
 // balanceRotation returns a balanced rule's attempt list starting on its next
@@ -279,7 +282,8 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		// Static rule: the primary, then its enabled fallbacks in priority order.
 		// With `balance: "round-robin"` the same list is a pool, and the request
 		// starts on the next member of it.
-		attempts = []serverAttempt{{server: primaryServer, targetModel: rule.TargetModel, convert: rule.Convert}}
+		attempts = []serverAttempt{{server: primaryServer, targetModel: rule.TargetModel,
+			convert: rule.Convert, contextWindow: rule.ContextWindow}}
 		weights := []int{1}
 		for _, fb := range orderedFallbacks(rule) {
 			if srv, ok := r.store.GetServer(fb.ServerID); ok {
@@ -287,7 +291,12 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				if tm == "" {
 					tm = rule.TargetModel
 				}
-				attempts = append(attempts, serverAttempt{server: srv, targetModel: tm, convert: fb.Convert})
+				window := fb.ContextWindow
+				if window == 0 {
+					window = rule.ContextWindow
+				}
+				attempts = append(attempts, serverAttempt{server: srv, targetModel: tm,
+					convert: fb.Convert, contextWindow: window})
 				weights = append(weights, max(fb.Weight, 1))
 			}
 		}
@@ -364,6 +373,14 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			remaining := r.rateLimit.CooldownRemaining(srv.ID)
 			log.Warnf("[%s] model=%q — skipping rate-limited server %s (cooldown %v, attempt %d/%d)",
 				req.URL.Path, model, srv.Name, remaining.Round(time.Second), i+1, len(attempts))
+			continue
+		}
+
+		// Skip attempts that declare a window too small for this request (see
+		// contextOverflows); the last attempt is tried anyway.
+		if i < len(attempts)-1 && contextOverflows(attempts[i].contextWindow, body) {
+			log.Warnf("[%s] model=%q — skipping %s: declared context window %d < estimated prompt %d (attempt %d/%d)",
+				req.URL.Path, model, srv.Name, attempts[i].contextWindow, len(body)/4, i+1, len(attempts))
 			continue
 		}
 
@@ -880,8 +897,17 @@ type bufferedAnswer struct {
 	translator  proxy.StreamTranslator
 }
 
-// bufferedAnswerRetries is the same-server retry budget for such an answer:
-//
+// contextOverflows reports whether a request's estimated prompt can not fit the
+// context window a backend declares. The estimate is the same chars/4 the jev
+// state uses, over the WHOLE body (bytes/4) — system prompt, every turn, tools,
+// the works, which is what the window has to hold. An undeclared window (0)
+// gates nothing: an absent declaration is not a declaration of zero, so a config
+// that never mentions windows routes exactly as it always did.
+func contextOverflows(window int, body []byte) bool {
+	return window > 0 && len(body)/4 > window
+}
+
+// bufferedAnswerRetries is the same-server retry budget for such an answer://
 //   - 429: none. The backend stated in its own response that it is at its limit
 //     (and for how long); nothing about that changes while we sleep between
 //     tries, so the next attempt answers now instead of in 5s.

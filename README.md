@@ -112,6 +112,7 @@ The config is stored in `config.json` (path configurable via `CONFIG_FILE`). You
 - A rule matched by a pattern has no single target: an **empty `target_model` is pass-through** — the client's model name is sent to the backend as-is (and `target_model` empty on an exact rule does the same)
 - `balance: "round-robin"` turns the rule's `server_id` + enabled `fallbacks` into one pool sharing traffic; `fallbacks[].weight` (default 1) is that member's share, ignored by a failover-only rule
 - Fallback `target_model` empty → inherits the rule's primary `TargetModel`
+- `context_window` (on a rule, a fallback, or a jev candidate) declares the context size that member can fit; a request whose estimated prompt (`bytes/4`) exceeds it is routed past that member to one that declares room (`0`/absent = unguarded)
 
 ## API Usage
 
