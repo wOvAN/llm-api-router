@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"slices"
 	"sync"
 
 	"llm-api-router/domain"
+	"llm-api-router/pkg/log"
 )
 
 // Store provides thread-safe access to the configuration with file persistence.
@@ -98,6 +100,15 @@ func (s *Store) save() error {
 		return fmt.Errorf("config path %q is a directory (Docker volume mount issue — remove directory and create file)", s.filepath)
 	}
 
+	// Keep one generation back before overwriting: this file is rewritten on
+	// every admin write and carries every backend's API key, so a process killed
+	// mid-write would otherwise boot an empty router with no way back.
+	if prev, readErr := os.ReadFile(s.filepath); readErr == nil && len(prev) > 0 {
+		if err := os.WriteFile(s.filepath+".bak", prev, 0644); err != nil {
+			log.Warnf("failed to back up %s: %v", s.filepath, err)
+		}
+	}
+
 	return os.WriteFile(s.filepath, data, 0644)
 }
 
@@ -164,8 +175,12 @@ func (s *Store) GetServer(id string) (*domain.Server, bool) {
 	return srv, true
 }
 
-// GetRuleByModel returns the first routing rule matching the given incoming
-// model name from the active profile.
+// GetRuleByModel returns the routing rule that owns the given incoming model
+// name, from the active profile. An entry may be a wildcard pattern (`gpt-*`),
+// so one rule can own a whole model family; specificity decides: an exact name
+// beats any pattern that also matches it, and among patterns the most specific
+// (longest) one wins — LiteLLM's wildcard router orders patterns by length for
+// the same reason.
 func (s *Store) GetRuleByModel(model string) (*domain.RoutingRule, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -174,15 +189,62 @@ func (s *Store) GetRuleByModel(model string) (*domain.RoutingRule, bool) {
 	if p == nil {
 		return nil, false
 	}
+	var patternRule *domain.RoutingRule
+	patternLen := 0
 	for _, rule := range p.Rules {
 		if !rule.Enabled {
 			continue
 		}
-		if slices.Contains(rule.IncomingModels, model) {
-			return cloneRule(rule), true
+		for _, name := range rule.IncomingModels {
+			switch {
+			case name == model:
+				return cloneRule(rule), true
+			case len(name) > patternLen && matchModelPattern(name, model):
+				patternRule, patternLen = rule, len(name)
+			}
 		}
 	}
+	if patternRule != nil {
+		return cloneRule(patternRule), true
+	}
 	return nil, false
+}
+
+// matchModelPattern reports whether an incoming-model pattern (`gpt-*`,
+// `claude-?`) names the given model. A malformed pattern matches nothing.
+func matchModelPattern(pattern, model string) bool {
+	if !domain.IsModelPattern(pattern) {
+		return false
+	}
+	ok, err := path.Match(pattern, model)
+	return err == nil && ok
+}
+
+// ModelNames lists the literal incoming model names the active profile routes,
+// sorted and deduplicated; wildcard patterns are matching rules, not names a
+// client can send, so they are left out. This feeds the client-facing
+// "no routing rule for model X" answer.
+func (s *Store) ModelNames() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	p := s.activeProfile()
+	if p == nil {
+		return nil
+	}
+	var out []string
+	for _, rule := range p.Rules {
+		if !rule.Enabled {
+			continue
+		}
+		for _, name := range rule.IncomingModels {
+			if !domain.IsModelPattern(name) && !slices.Contains(out, name) {
+				out = append(out, name)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // AddServer adds a new server.
@@ -486,6 +548,7 @@ func cloneRule(rule *domain.RoutingRule) *domain.RoutingRule {
 		ContextWindow: rule.ContextWindow,
 		Router:        rule.Router,
 		Convert:       rule.Convert,
+		Balance:       rule.Balance,
 	}
 	if rule.Jev != nil {
 		jev := *rule.Jev

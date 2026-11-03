@@ -1488,9 +1488,11 @@ func TestStreamProxy5xxSSEBodyRetryable(t *testing.T) {
 	}
 }
 
-func TestStreamProxy5xxSSEBodyWithJsonPrefixForwarded(t *testing.T) {
+func TestStreamProxy5xxJSONBodyIsBufferedForFailover(t *testing.T) {
 	// A plain JSON 5xx (even with text/event-stream content type set by a bad
-	// backend) must be forwarded as before.
+	// backend) is not a stream: it is buffered as a retryable failure, payload
+	// intact, so the router can fall back — and serve that payload verbatim when
+	// nothing else answers.
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(500)
@@ -1503,17 +1505,21 @@ func TestStreamProxy5xxSSEBodyWithJsonPrefixForwarded(t *testing.T) {
 
 	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
 
-	if err != nil {
-		t.Fatalf("plain JSON 5xx must be forwarded, got err: %v", err)
+	var bufErr *UpstreamResponseError
+	if !errors.As(err, &bufErr) {
+		t.Fatalf("plain JSON 5xx must be buffered for failover, got err: %v", err)
 	}
-	if pm.StatusCode != 500 {
-		t.Errorf("StatusCode = %d, want 500", pm.StatusCode)
+	if bufErr.StatusCode != 500 {
+		t.Errorf("StatusCode = %d, want 500", bufErr.StatusCode)
 	}
-	if w.Code != 500 {
-		t.Errorf("recorder code = %d, want 500", w.Code)
+	if !strings.Contains(bufErr.Body.String(), "slot full") {
+		t.Errorf("the backend's payload must survive, got %q", bufErr.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "slot full") {
-		t.Errorf("body must pass through, got %q", w.Body.String())
+	if w.Body.Len() != 0 {
+		t.Errorf("client must see nothing yet, got %q", w.Body.String())
+	}
+	if pm == nil || pm.ErrorBody == "" {
+		t.Errorf("the buffered body must reach metrics error_body: %+v", pm)
 	}
 }
 
@@ -1632,7 +1638,7 @@ func TestStreamProxyDrainDisabledClosesUpstream(t *testing.T) {
 	}
 }
 
-func TestStreamProxy5xxEmptyBodyForwarded(t *testing.T) {
+func TestStreamProxy5xxEmptyBodyBuffered(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 	}))
@@ -1643,14 +1649,18 @@ func TestStreamProxy5xxEmptyBodyForwarded(t *testing.T) {
 
 	pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
 
-	if err != nil {
-		t.Fatalf("empty 5xx must be forwarded, got err: %v", err)
+	var bufErr *UpstreamResponseError
+	if !errors.As(err, &bufErr) {
+		t.Fatalf("empty 5xx must be buffered for failover, got err: %v", err)
 	}
-	if pm.StatusCode != 500 {
-		t.Errorf("StatusCode = %d, want 500", pm.StatusCode)
+	if bufErr.StatusCode != 500 {
+		t.Errorf("StatusCode = %d, want 500", bufErr.StatusCode)
 	}
-	if w.Code != 500 {
-		t.Errorf("recorder code = %d, want 500", w.Code)
+	if w.Code != 200 || w.Body.Len() != 0 {
+		t.Errorf("client must see nothing yet, got %d %q", w.Code, w.Body.String())
+	}
+	if pm == nil {
+		t.Fatal("metrics must be returned with the buffered failure")
 	}
 }
 
@@ -2124,9 +2134,9 @@ func TestStreamProxyReportsRetryAfter(t *testing.T) {
 				strings.NewReader(`{"model":"gpt-4"}`))
 			w := httptest.NewRecorder()
 
-			pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
-			if err != nil {
-				t.Fatalf("StreamProxy: %v", err)
+			pm, _ := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
+			if pm == nil {
+				t.Fatal("no metrics")
 			}
 			if pm.StatusCode != http.StatusTooManyRequests {
 				t.Fatalf("StatusCode = %d, want 429", pm.StatusCode)
@@ -2138,5 +2148,76 @@ func TestStreamProxyReportsRetryAfter(t *testing.T) {
 				t.Fatalf("RetryAfterMs = %d, want 0", pm.RetryAfterMs)
 			}
 		})
+	}
+}
+
+// A backend that answers 429/503 has told us it cannot serve this request, and
+// an identical request to a healthy peer can. Nothing has reached the client at
+// that moment, so the answer is buffered and returned as a retryable failure
+// (status + headers + body) rather than written — the router decides who serves.
+func TestStreamProxyBuffersRetryableStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		bodies []string
+	}{
+		{"429 json", http.StatusTooManyRequests, []string{`{"error":{"message":"slow down"}}`}},
+		{"503 json", http.StatusServiceUnavailable, []string{`{"error":{"message":"model loading"}}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "5")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				for _, b := range tc.bodies {
+					_, _ = w.Write([]byte(b))
+				}
+			}))
+			defer backend.Close()
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+			w := httptest.NewRecorder()
+
+			pm, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil)
+			var bufErr *UpstreamResponseError
+			if !errors.As(err, &bufErr) {
+				t.Fatalf("err = %v, want *UpstreamResponseError", err)
+			}
+			if bufErr.StatusCode != tc.status {
+				t.Errorf("status = %d, want %d", bufErr.StatusCode, tc.status)
+			}
+			if !strings.Contains(bufErr.Body.String(), "error") {
+				t.Errorf("body = %q, want the backend's payload", bufErr.Body.String())
+			}
+			if bufErr.Header.Get("Retry-After") != "5" {
+				t.Errorf("headers lost: %v", bufErr.Header)
+			}
+			if w.Body.Len() != 0 {
+				t.Errorf("nothing may reach the client while the attempt is retryable, wrote %q", w.Body.String())
+			}
+			if pm == nil || pm.StatusCode != tc.status {
+				t.Errorf("metrics = %+v, want the buffered status", pm)
+			}
+		})
+	}
+}
+
+// A 200 is never buffered, and a plain 4xx (the client's own bad request) is not
+// the router's to retry: both stay byte-for-byte passthrough.
+func TestStreamProxyForwardsNonRetryableStatuses(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusBadRequest, http.StatusNotFound} {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}))
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+		w := httptest.NewRecorder()
+		if _, err := StreamProxy(req.Context(), backend.URL, "key", req, w, "gpt-4", "gpt-4", nil, false, nil); err != nil {
+			t.Errorf("status %d: err = %v, want a forwarded response", status, err)
+		}
+		if w.Code != status {
+			t.Errorf("status = %d, want %d forwarded", w.Code, status)
+		}
+		backend.Close()
 	}
 }

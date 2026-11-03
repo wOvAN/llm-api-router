@@ -1314,6 +1314,34 @@ func (e *StreamErrorResponse) Error() string {
 	return fmt.Sprintf("backend returned HTTP %d with SSE-form error body: %q", e.StatusCode, body)
 }
 
+// UpstreamResponseError is a backend answer the router can hand to the next
+// attempt: the backend said 429/5xx, and NOT ONE byte of that response reached
+// the client. The status, headers (Retry-After included) and a bounded body are
+// carried so the router can retry elsewhere and, if no backend serves the
+// request, deliver this answer verbatim instead of inventing a proxy status.
+type UpstreamResponseError struct {
+	StatusCode int
+	Header     http.Header
+	Body       *bytes.Buffer
+}
+
+func (e *UpstreamResponseError) Error() string {
+	body := e.Body.String()
+	if len(body) > 512 {
+		body = body[:512] + "..."
+	}
+	return fmt.Sprintf("backend returned HTTP %d: %q", e.StatusCode, body)
+}
+
+// retryableUpstreamStatus reports whether a status the backend answered with is
+// one the router should try to serve from another backend: 429 (this backend is
+// throttled; the next one may not be) and any 5xx (the backend's own failure).
+// Every other 4xx is the client's request being wrong, which reads the same at
+// every backend — retrying it elsewhere only hides the reason.
+func retryableUpstreamStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
+}
+
 // looksLikeStreamFrameBody reports whether body reads as SSE text frames
 // (starts with a "data:", "event:", or comment line).
 func looksLikeStreamFrameBody(body []byte) bool {
@@ -1327,9 +1355,10 @@ func looksLikeStreamFrameBody(body []byte) bool {
 // StreamProxy forwards the request and streams the response directly to the writer.
 // Returns an error on network failure (before any headers are written to w).
 // HTTP 5xx responses are NOT treated as errors — they are forwarded to the client.
-// Exception: a 5xx whose body is already SSE stream frames is returned as
-// *StreamErrorResponse without writing anything to the client, so the router
-// can retry/fall back (see docs above).
+// Two exceptions are buffered and returned instead, so the router can retry or
+// fall back with nothing sent: a 5xx whose body is already SSE stream frames
+// (*StreamErrorResponse), and a 429/5xx with a body small enough to hold
+// (*UpstreamResponseError, up to 32KB — an oversized body is relayed as-is).
 // If originalModel is non-empty and differs from targetModel, the "model" field
 // in the response is rewritten from targetModel back to originalModel so the
 // client sees its own model name.
@@ -1522,13 +1551,30 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// `pre` carries the peeked bytes into the normal relay below when the body
 	// turns out to be a real error payload (5xx forwarding stays unchanged).
 	var pre []byte
-	if upstreamResp.StatusCode >= 500 {
+	if retryableUpstreamStatus(upstreamResp.StatusCode) {
 		const peekLimit = 32 * 1024
 		pre, _ = io.ReadAll(io.LimitReader(upstreamResp.Body, peekLimit+1))
 		if looksLikeStreamFrameBody(pre) {
 			m := mw.metrics()
 			m.StatusCode = upstreamResp.StatusCode
 			return &m, &StreamErrorResponse{StatusCode: upstreamResp.StatusCode, Body: string(pre)}
+		}
+		// An oversized body is not worth buffering for one retry: relay it.
+		if len(pre) <= peekLimit {
+			// The peek path never writes through mw, so mw.WriteHeader (which is
+			// where Retry-After is normally captured) never ran for this response.
+			mw.retryAfter = parseRetryAfter(upstreamResp.Header.Get("Retry-After"))
+			m := mw.metrics()
+			m.StatusCode = upstreamResp.StatusCode
+			if len(pre) > 4096 {
+				pre = pre[:4096]
+			}
+			m.ErrorBody = string(pre)
+			return &m, &UpstreamResponseError{
+				StatusCode: upstreamResp.StatusCode,
+				Header:     upstreamResp.Header.Clone(),
+				Body:       bytes.NewBuffer(pre),
+			}
 		}
 	}
 

@@ -1,8 +1,16 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"llm-api-router/config"
+	"llm-api-router/domain"
 )
 
 // The admin GUI is one embedded file, so a GUI test is a text assertion on that
@@ -131,5 +139,148 @@ func TestGUIShowsCooldown(t *testing.T) {
 		if !strings.Contains(window, want) {
 			t.Errorf("the cooldown tag lacks %s", want)
 		}
+	}
+}
+
+// The admin API serves every backend's api_key and rewrites the routing config,
+// and /metrics quotes the traffic it saw. Both are gated behind a bearer token:
+// ADMIN_TOKEN unset = open (an existing deployment keeps working untouched),
+// ADMIN_TOKEN set = every data-bearing route needs it. The GUI shell stays open
+// so it can ask for the token.
+func TestTokenGuardRequiresBearer(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	guarded := tokenGuard("s3cret", ok)
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{"absent", "", http.StatusUnauthorized},
+		{"wrong scheme", "Basic s3cret", http.StatusUnauthorized},
+		{"wrong token", "Bearer nope", http.StatusUnauthorized},
+		{"right token", "Bearer s3cret", http.StatusOK},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/admin/api/servers", nil)
+		if tc.header != "" {
+			req.Header.Set("Authorization", tc.header)
+		}
+		w := httptest.NewRecorder()
+		guarded.ServeHTTP(w, req)
+		if got := w.Result().StatusCode; got != tc.want {
+			t.Errorf("%s: status %d, want %d", tc.name, got, tc.want)
+		}
+	}
+
+	// Unset token = feature off, and off must mean off: no header, no 401.
+	w := httptest.NewRecorder()
+	tokenGuard("", ok).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if got := w.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("empty ADMIN_TOKEN must leave the API open, got %d", got)
+	}
+}
+
+// A replica under a load balancer must be pulled out of the pool the moment it
+// starts draining, so the balancer stops feeding it new generations while the
+// drain finishes the ones it accepted.
+func TestReadinessReportsDrain(t *testing.T) {
+	var rs readyState
+	w := httptest.NewRecorder()
+	rs.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if got := w.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("ready: status %d, want 200", got)
+	}
+
+	rs.SetDraining(true)
+	w = httptest.NewRecorder()
+	rs.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if got := w.Result().StatusCode; got != http.StatusServiceUnavailable {
+		t.Fatalf("draining: status %d, want 503 (the balancer must pull the replica)", got)
+	}
+}
+
+// The router's own view of its backends — who is healthy, who is cooling down
+// and for how long — lives in memory and is visible in the GUI. A Prometheus
+// scrape has to see it too, or the alerting layer is blind to exactly the state
+// that decides where traffic goes.
+func TestServerStateMetricsRendersHealth(t *testing.T) {
+	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	for _, id := range []string{"s1", "s2"} {
+		if err := store.AddServer(&domain.Server{ID: id, Name: id, URL: "http://x"}); err != nil {
+			t.Fatalf("AddServer: %v", err)
+		}
+	}
+	health := config.NewHealthTracker(store, time.Hour)
+	health.Start()
+	defer health.Stop()
+	health.MarkUnhealthy("s2")
+
+	rl := config.NewRateLimiter(5, time.Minute, 5*time.Minute)
+	rl.RecordFailure("s1", http.StatusTooManyRequests, 30*time.Second)
+
+	out := serverStateMetrics(health, rl, store.GetConfig().Servers)
+	for _, want := range []string{
+		`llm_router_server_healthy{server="s1"} 1`,
+		`llm_router_server_healthy{server="s2"} 0`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, `llm_router_server_cooldown_seconds{server="s1"} 30`) {
+		t.Errorf("cooldown not reported (want ~30s for s1):\n%s", out)
+	}
+	if strings.Contains(out, `llm_router_server_cooldown_seconds{server="s2"}`) {
+		t.Errorf("a server that is not cooling down must not report a cooldown:\n%s", out)
+	}
+}
+
+// A rule can balance across a pool of interchangeable backends, and the GUI is
+// the only place an operator can express it: the dialog needs the mode select,
+// the per-member weight it renumbers, and the table a place to show the pool —
+// a rule that balances is a rule whose "fallbacks" are traffic targets, not a
+// rescue chain, and nothing in the row says that unless the tag does.
+func TestGUIEditsBalanceAndWeight(t *testing.T) {
+	src := guiSource(t)
+	for _, want := range []string{
+		`id="rule-balance"`,
+		`value="round-robin"`,
+		`className = 'fb-weight'`,
+		`fb.weight`,
+		`r.balance === 'round-robin'`,
+		`data.balance`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("the rule dialog is missing %s", want)
+		}
+	}
+}
+
+// `/admin/api/version` matches the mux as its own (exact) pattern, so its guard
+// is a separate call site from the /admin/api/ prefix — one mux.Handle line that
+// forgets tokenGuard turns the version endpoint into a hole in an ADMIN_TOKEN
+// deployment. The pin is on the wiring itself, because a unit test of
+// tokenGuard's behavior cannot see which routes the server actually guards.
+func TestAllAdminRoutesAreGuarded(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	routed := 0
+	for _, line := range strings.Split(string(src), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, `mux.Handle("/admin/api`) {
+			continue
+		}
+		routed++
+		if !strings.Contains(line, "tokenGuard(adminToken,") {
+			t.Errorf("admin route without a token guard: %s", trimmed)
+		}
+	}
+	if routed < 2 {
+		t.Fatalf("found %d admin routes in main.go — the file no longer wires them the way this test reads it", routed)
 	}
 }

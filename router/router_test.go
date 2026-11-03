@@ -1677,8 +1677,9 @@ func TestRetriesHeaderOverridesRule(t *testing.T) {
 }
 
 func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
-	// A 429 response from the primary puts it into immediate cooldown; the
-	// next request should skip it and go to the fallback.
+	// A 429 from the primary fails the request over to the fallback (nothing of
+	// it reached the client) and puts the primary into immediate cooldown; the
+	// next request skips it without even asking it.
 	var primaryCalls atomic.Int32
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		primaryCalls.Add(1)
@@ -1734,10 +1735,15 @@ func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
 		return w
 	}
 
-	// First request: 429 forwarded to client, primary enters immediate cooldown
+	// First request: the 429 never reaches the client — the fallback serves it —
+	// and the primary enters immediate cooldown.
 	w1 := doRequest()
-	if got := w1.Result().StatusCode; got != http.StatusTooManyRequests {
-		t.Fatalf("first request status = %d, want 429", got)
+	if got := w1.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200 (served by the fallback)", got)
+	}
+	if primaryCalls.Load() != 1 || fallbackCalls.Load() != 1 {
+		t.Errorf("calls = primary %d, fallback %d, want 1 and 1 (a 429 is not replayed)",
+			primaryCalls.Load(), fallbackCalls.Load())
 	}
 	// The backend said 20s, so 20s is the cooldown — not the 5min default, which
 	// would bench a merely-busy server for ten times its own stated pause.
@@ -1745,7 +1751,7 @@ func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
 		t.Errorf("cooldown = %v, want the backend's Retry-After (20s)", d)
 	}
 
-	// Second request: primary in cooldown → fallback serves it
+	// Second request: primary in cooldown → fallback serves it again
 	w2 := doRequest()
 	if got := w2.Result().StatusCode; got != http.StatusOK {
 		t.Fatalf("second request status = %d, want 200 (via fallback)", got)
@@ -1753,8 +1759,8 @@ func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
 	if primaryCalls.Load() != 1 {
 		t.Errorf("primary hit %d times, want 1 (skipped after cooldown)", primaryCalls.Load())
 	}
-	if fallbackCalls.Load() != 1 {
-		t.Errorf("fallback hit %d times, want 1", fallbackCalls.Load())
+	if fallbackCalls.Load() != 2 {
+		t.Errorf("fallback hit %d times, want 2", fallbackCalls.Load())
 	}
 }
 

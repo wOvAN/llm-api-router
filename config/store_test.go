@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -819,5 +820,106 @@ func TestConvertSettingsDefaults(t *testing.T) {
 	// silently turn every such refusal into a 4096-token output cap.
 	if got := (domain.ConvertSettings{MaxTokensDefault: -1}).MaxTokens(); got != 0 {
 		t.Fatalf("MaxTokens() with a negative default = %d, want 0 (refuse, name max_tokens)", got)
+	}
+}
+
+// Every admin write rewrites config.json in place, and that file carries every
+// backend's API key. A process killed mid-write leaves a truncated file, and the
+// next boot starts with an empty router. So the previous content is kept beside
+// it: one generation back is enough to recover a botched write.
+func TestSaveKeepsBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "one", URL: "http://a", APIKey: "k1"}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	bak := path + ".bak"
+	if _, err := os.Stat(bak); err == nil {
+		t.Fatal("the first save has no previous content to back up")
+	}
+	if err := store.AddServer(&domain.Server{ID: "s2", Name: "two", URL: "http://b"}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+
+	prev, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if !strings.Contains(string(prev), `"s1"`) || strings.Contains(string(prev), `"s2"`) {
+		t.Fatalf("backup holds the current config, not the previous one: %s", prev)
+	}
+}
+
+// An incoming-model entry may be a wildcard pattern (`gpt-*`), so one rule can
+// own a whole model family. Specificity rules: an exact name always beats a
+// pattern that also matches it (whatever the declaration order), and among
+// patterns the first declaration wins — so narrowing a family rule with a
+// specific one means putting that rule above it.
+func TestGetRuleByModelMatchesPatterns(t *testing.T) {
+	s, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	rules := []*domain.RoutingRule{
+		{IncomingModels: []string{"gpt-*"}, ServerID: "family", Enabled: true},
+		{IncomingModels: []string{"gpt-4"}, ServerID: "exact", Enabled: true},
+		{IncomingModels: []string{"gpt-4o-*"}, ServerID: "narrow", Enabled: true},
+		{IncomingModels: []string{"off-*"}, ServerID: "disabled", Enabled: false},
+	}
+	for _, r := range rules {
+		if err := s.AddRule(r); err != nil {
+			t.Fatalf("AddRule: %v", err)
+		}
+	}
+
+	for _, tc := range []struct{ model, server string }{
+		{"gpt-4", "exact"},        // the exact rule beats the family rule
+		{"gpt-4o-mini", "narrow"}, // the narrower pattern is declared first
+		{"gpt-3.5", "family"},
+		{"off-1", ""}, // a disabled rule matches nothing
+		{"claude-3", ""},
+	} {
+		rule, ok := s.GetRuleByModel(tc.model)
+		if tc.server == "" {
+			if ok {
+				t.Errorf("GetRuleByModel(%q) matched %q, want no match", tc.model, rule.ServerID)
+			}
+			continue
+		}
+		if !ok {
+			t.Errorf("GetRuleByModel(%q): no match, want %q", tc.model, tc.server)
+			continue
+		}
+		if rule.ServerID != tc.server {
+			t.Errorf("GetRuleByModel(%q) = %q, want %q", tc.model, rule.ServerID, tc.server)
+		}
+	}
+}
+
+// The names a client may send, for the "no routing rule for model" answer:
+// literal names only. A pattern is a matching rule, not a model a client can
+// ask for, so listing `gpt-*` next to real names only teaches a client nothing.
+func TestModelNamesListLiterals(t *testing.T) {
+	s, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	for _, r := range []*domain.RoutingRule{
+		{IncomingModels: []string{"gpt-*", "zeta"}, ServerID: "s1", Enabled: true},
+		{IncomingModels: []string{"alpha"}, ServerID: "s1", Enabled: true},
+		{IncomingModels: []string{"gone"}, ServerID: "s1", Enabled: false},
+	} {
+		if err := s.AddRule(r); err != nil {
+			t.Fatalf("AddRule: %v", err)
+		}
+	}
+
+	got := s.ModelNames()
+	want := strings.Join([]string{"alpha", "zeta"}, ",")
+	if strings.Join(got, ",") != want {
+		t.Errorf("ModelNames() = %v, want [%s]", got, want)
 	}
 }

@@ -221,7 +221,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   <div class="modal">
     <h3 id="rule-modal-title">Add Routing Rule</h3>
     <input type="hidden" id="rule-edit-idx">
-    <label><span>Incoming Models (через запятую)</span><input id="rule-incoming" type="text" placeholder="e.g. opus,sonnet,claude-opus"></label>
+    <label><span>Incoming Models (через запятую; <code>*</code> — маска семейства: <code>qwen3-*</code>)</span><input id="rule-incoming" type="text" placeholder="e.g. opus,sonnet,claude-opus,qwen3-*"></label>
     <label><span>Router</span><select id="rule-router" onchange="toggleJevFields()">
       <option value="">Static (primary + fallbacks)</option>
       <option value="jev">Jev (decision-модель выбирает модель за запрос)</option>
@@ -263,6 +263,10 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
         <button type="button" onclick="applyJevPreset()" style="margin-top:4px;" title="Заполнить пул проверенным шаблоном haiku/sonnet/opus (tier 0/1/2, Default Tier = 1); сервер и target model выберите сами">Preset: haiku/sonnet/opus</button>
       </label>
     </div>
+    <label id="label-rule-balance"><span>Balance</span><select id="rule-balance" onchange="toggleBalanceFields()">
+      <option value="">Failover (primary отвечает, fallbacks — подстраховка)</option>
+      <option value="round-robin">Round-robin (пул равных бэкендов делит трафик)</option>
+    </select></label>
     <label id="label-rule-fallbacks">
       <span>Fallbacks</span>
       <div id="fallbacks-container"></div>
@@ -281,6 +285,32 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
 
 <script>
 const API = '/admin/api';
+
+// The admin API can be gated behind a bearer token (ADMIN_TOKEN). Patched once
+// here so the token stays out of the twenty call sites: every /admin/api request
+// carries it, and the first 401 of a session asks for it once and retries — that
+// is how a fresh browser bootstraps, because the page itself is never gated.
+const TOKEN_KEY = 'llm-a…oken';
+const apiToken = () => localStorage.getItem(TOKEN_KEY) || '';
+const rawFetch = window.fetch.bind(window);
+window.fetch = async (url, opts = {}) => {
+  const send = () => {
+    const t = apiToken();
+    if (!t || !String(url).startsWith(API)) return rawFetch(url, opts);
+    return rawFetch(url, Object.assign({}, opts, {
+      headers: Object.assign({ Authorization: 'Bearer ' + t }, (opts && opts.headers) || {})
+    }));
+  };
+  const res = await send();
+  if (res.status === 401) {
+    const t = prompt('Admin token (ADMIN_TOKEN on the router):');
+    if (t && t.trim()) {
+      localStorage.setItem(TOKEN_KEY, t.trim());
+      return send();
+    }
+  }
+  return res;
+};
 
 // The last server object the edit form was opened with, so a save keeps the
 // fields the form does not render (`protocols`, and whatever comes after it).
@@ -659,11 +689,21 @@ async function loadRules() {
     const fallbacks = fbs.map(f => {
       const tm = f.target_model ? ' → ' + esc(f.target_model) : '';
       const pr = f.priority ? '#' + f.priority + ' ' : '';
+      const wt = f.weight > 1 ? ' ×' + f.weight : '';
       const dis = f.enabled === false;
       const style = dis ? 'background:#3a3a1a;color:#484f58;text-decoration:line-through' : 'background:#3a3a1a;color:#d29922';
-      return `<span class="tag" style="${style}" title="${dis ? 'disabled fallback' : (f.priority ? 'priority ' + f.priority : '')}">${pr}${esc(f.server_id)}${tm}</span>`;
+      const wtitle = f.weight > 1 ? ' · weight ' + f.weight : '';
+      return `<span class="tag" style="${style}" title="${dis ? 'disabled fallback' : (f.priority ? 'priority ' + f.priority : '')}${wtitle}">${pr}${esc(f.server_id)}${tm}${wt}</span>`;
     }).join('') || '(none)';
-    const models = (r.incoming_models || []).map(m => `<span class="tag" style="background:#1a1a3a;color:#58a6ff">${esc(m)}</span>`).join(' ');
+    const models = (r.incoming_models || []).map(m => {
+      const mask = m.includes('*') || m.includes('?');
+      const style = mask ? 'background:#2d1b4e;color:#d2a8ff;border:1px dashed #8b5cf6' : 'background:#1a1a3a;color:#58a6ff';
+      return `<span class="tag" style="${style}" title="${mask ? 'маска: клиентское имя уходит на бэкенд как есть' : ''}">${esc(m)}</span>`;
+    }).join(' ');
+    // A balancing rule's "fallbacks" are traffic targets, not a rescue chain —
+    // the row says so, because a tag is the only place it can.
+    const pool = r.balance === 'round-robin'
+      ? ' <span class="tag" style="background:#17321f;color:#3fb950" title="Балансирует: пул делит трафик по кругу (weight = доля)">round-robin</span>' : '';
     const jev = r.router === 'jev' && r.jev ? r.jev : null;
     const targetCell = jev
       ? (jev.candidates || []).map(c => {
@@ -679,7 +719,7 @@ async function loadRules() {
     return `<tr style="opacity:${r.enabled !== false ? '1' : '0.45'}">
       <td>${r._idx}</td>
       <td>${enabled}</td>
-      <td>${models}</td>
+      <td>${models}${pool}</td>
       <td>${targetCell}</td>
       <td>${serverCell}</td>
       <td>${jev ? '(pool)' : fallbacks}</td>
@@ -786,10 +826,28 @@ async function openRuleModal() {
   document.getElementById('rule-target-inp').style.display = 'none';
   document.getElementById('rule-enabled').checked = true;
   document.getElementById('rule-context-window').value = 0;
+  setBalance('');
   document.getElementById('fallbacks-container').innerHTML = '';
   resetJevFields();
   await fetchServerModels();
   document.getElementById('rule-modal').classList.add('open');
+}
+
+function setBalance(value) {
+  document.getElementById('rule-balance').value = value || '';
+  toggleBalanceFields();
+}
+
+// Balancing renumbers the fallback row: priority (the failover order) stops
+// meaning anything on the first slot of the pool, and weight starts counting.
+function toggleBalanceFields() {
+  const balanced = document.getElementById('rule-balance').value === 'round-robin';
+  document.getElementById('label-rule-balance').querySelector('span').textContent =
+    balanced ? 'Fallbacks / pool members' : 'Fallbacks';
+  document.querySelectorAll('.fallback-row').forEach(row => {
+    const w = row.querySelector('.fb-weight');
+    if (w) w.style.opacity = balanced ? '1' : '0.35';
+  });
 }
 
 function resetJevFields() {
@@ -835,6 +893,7 @@ async function saveRule() {
     fallbacks: getFallbacks(),
     enabled: document.getElementById('rule-enabled').checked,
     context_window: parseInt(document.getElementById('rule-context-window').value, 10) || 0,
+    balance: document.getElementById('rule-balance').value,
   };
   if (document.getElementById('rule-router').value === 'jev') {
     data.router = 'jev';
@@ -853,6 +912,7 @@ async function saveRule() {
     };
     data.server_id = '';
     data.fallbacks = [];
+    data.balance = '';
   }
   const method = idx !== '' ? 'PUT' : 'POST';
   const url = ruleURL(idx !== '' ? idx : null);
@@ -896,12 +956,14 @@ async function editRule(idx) {
   document.getElementById('rule-server').value = r.server_id;
   document.getElementById('rule-enabled').checked = r.enabled !== false;
   document.getElementById('rule-context-window').value = r.context_window || 0;
+  setBalance(r.balance || '');
   // Populate fallbacks
   const fbs = r.fallbacks || (r.fallback_server_ids || []).map(id => ({server_id: id, target_model: ''}));
   document.getElementById('fallbacks-container').innerHTML = '';
   for (const fb of fbs) {
-    addFallbackRow(fb.server_id, fb.target_model || '', fb.priority || 0, fb.enabled !== false);
+    addFallbackRow(fb.server_id, fb.target_model || '', fb.priority || 0, fb.enabled !== false, fb.weight || 1);
   }
+  toggleBalanceFields();
   // Populate jev router fields
   resetJevFields();
   if (r.router === 'jev' && r.jev) {
@@ -996,7 +1058,7 @@ function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;
 
 // --- Fallbacks ---
 let fallbackCounter = 0;
-async function addFallbackRow(serverId, targetModel = '', priority = 0, enabled = true) {
+async function addFallbackRow(serverId, targetModel = '', priority = 0, enabled = true, weight = 1) {
   const servers = getServersFromDropdown();
   const container = document.getElementById('fallbacks-container');
   const idx = fallbackCounter++;
@@ -1082,6 +1144,13 @@ async function addFallbackRow(serverId, targetModel = '', priority = 0, enabled 
   priorityInp.value = priority || 0;
   priorityInp.title = 'Priority: lower number tried first, 0 = after all numbered';
   priorityInp.style.cssText = 'flex:0 0 70px;margin-top:2px;padding:4px 6px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.85rem;';
+  const weightInp = document.createElement('input');
+  weightInp.type = 'number';
+  weightInp.className = 'fb-weight';
+  weightInp.min = '1';
+  weightInp.value = weight || 1;
+  weightInp.title = 'Weight: доля трафика этого бэкенда, когда правило балансирует (round-robin); 1 = равная';
+  weightInp.style.cssText = 'flex:0 0 60px;margin-top:2px;padding:4px 6px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.85rem;';
   const enabledChk = document.createElement('input');
   enabledChk.type = 'checkbox';
   enabledChk.className = 'fb-enabled';
@@ -1091,6 +1160,7 @@ async function addFallbackRow(serverId, targetModel = '', priority = 0, enabled 
   row.appendChild(sel);
   row.appendChild(modelWrap);
   row.appendChild(priorityInp);
+  row.appendChild(weightInp);
   row.appendChild(enabledChk);
   row.appendChild(refreshBtn);
   row.appendChild(btn);
@@ -1132,6 +1202,10 @@ function getFallbacks() {
       };
       if (priorityInp && parseInt(priorityInp.value, 10) > 0) {
         fb.priority = parseInt(priorityInp.value, 10);
+      }
+      const weightInp = row.querySelector('.fb-weight');
+      if (weightInp && parseInt(weightInp.value, 10) > 1) {
+        fb.weight = parseInt(weightInp.value, 10);
       }
       if (enabledChk && !enabledChk.checked) {
         fb.enabled = false;

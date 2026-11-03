@@ -246,3 +246,32 @@ func TestGUIServerFormPreservesUnmanagedFields(t *testing.T) {
 		}
 	}
 }
+
+// A wildcard rule owns a model family, so a name no rule spells out is still a
+// real route with a real plan: the preview resolves it through the same matcher
+// the router uses, and a pass-through rule (no target model) must hand the
+// backend the client's own name — the preview echoes what the router would send.
+func TestConvertPreviewResolvesWildcardRule(t *testing.T) {
+	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "n", URL: "http://127.0.0.1:1/v1",
+		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"qwen3-*"},
+		ServerID: "s1", Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	out := postPreview(t, NewHandler(store, nil, nil, nil),
+		`{"model":"qwen3-32b","path":"/v1/chat/completions","body":{"model":"qwen3-32b","messages":[]}}`)
+	reqMap, ok := out["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("preview planned nothing for a pattern-matched model: %v", out)
+	}
+	if reqMap["model"] != "qwen3-32b" {
+		t.Errorf("the client's model name was rewritten: %v", reqMap["model"])
+	}
+}

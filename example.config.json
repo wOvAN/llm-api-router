@@ -36,6 +36,13 @@
       "api_key": "",
       "api_types": ["openai"]
     },
+    "local-llama-2": {
+      "id": "local-llama-2",
+      "name": "Local Llama, second GPU",
+      "url": "localhost:8082/v1",
+      "api_key": "",
+      "api_types": ["openai"]
+    },
     "fallback": {
       "id": "fallback",
       "name": "Fallback Server",
@@ -49,6 +56,18 @@
       "id": "default",
       "name": "default",
       "rules": [
+        {
+          "incoming_models": ["qwen3-*"],
+          "server_id": "local-llama",
+          "balance": "round-robin",
+          "fallbacks": [
+            {
+              "server_id": "local-llama-2",
+              "weight": 3
+            }
+          ],
+          "enabled": true
+        },
         {
           "incoming_models": ["opus", "sonnet"],
           "target_model": "o3-mini",

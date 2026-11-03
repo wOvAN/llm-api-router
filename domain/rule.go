@@ -1,5 +1,7 @@
 package domain
 
+import "strings"
+
 // Router kinds for RoutingRule.Router. Empty (RouterStatic) routes to the
 // rule's own ServerID/TargetModel/Fallbacks; RouterJev asks a System One
 // decision model to pick one of the rule's Jev candidates per request.
@@ -7,6 +9,11 @@ const (
 	RouterStatic = ""
 	RouterJev    = "jev"
 )
+
+// BalanceRoundRobin is the one RoutingRule.Balance mode: the rule's own server
+// and its enabled fallbacks are an interchangeable pool, and successive requests
+// start on the next member of it.
+const BalanceRoundRobin = "round-robin"
 
 // RoutingRule maps one or more incoming model names to a backend server and target model.
 type RoutingRule struct {
@@ -30,10 +37,23 @@ type RoutingRule struct {
 	// ""/"auto" (decide by the target's declared protocols), "off" (never
 	// convert), or an explicit "messages>chat".
 	Convert string `json:"convert,omitempty"`
+	// Balance distributes traffic across the rule's server and its enabled
+	// fallbacks instead of treating them as a failover chain: empty (the
+	// default, and every config that predates the field) keeps primary-first
+	// order, "round-robin" starts each request on the next pool member. The
+	// list order stays the failover order after that start, and
+	// FallbackEntry.Weight decides how often each member starts.
+	Balance string `json:"balance,omitempty"`
 }
 
 // IsJev reports whether the rule routes via a decision model.
 func (r *RoutingRule) IsJev() bool { return r.Router == RouterJev && r.Jev != nil }
+
+// IsModelPattern reports whether an incoming-model entry is a wildcard pattern
+// (`gpt-*`, `claude-?`) rather than a model name. A pattern lets one rule own a
+// whole model family; the client's own name is then what the backend gets
+// (pass-through, like a rule with no target model).
+func IsModelPattern(name string) bool { return strings.ContainsAny(name, "*?") }
 
 // JevRouter routes one rule with a System One decision model (llama.cpp's
 // /v1/systemone with a decision model, a local OpenJev server, or the hosted

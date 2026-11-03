@@ -98,6 +98,10 @@ type FallbackEntry struct {
 	// the target's declared protocols), "off" (never convert), or an explicit
 	// "messages>chat".
 	Convert string `json:"convert,omitempty"`
+	// Weight is this member's share of the traffic when the rule balances
+	// (0 = 1, and a rule that does not balance ignores it entirely — there,
+	// order is the whole story). A 4-GPU replica beside a 1-GPU one declares 4.
+	Weight int `json:"weight,omitempty"`
 }
 
 // IsEnabled reports whether the fallback is active. A nil Enabled means enabled.

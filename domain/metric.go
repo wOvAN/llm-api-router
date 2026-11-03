@@ -99,4 +99,54 @@ type Summary struct {
 	TotalCacheCreationTok int     `json:"total_cache_creation_tokens"`
 	AvgPrefillTokSec      float64 `json:"avg_prefill_tok_per_sec"`
 	AvgDecodeTokSec       float64 `json:"avg_decode_tok_per_sec"`
+	// StatusClassCount counts requests per HTTP-status class ("2xx", "3xx",
+	// "4xx", "5xx", "transport" for a request that never got a response). The
+	// aggregate ErrorCount can not tell a backend that is throttling us from one
+	// that is dying, and those two need opposite answers.
+	StatusClassCount map[string]int `json:"status_class_count,omitempty"`
+	// LatencyMsBuckets/TTFBMsBuckets are cumulative histogram bucket counts over
+	// fixed bounds (see LatencyBucketsMs), so a Prometheus scrape can compute
+	// quantiles — avg/min/max alone hide the tail, which is what paging is about.
+	LatencyMsBuckets []int `json:"latency_ms_buckets,omitempty"`
+	TTFBMsBuckets    []int `json:"ttfb_ms_buckets,omitempty"`
+	LatencyMsSum     int64 `json:"latency_ms_sum"`
+	TTFBMsSum        int64 `json:"ttfb_ms_sum"`
+}
+
+// LatencyBucketsMs are the histogram upper bounds (ms) shared by the latency and
+// TTFB histograms: whole seconds and their halves across the range a local LLM
+// generation actually spans, from a fast non-streaming reply to a long stream.
+var LatencyBucketsMs = []int64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000}
+
+// StatusClass names the histogram bucket of an HTTP status for metrics: 0 (no
+// response at all — a transport failure) is its own class, because throttling,
+// dying and unreachable need to be told apart.
+func StatusClass(status int) string {
+	switch {
+	case status == 0:
+		return "transport"
+	case status < 300:
+		return "2xx"
+	case status < 400:
+		return "3xx"
+	case status < 500:
+		return "4xx"
+	}
+	return "5xx"
+}
+
+// AddLatencyBucket adds one sample to a cumulative histogram (a sample lands in
+// every bucket whose bound it fits, plus the implicit +Inf bucket, which is the
+// last element — so len(buckets) == len(LatencyBucketsMs)+1).
+func AddLatencyBucket(buckets []int, ms int64) []int {
+	if buckets == nil {
+		buckets = make([]int, len(LatencyBucketsMs)+1)
+	}
+	for i, bound := range LatencyBucketsMs {
+		if ms <= bound {
+			buckets[i]++
+		}
+	}
+	buckets[len(buckets)-1]++
+	return buckets
 }

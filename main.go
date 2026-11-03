@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -10,12 +11,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"llm-api-router/admin"
 	"llm-api-router/config"
+	"llm-api-router/domain"
 	"llm-api-router/metrics"
 	"llm-api-router/pkg/log"
 	"llm-api-router/router"
@@ -24,6 +29,72 @@ import (
 
 //go:embed admin/static/*
 var staticFS embed.FS
+
+// readyState is the load-balancer-facing readiness flag. A replica under a load
+// balancer has to leave the pool the moment it starts draining — otherwise the
+// balancer keeps feeding it new generations that its 10s shutdown will cut short.
+type readyState struct{ draining atomic.Bool }
+
+func (rs *readyState) SetDraining(v bool) { rs.draining.Store(v) }
+
+func (rs *readyState) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	if rs.draining.Load() {
+		http.Error(w, "draining", http.StatusServiceUnavailable)
+		return
+	}
+	_, _ = w.Write([]byte("ready"))
+}
+
+// serverStateMetrics renders the router's live view of its backends — health and
+// rate-limit cooldown — as Prometheus gauges. The GUI shows both; a scrape has to
+// see them too, or alerting is blind to the exact state that moves traffic.
+func serverStateMetrics(health *config.HealthTracker, rl *config.RateLimiter,
+	servers map[string]*domain.Server) string {
+	var sb strings.Builder
+	sb.WriteString("# HELP llm_router_server_healthy Server marked healthy by the health tracker (1) or not (0).\n")
+	sb.WriteString("# TYPE llm_router_server_healthy gauge\n")
+	ids := make([]string, 0, len(servers))
+	for id := range servers {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		healthy := 0
+		if health.IsHealthy(id) {
+			healthy = 1
+		}
+		sb.WriteString("llm_router_server_healthy{server=\"" + id + "\"} " + strconv.Itoa(healthy) + "\n")
+	}
+	sb.WriteString("# HELP llm_router_server_cooldown_seconds Remaining rate-limit cooldown per server.\n")
+	sb.WriteString("# TYPE llm_router_server_cooldown_seconds gauge\n")
+	for _, id := range ids {
+		if d := rl.CooldownRemaining(id); d > 0 {
+			sb.WriteString("llm_router_server_cooldown_seconds{server=\"" + id + "\"} " +
+				strconv.Itoa(int(d.Round(time.Second).Seconds())) + "\n")
+		}
+	}
+	return sb.String()
+}
+
+// tokenGuard gates a handler behind a bearer token. An empty token means open,
+// which is the default: an existing deployment changes nothing until ADMIN_TOKEN
+// is set. The comparison is constant-time because the token is a secret.
+func tokenGuard(token string, next http.Handler) http.Handler {
+	if token == "" {
+		return next
+	}
+	const prefix = "Bearer "
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		got := req.Header.Get("Authorization")
+		if !strings.HasPrefix(got, prefix) ||
+			subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(got, prefix)), []byte(token)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="llm-api-router admin"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, req)
+	})
+}
 
 func main() {
 	log.InitFromEnv()
@@ -44,6 +115,16 @@ func main() {
 	if configFile == "" {
 		configFile = "config.json"
 	}
+
+	// Admin API and /metrics carry every backend's api_key and the routing
+	// config, so they can be gated behind a bearer token. Unset = open, which is
+	// the historical behavior; a Prometheus scraper sets `authorization:` in its
+	// scrape config, and the GUI asks for the token on its first 401.
+	adminToken := os.Getenv("ADMIN_TOKEN")
+
+	// Readiness: the load balancer pulls the replica out of the pool the moment
+	// it starts draining, so a shutdown never cuts a generation short mid-stream.
+	var ready readyState
 
 	store, err := config.NewStore(configFile)
 	if err != nil {
@@ -99,15 +180,16 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	mux.Handle("/readyz", &ready)
 	mux.HandleFunc("/v1/", apiRouter.Handle)
 	// llama.cpp keeps its TTS route (and the STT alias) outside /v1 — route them
 	// like any other endpoint so audio traffic isn't 404'd at the mux.
 	mux.HandleFunc("/tts", apiRouter.Handle)
 	mux.HandleFunc("/audio/", apiRouter.Handle)
-	mux.HandleFunc("/admin/api/", adminHandler.ServeHTTP)
+	mux.Handle("/admin/api/", tokenGuard(adminToken, adminHandler))
 
 	// Build version (exact pattern beats the /admin/api/ catch-all above).
-	mux.HandleFunc("/admin/api/version", func(w http.ResponseWriter, req *http.Request) {
+	mux.Handle("/admin/api/version", tokenGuard(adminToken, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -116,19 +198,21 @@ func main() {
 		if err := json.NewEncoder(w).Encode(map[string]string{"version": Version}); err != nil {
 			log.Errorf("failed to encode version response: %v", err)
 		}
-	})
+	})))
 
 	// Prometheus text-format metrics endpoint (zero deps).
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
+	mux.Handle("/metrics", tokenGuard(adminToken, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		if _, err := w.Write([]byte(metricsStore.PrometheusMetrics())); err != nil {
+		out := metricsStore.PrometheusMetrics() +
+			serverStateMetrics(healthTracker, rateLimiter, store.GetConfig().Servers)
+		if _, err := w.Write([]byte(out)); err != nil {
 			log.Errorf("[%s] failed to write metrics response: %v", req.URL.Path, err)
 		}
-	})
+	})))
 
 	mux.HandleFunc("/admin/", func(w http.ResponseWriter, req *http.Request) {
 		path := strings.TrimPrefix(req.URL.Path, "/admin/")
@@ -169,6 +253,7 @@ func main() {
 	go func() {
 		<-stop
 		log.Infof("Shutting down...")
+		ready.SetDraining(true)
 		healthTracker.Stop()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -180,6 +265,9 @@ func main() {
 	log.Infof("LLM API Router %s starting on %s", Version, addr)
 	log.Infof("Admin GUI: http://localhost%s/admin", addr)
 	log.Infof("API routes: http://localhost%s/v1/*", addr)
+	if adminToken == "" {
+		log.Warnf("ADMIN_TOKEN is unset — the admin API (backend keys, routing config) and /metrics are unauthenticated")
+	}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)

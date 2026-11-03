@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ type Router struct {
 	quota     *config.QuotaTracker
 	caps      *config.CapabilitiesCache
 	trace     *trace.Store
+	rotations sync.Map                  // balanced rule pools: ids -> *atomic.Uint64
 	jevMu     sync.Mutex                // guards jevCache and jevSticky
 	jevCache  map[string]jevCacheEntry  // jev decision cache (opt-in per rule)
 	jevSticky map[string]jevStickyEntry // last jev decision per conversation
@@ -69,6 +71,40 @@ type serverAttempt struct {
 	server      *domain.Server
 	targetModel string
 	convert     string // the attempt's own `convert` value ("" = "auto")
+}
+
+// balanceRotation returns a balanced rule's attempt list starting on its next
+// pool member, so successive requests land on different backends. Weights deal
+// out the starting slot (a replica with weight 3 starts three requests out of
+// four), and what follows that start stays the failover chain — a pool member
+// that is down costs one rotation, not a request.
+//
+// The counter is keyed by the pool's server ids in order, so a config reload
+// never resets the rotation and two pools never share a counter.
+func (r *Router) balanceRotation(attempts []serverAttempt, weights []int) []serverAttempt {
+	ids := make([]string, len(attempts))
+	slots := 0
+	for i, a := range attempts {
+		ids[i] = a.server.ID
+		slots += weights[i]
+	}
+	counter, _ := r.rotations.LoadOrStore(strings.Join(ids, ","), new(atomic.Uint64))
+	slot := int(counter.(*atomic.Uint64).Add(1)-1) % slots
+
+	start := 0
+	for i, w := range weights {
+		if slot < w {
+			start = i
+			break
+		}
+		slot -= w
+	}
+	if start == 0 {
+		return attempts
+	}
+	rotated := make([]serverAttempt, 0, len(attempts))
+	rotated = append(rotated, attempts[start:]...)
+	return append(rotated, attempts[:start]...)
 }
 
 // orderedFallbacks returns the rule's enabled fallbacks in attempt order:
@@ -196,8 +232,20 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 	rule, ok := r.store.GetRuleByModel(model)
 	if !ok {
-		log.Errorf("[%s] no routing rule for model %q", req.URL.Path, model)
-		http.Error(w, fmt.Sprintf("no routing rule for model %q", model), http.StatusNotFound)
+		// LiteLLM's model_not_found names the models the proxy accepts, and that
+		// is the whole difference between a 404 a caller can act on and one it
+		// has to go and read the config for. Bounded: an unrouted model name is
+		// the most popular thing to send a router.
+		names := r.store.ModelNames()
+		if len(names) > 20 {
+			names = append(names[:20], "…")
+		}
+		msg := fmt.Sprintf("no routing rule for model %q", model)
+		if len(names) > 0 {
+			msg += "; this router routes: " + strings.Join(names, ", ")
+		}
+		log.Errorf("[%s] %s", req.URL.Path, msg)
+		http.Error(w, msg, http.StatusNotFound)
 		return
 	}
 
@@ -228,7 +276,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		jev = &outcome
 		attempts = list
 	} else {
+		// Static rule: the primary, then its enabled fallbacks in priority order.
+		// With `balance: "round-robin"` the same list is a pool, and the request
+		// starts on the next member of it.
 		attempts = []serverAttempt{{server: primaryServer, targetModel: rule.TargetModel, convert: rule.Convert}}
+		weights := []int{1}
 		for _, fb := range orderedFallbacks(rule) {
 			if srv, ok := r.store.GetServer(fb.ServerID); ok {
 				tm := fb.TargetModel
@@ -236,7 +288,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					tm = rule.TargetModel
 				}
 				attempts = append(attempts, serverAttempt{server: srv, targetModel: tm, convert: fb.Convert})
+				weights = append(weights, max(fb.Weight, 1))
 			}
+		}
+		if rule.Balance == domain.BalanceRoundRobin && len(attempts) > 1 {
+			attempts = r.balanceRotation(attempts, weights)
 		}
 	}
 	if jev != nil && jev.Reason == "blocked" {
@@ -285,6 +341,10 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	// The refusal of the last attempt: a backend this attempt can not speak to,
 	// which nothing downstream of it can fix.
 	var refusal error
+	// The last backend answer the proxy buffered (429/5xx, nothing sent to the
+	// client). If no attempt serves, this is what the client gets — the
+	// backend's own answer, not a proxy-invented status.
+	var lastAnswer *bufferedAnswer
 	// Errors from failed attempts, surfaced to the client via
 	// X-Router-Fallback-Errors (preceding attempts only).
 	var attemptErrors []string
@@ -472,6 +532,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		// same server up to NumRetries times before moving to the next server.
 		// Precedence: X-Router-Retries header > rule's num_retries.
 		numRetries := rule.NumRetries
+		explicitRetries := rule.NumRetries != 0
 		if numRetries == 0 {
 			// Rules without num_retries get a generous default: absorb a dying
 			// backend (crashed worker, restart) before marking it unhealthy and
@@ -481,6 +542,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		if h := req.Header.Get("X-Router-Retries"); h != "" {
 			if n, parseErr := strconv.Atoi(h); parseErr == nil && n >= 0 {
 				numRetries = n
+				explicitRetries = true
 			}
 		}
 
@@ -568,10 +630,20 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 
-			// Transport error (pre-response): retry same server if retries left,
-			// otherwise mark unhealthy and fall through to the next server.
+			// Transport error (pre-response), or a backend answer the proxy
+			// buffered so it could be failed over (429/5xx): retry the same
+			// server if the budget for that class of failure allows, otherwise
+			// fall through to the next attempt.
 			lastErr = err
-			if retry < sameServerRetries(err, numRetries) {
+			var buffered *proxy.UpstreamResponseError
+			isBuffered := errors.As(err, &buffered)
+			retriesLeft := sameServerRetries(err, numRetries)
+			if isBuffered {
+				retriesLeft = bufferedAnswerRetries(buffered.StatusCode, numRetries, explicitRetries)
+				lastAnswer = &bufferedAnswer{resp: buffered, serverID: srv.ID,
+					targetModel: targetModel, wasFallback: wasFallback, translator: meta.translator}
+			}
+			if retry < retriesLeft {
 				log.Warnf("[%s] model=%q — retrying %s (%d/%d): %v",
 					req.URL.Path, model, srv.Name, retry+1, numRetries, err)
 				select {
@@ -581,14 +653,26 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				}
 				continue
 			}
-			if r.health != nil {
+			// A backend that answered is reachable: the health tracker owns
+			// "reachable", and the rate limiter (which is status-aware, and
+			// cools a 429 down on its first occurrence) owns "keeps refusing us".
+			if r.health != nil && !isBuffered {
 				r.health.MarkUnhealthy(srv.ID)
 			}
 			if r.rateLimit != nil {
-				r.rateLimit.RecordFailure(srv.ID, 0)
+				if isBuffered {
+					r.rateLimit.RecordFailure(srv.ID, buffered.StatusCode,
+						time.Duration(pm.RetryAfterMs)*time.Millisecond)
+				} else {
+					r.rateLimit.RecordFailure(srv.ID, 0)
+				}
 			}
 			if r.quota != nil {
-				r.quota.Complete(srv.ID, reservedTokens, 0)
+				var used int64
+				if pm != nil {
+					used = int64(pm.TotalTokens)
+				}
+				r.quota.Complete(srv.ID, reservedTokens, used)
 			}
 			attemptErrors = append(attemptErrors, err.Error())
 			log.Errorf("[%s] fallback from %s: %v", req.URL.Path, srv.Name, err)
@@ -614,6 +698,13 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Nothing served, and at least one backend answered 429/5xx with a body the
+	// proxy held back: the client's answer is that backend's own.
+	if lastAnswer != nil {
+		r.serveLastAnswer(w, req, requestStart, model, apiType, jev, meta, lastAnswer)
+		return
+	}
+
 	errorBody := ""
 	if lastErr != nil {
 		errorBody = lastErr.Error()
@@ -622,6 +713,45 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)
 	http.Error(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
+}
+
+// serveLastAnswer delivers the last buffered backend answer (429/5xx, no byte of
+// it sent to the client) verbatim: the status, the backend's headers and its
+// body, restated in the client's dialect when that attempt converted. A
+// proxy-invented 502 quoting the backends would bury the one fact the client can
+// act on — "your prompt is over the context window" arrives as a 500 body from
+// most engines, and a client that retries it elsewhere learns nothing.
+func (r *Router) serveLastAnswer(w http.ResponseWriter, req *http.Request, requestStart time.Time,
+	model string, apiType domain.APIType, jev *jevOutcome, meta *reqMeta, answer *bufferedAnswer) {
+	resp := answer.resp
+	body := resp.Body.Bytes()
+	if answer.translator != nil {
+		if translated, err := answer.translator.TranslateJSON(body); err == nil {
+			body = translated
+		} else {
+			log.Warnf("[%s] model=%q — buffered error body stayed in the backend's dialect: %v",
+				req.URL.Path, model, err)
+		}
+	}
+	for k, values := range resp.Header {
+		if k == "Content-Length" || k == "Transfer-Encoding" {
+			continue // our own framing; the body may have been rewritten
+		}
+		w.Header().Del(k)
+		for _, v := range values {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("X-Router-Status", strconv.Itoa(resp.StatusCode))
+	w.WriteHeader(resp.StatusCode)
+	if _, err := w.Write(body); err != nil {
+		log.Errorf("[%s] failed to write the backend's answer: %v", req.URL.Path, err)
+	}
+	r.record(req, requestStart, model, answer.targetModel, answer.serverID,
+		proxy.ProxyMetrics{StatusCode: resp.StatusCode, ResponseSize: int64(len(body))},
+		resp.StatusCode, string(body), answer.wasFallback, apiType, jev, meta)
+	log.Errorf("[%s] model=%q — every attempt failed; served %s's HTTP %d",
+		req.URL.Path, model, answer.serverID, resp.StatusCode)
 }
 
 // record stores a request metric; pm fields feed the usage/timing columns.
@@ -738,6 +868,36 @@ func sameServerRetries(err error, configured int) int {
 	return configured
 }
 
+// bufferedAnswer is a backend answer the proxy buffered instead of relaying
+// (429/5xx — see proxy.UpstreamResponseError), kept with the identity of the
+// attempt that produced it so the metric, the fallback marker and the response
+// translation all describe the attempt that answered.
+type bufferedAnswer struct {
+	resp        *proxy.UpstreamResponseError
+	serverID    string
+	targetModel string
+	wasFallback bool
+	translator  proxy.StreamTranslator
+}
+
+// bufferedAnswerRetries is the same-server retry budget for such an answer:
+//
+//   - 429: none. The backend stated in its own response that it is at its limit
+//     (and for how long); nothing about that changes while we sleep between
+//     tries, so the next attempt answers now instead of in 5s.
+//   - 5xx: only what the operator asked for. The generous default exists to ride
+//     out a backend that never answered at all; eleven dials into a stable 500
+//     are pure latency in front of a fallback that answers.
+func bufferedAnswerRetries(status, configured int, explicit bool) int {
+	if status == http.StatusTooManyRequests {
+		return 0
+	}
+	if explicit {
+		return configured
+	}
+	return 0
+}
+
 // newRequestID is a 16-hex-char correlation id (8 bytes of crypto/rand).
 func newRequestID() string {
 	var b [8]byte
@@ -770,6 +930,11 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 		for _, name := range rule.IncomingModels {
+			// A wildcard entry is a matching rule, not a name a client can send,
+			// so it is not listed.
+			if domain.IsModelPattern(name) {
+				continue
+			}
 			m := map[string]any{
 				"id":       name,
 				"object":   "model",
@@ -803,6 +968,14 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 				}
 				m["models"] = pool
 			}
+			// Health is a signal, not a filter: the listing stays the config view
+			// of what this router accepts (a model whose backends are down is
+			// still routed to — the last attempt always tries), so a client that
+			// shows a picker can grey the name out instead of being handed a
+			// listing that changes under it every 30s.
+			if r.health != nil {
+				m["healthy"] = r.anyServerHealthy(rule)
+			}
 			models = append(models, m)
 		}
 	}
@@ -816,12 +989,42 @@ func (r *Router) listModels(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// anyServerHealthy reports whether at least one server that can serve the rule
+// is up: the jev pool for an auto-routing rule, the primary and its enabled
+// fallbacks for a static one.
+func (r *Router) anyServerHealthy(rule *domain.RoutingRule) bool {
+	ids := []string{rule.ServerID}
+	if rule.IsJev() {
+		// The decision server answers questions; the pool serves the request.
+		ids = ids[:0]
+		for _, c := range rule.Jev.EnabledCandidates() {
+			ids = append(ids, c.ServerID)
+		}
+	} else {
+		for _, f := range rule.Fallbacks {
+			if f.IsEnabled() {
+				ids = append(ids, f.ServerID)
+			}
+		}
+	}
+	for _, id := range ids {
+		if r.health.IsHealthy(id) {
+			return true
+		}
+	}
+	return false
+}
+
 // rewriteAttemptBody points the request body at the attempt's target model.
 // JSON bodies are re-marshalled; multipart uploads (audio uploads) keep every
 // byte but their `model` form field; GETs have no body at all.
+//
+// An empty target is a pass-through rule (a wildcard rule owning a whole model
+// family, a rule that only moves the server): the client's own model name IS the
+// backend's, so the body is left exactly as it arrived.
 func rewriteAttemptBody(req *http.Request, body []byte, targetModel string) ([]byte, error) {
 	switch {
-	case req.Method == http.MethodGet:
+	case req.Method == http.MethodGet, targetModel == "":
 		return body, nil
 	case strings.HasPrefix(req.Header.Get("Content-Type"), "multipart/"):
 		return proxy.RewriteModelInMultipart(body, targetModel)

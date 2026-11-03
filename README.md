@@ -2,13 +2,15 @@
 
 [![CI](https://github.com/wOvAN/llm-api-router/actions/workflows/ci.yml/badge.svg)](https://github.com/wOvAN/llm-api-router/actions/workflows/ci.yml)
 
-A Go-based reverse proxy that routes LLM inference API requests between multiple backend servers, supporting both OpenAI and Anthropic API protocols. **Zero external dependencies** (stdlib only).
+A Go-based reverse proxy that routes LLM inference API requests between multiple backend servers, supporting both OpenAI and Anthropic API protocols. **One external dependency** (`golang.org/x/net`, for SOCKS proxy support); everything else is stdlib.
 
 ## Features
 
 - **Multi-backend routing** — configure multiple inference backends with different API protocols
 - **Model name remapping** — map incoming model names to different backend model names (e.g., `opus` → `haiku`)
-- **Fallback servers** — automatic failover to backup servers when the primary is unavailable, with per-fallback model overrides
+- **Fallback servers** — automatic failover when the primary is unavailable **or answers 429/5xx** (a backend that is throttled or dying serves nothing, so the next one is tried), with per-fallback model overrides
+- **Wildcard rules** — one rule can own a model family (`qwen3-*`); the client's own model name then rides to the backend untouched
+- **Pool balancing** — `balance: "round-robin"` shares traffic across a pool of interchangeable backends, weighted per member
 - **Web GUI** — configure servers and routing rules at runtime via a browser (embedded, rebuilt with `go build`)
 - **Streaming support** — SSE streaming responses are relayed without buffering
 - **Metrics & analytics** — ring buffer of last 100 requests with aggregated summaries by model and server (TTFB, decode time, token throughput)
@@ -47,6 +49,7 @@ The server starts on port 8080 (configurable via `PORT`):
 |----------|---------|-------------|
 | `PORT` | `8080` | HTTP listen port |
 | `CONFIG_FILE` | `config.json` | Path to config file |
+| `ADMIN_TOKEN` | *(unset)* | Bearer token required by `/admin/api/*` and `/metrics` (unset = both open; the GUI asks on its first 401) |
 
 ## Config File
 
@@ -105,7 +108,9 @@ The config is stored in `config.json` (path configurable via `CONFIG_FILE`). You
 - Each server can specify `openai_url` / `anthropic_url` overrides; falls back to base `url`
 - Each server can route through a proxy: `proxy` (empty = direct connection) with a `proxy_enabled` toggle (default off; `true` enables the proxy, otherwise the proxy URL is ignored). Supported schemes: `http`, `https`, `socks5`, `socks5h`, `socks4`, `socks4a`
 - Base URL paths are deduplicated (e.g. `api.openai.com/v1` + `/v1/chat/completions` → `api.openai.com/v1/chat/completions`)
-- Rules are matched by first match on `incoming_models`; disabled rules (`"enabled": false`) are silently skipped
+- Rules are matched by an **exact** name first, then by the **most specific wildcard** (`path.Match` globs: `qwen3-*`, `claude-?`); disabled rules (`"enabled": false`) are silently skipped
+- A rule matched by a pattern has no single target: an **empty `target_model` is pass-through** — the client's model name is sent to the backend as-is (and `target_model` empty on an exact rule does the same)
+- `balance: "round-robin"` turns the rule's `server_id` + enabled `fallbacks` into one pool sharing traffic; `fallbacks[].weight` (default 1) is that member's share, ignored by a failover-only rule
 - Fallback `target_model` empty → inherits the rule's primary `TargetModel`
 
 ## API Usage
@@ -172,6 +177,8 @@ Metrics are kept in a ring buffer (last 100 requests) and aggregated by model an
 - Token counts (prompt, completion, cached)
 - Token throughput (prefill and decode tokens/sec)
 - Native llama-server timings override wall-clock when present
+- `GET /metrics` (Prometheus text format): the same figures per model / server / target model / request class, plus status-class counters, latency and TTFB **histograms** (so p95 is computable), and `llm_router_server_healthy` / `llm_router_server_cooldown_seconds` gauges
+- `GET /readyz` answers `ready`, or `503 draining` once shutdown started — a load balancer pulls a replica out of the pool before its drain cuts a generation short
 
 ## Docker
 

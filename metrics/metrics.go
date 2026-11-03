@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -96,6 +98,14 @@ func (s *Store) updateSummary(key string, m domain.RequestMetric) {
 	} else {
 		sum.ErrorCount++
 	}
+	if sum.StatusClassCount == nil {
+		sum.StatusClassCount = make(map[string]int, 5)
+	}
+	sum.StatusClassCount[domain.StatusClass(m.StatusCode)]++
+	sum.LatencyMsBuckets = domain.AddLatencyBucket(sum.LatencyMsBuckets, m.LatencyMs)
+	sum.TTFBMsBuckets = domain.AddLatencyBucket(sum.TTFBMsBuckets, m.TTFBMs)
+	sum.LatencyMsSum += m.LatencyMs
+	sum.TTFBMsSum += m.TTFBMs
 	if m.WasFallback {
 		sum.FallbackCount++
 	}
@@ -166,7 +176,13 @@ func (s *Store) Summaries() map[string]domain.Summary {
 
 	out := make(map[string]domain.Summary, len(s.summaries))
 	for k, v := range s.summaries {
-		out[k] = *v
+		sum := *v
+		// The histogram buckets are slices: share them with the caller and a
+		// concurrent request writes behind the reader's back.
+		sum.StatusClassCount = maps.Clone(v.StatusClassCount)
+		sum.LatencyMsBuckets = slices.Clone(v.LatencyMsBuckets)
+		sum.TTFBMsBuckets = slices.Clone(v.TTFBMsBuckets)
+		out[k] = sum
 	}
 	return out
 }
