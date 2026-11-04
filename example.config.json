@@ -189,7 +189,8 @@
       "cooldown_seconds": 300
     },
     "alerts": {
-      "webhook": ""
+      "webhook": "",
+      "proxy": ""
     },
     "convert": {
       "max_tokens_default": 4096,

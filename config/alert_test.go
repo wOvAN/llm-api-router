@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"llm-api-router/domain"
 )
 
 // recorder is a test Alerter that keeps the events it was given.
@@ -99,7 +102,7 @@ func TestWebhookAlerterPostsEachEvent(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	a := NewWebhookAlerter(backend.URL)
+	a := NewWebhookAlerter(domain.AlertSettings{Webhook: backend.URL})
 	a.Notify("server s1 is down")
 	a.Notify("server s1 is down") // deduped
 	a.Notify("server s1 is back")
@@ -140,7 +143,7 @@ func TestWebhookAlerterSurvivesAnUnreachableEndpoint(t *testing.T) {
 	url := dead.URL
 	dead.Close()
 
-	a := NewWebhookAlerter(url)
+	a := NewWebhookAlerter(domain.AlertSettings{Webhook: url})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -157,7 +160,63 @@ func TestWebhookAlerterSurvivesAnUnreachableEndpoint(t *testing.T) {
 
 // No webhook configured means no alerts, and no nil dereference on the way.
 func TestNewWebhookAlerterIsEmptyWhenUnset(t *testing.T) {
-	if a := NewWebhookAlerter(""); a != nil {
-		t.Errorf("NewWebhookAlerter(\"\") = %T, want nil", a)
+	if a := NewWebhookAlerter(domain.AlertSettings{}); a != nil {
+		t.Errorf("NewWebhookAlerter(empty) = %T, want nil", a)
+	}
+}
+
+// A box whose only way to the internet is a SOCKS/HTTP proxy loses alerting
+// entirely if the webhook dials direct: the events fire, nothing lands, and the
+// operator is not watching the log that says so. `settings.alerts.proxy` is the
+// router-level equivalent of a server's own `proxy` (the health probe has had
+// this per server since the start, via the same proxy.TransportFor).
+func TestWebhookAlerterCanPostThroughAProxy(t *testing.T) {
+	var viaProxy atomic.Int32
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		viaProxy.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer relay.Close()
+
+	a := NewWebhookAlerter(domain.AlertSettings{
+		Webhook: "http://alerts.invalid/hook",
+		Proxy:   relay.URL,
+	})
+	if a == nil {
+		t.Fatal("a webhook with a proxy configured returned no alerter")
+	}
+	a.Notify("server a is down")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for viaProxy.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := viaProxy.Load(); got != 1 {
+		t.Errorf("the relay saw %d requests, want 1: an unreachable proxy must not silently drop alerts", got)
+	}
+}
+
+// An unusable proxy is a config typo, not a reason to go silent: the alerting
+// path falls back to a direct dial, and says so once.
+func TestWebhookAlerterFallsBackWhenProxyIsUnusable(t *testing.T) {
+	var hits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	a := NewWebhookAlerter(domain.AlertSettings{Webhook: backend.URL, Proxy: "not a url"})
+	if a == nil {
+		t.Fatal("no alerter")
+	}
+	a.Notify("server a is down")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for hits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("backend saw %d requests, want 1 (direct after a bad proxy URL)", got)
 	}
 }

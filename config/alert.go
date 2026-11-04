@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"llm-api-router/domain"
 	"llm-api-router/pkg/log"
+	"llm-api-router/proxy"
 )
 
 // Alerter is the operator's out-of-band notice: one edge event (a backend went
@@ -35,15 +37,33 @@ type webhookAlerter struct {
 // alertDedupWindow bounds how often the same event text may be sent.
 const alertDedupWindow = time.Minute
 
-// NewWebhookAlerter returns nil (no alerts) for an empty URL, so the caller can
-// install whatever it gets unconditionally.
-func NewWebhookAlerter(url string) Alerter {
-	if url == "" {
+// NewWebhookAlerter returns nil (no alerts) when no webhook is configured, so
+// the caller can install whatever it gets unconditionally. `s.Proxy` is the
+// router-level twin of a server's own `proxy` — the health probe has been able
+// to reach a SOCKS-only backend since the start, and an alerting path that
+// cannot is worse: it fails on the one channel nobody is watching.
+//
+// It takes the settings struct, not the URL: the knob set here will grow
+// before it shrinks, and the constructor takes the whole config section that
+// exists for it.
+func NewWebhookAlerter(s domain.AlertSettings) Alerter {
+	if s.Webhook == "" {
 		return nil
 	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	if s.Proxy != "" {
+		// The URL is never logged: a proxy URL carries credentials as routinely
+		// as a webhook URL carries a channel token.
+		transport, err := proxy.TransportFor(s.Proxy)
+		if err != nil {
+			log.Warnf("[alerts] settings.alerts.proxy is not a usable proxy URL (%v) — alerts will go direct", err)
+		} else {
+			client.Transport = transport
+		}
+	}
 	return &webhookAlerter{
-		url:    url,
-		client: &http.Client{Timeout: 5 * time.Second},
+		url:    s.Webhook,
+		client: client,
 		sent:   make(map[string]time.Time),
 	}
 }

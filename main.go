@@ -386,7 +386,7 @@ func applyRuntimeSettings(store *config.Store, health *config.HealthTracker, lim
 	limiter.SetThresholds(s.Limiter.AllowedFails, time.Duration(s.Limiter.CooldownSeconds)*time.Second)
 	// A nil alerter (no webhook configured) is the silent case, so the install is
 	// unconditional: a reload that clears the webhook has to clear the hook too.
-	alerter := config.NewWebhookAlerter(s.Alerts.Webhook)
+	alerter := config.NewWebhookAlerter(s.Alerts)
 	health.SetAlerter(alerter)
 	limiter.SetAlerter(alerter)
 }

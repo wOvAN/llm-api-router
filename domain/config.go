@@ -58,6 +58,11 @@ type Settings struct {
 // backend can not fill a channel.
 type AlertSettings struct {
 	Webhook string `json:"webhook,omitempty"`
+	// Proxy routes the alert POST (http/https/socks5/socks5h/socks4/socks4a,
+	// the same set a server's own `proxy` accepts). A box whose only way out is a
+	// proxy loses alerting entirely if the webhook dials direct — and it fails
+	// out-of-band, where nobody is looking. Unset = direct.
+	Proxy string `json:"proxy,omitempty"`
 }
 
 // HealthSettings tunes the health probe. IntervalSeconds is how often the downed
