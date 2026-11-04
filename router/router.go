@@ -211,10 +211,19 @@ func (r *Router) inflightCount(id string) int32 {
 // not equally fast: the next request goes to the idle replica instead of queueing
 // behind a five-minute answer (LiteLLM's `least-busy`, olla's `least-connections`).
 //
+// `weights` (index-aligned with attempts, 0 = 1) is the pool's capacity
+// declaration — the same number round-robin deals its start slots by — and
+// least-connections ranks by load per unit of it. Raw counts are the right
+// signal for replicas of one size and the wrong one for an 80GB box beside a
+// 24GB one: at equal utilisation the big box has four times the requests in
+// flight, and a count comparison would starve it. LiteLLM's `least-busy` has no
+// weights at all (its `weight` only feeds `simple-shuffle`), so this is our
+// extension, and it degrades to LiteLLM's behavior when a pool declares none.
+//
 // A conversation pinned to a member starts there regardless of load — its turns
 // must land on the backend holding its prompt cache, which is the whole point of
 // the pin.
-func (r *Router) balanceLeast(attempts []serverAttempt, pinnedID string) []serverAttempt {
+func (r *Router) balanceLeast(attempts []serverAttempt, weights []int, pinnedID string) []serverAttempt {
 	if pinnedID != "" {
 		for i, a := range attempts {
 			if a.server.ID == pinnedID {
@@ -227,11 +236,24 @@ func (r *Router) balanceLeast(attempts []serverAttempt, pinnedID string) []serve
 			}
 		}
 	}
-	ordered := make([]serverAttempt, len(attempts))
-	copy(ordered, attempts)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return r.inflightCount(ordered[i].server.ID) < r.inflightCount(ordered[j].server.ID)
+	capacity := func(i int) float64 {
+		if i < len(weights) {
+			return float64(max(weights[i], 1))
+		}
+		return 1
+	}
+	order := make([]int, len(attempts))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		return float64(r.inflightCount(attempts[order[i]].server.ID))/capacity(order[i]) <
+			float64(r.inflightCount(attempts[order[j]].server.ID))/capacity(order[j])
 	})
+	ordered := make([]serverAttempt, len(attempts))
+	for k, i := range order {
+		ordered[k] = attempts[i]
+	}
 	return ordered
 }
 
@@ -461,7 +483,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			pinKey = conversationKey(req, body)
 			pinned := r.stickyGet(pinKey)
 			if rule.Balance == domain.BalanceLeastConnections {
-				attempts = r.balanceLeast(attempts, pinned)
+				attempts = r.balanceLeast(attempts, weights, pinned)
 			} else {
 				attempts = r.balanceRotation(attempts, weights, pinned)
 			}

@@ -243,18 +243,40 @@ func TestBalanceLeastConnectionsPrefersIdleMember(t *testing.T) {
 	a := serverAttempt{server: &domain.Server{ID: "a"}}
 	b := serverAttempt{server: &domain.Server{ID: "b"}}
 
-	if got := r.balanceLeast([]serverAttempt{a, b}, ""); got[0].server.ID != "a" {
+	if got := r.balanceLeast([]serverAttempt{a, b}, nil, ""); got[0].server.ID != "a" {
 		t.Errorf("idle pool ordered %v-first, want the declared order kept", got[0].server.ID)
 	}
 	r.countInflight("a", 2)
-	got := r.balanceLeast([]serverAttempt{a, b}, "")
+	got := r.balanceLeast([]serverAttempt{a, b}, nil, "")
 	if got[0].server.ID != "b" {
 		t.Errorf("busy pool ordered %v-first, want the idle member b", got[0].server.ID)
 	}
 	// A conversation pinned to the busy member keeps its prompt cache: the pin
 	// outranks the load signal, exactly as it outranks the rotation.
-	if got := r.balanceLeast([]serverAttempt{a, b}, "a"); got[0].server.ID != "a" {
+	if got := r.balanceLeast([]serverAttempt{a, b}, nil, "a"); got[0].server.ID != "a" {
 		t.Error("the pinned member was ordered behind the idle one")
+	}
+}
+
+// A pool of replicas that are not the same size (an 80GB box beside a 24GB one,
+// so 8 slots beside 2) has no useful "least busy" in raw request counts: the
+// big box can hold four times as many generations at the same utilisation. The
+// weight the round-robin pool already deals its slots by is that capacity
+// number, so least-connections ranks by load per slot.
+func TestBalanceLeastConnectionsHonoursWeights(t *testing.T) {
+	r, _, _, _ := newTestRouter(t)
+	big := serverAttempt{server: &domain.Server{ID: "big"}}
+	small := serverAttempt{server: &domain.Server{ID: "small"}}
+	r.countInflight("big", 2)   // 2 of 4 slots
+	r.countInflight("small", 1) // 1 of 1 slot — full
+
+	if got := r.balanceLeast([]serverAttempt{big, small}, []int{4, 1}, ""); got[0].server.ID != "big" {
+		t.Errorf("ordered %v-first, want the member at half its capacity ahead of the one at full",
+			got[0].server.ID)
+	}
+	// With no weights declared, the mode is exactly the count comparison above.
+	if got := r.balanceLeast([]serverAttempt{big, small}, []int{1, 1}, ""); got[0].server.ID != "small" {
+		t.Errorf("unweighted pool ordered %v-first, want the fewest requests in flight", got[0].server.ID)
 	}
 }
 

@@ -308,6 +308,14 @@ func TestGUIEditsBalanceAndWeight(t *testing.T) {
 			t.Errorf("the rule dialog is missing %s", want)
 		}
 	}
+	// Weight is a capacity number in both pool modes, so the dialog must not dim
+	// it for least-connections and the tag must say what it buys there.
+	if !strings.Contains(src, `w.style.opacity = pool ? '1' : '0.35'`) {
+		t.Error("the weight input is still dimmed for least-connections")
+	}
+	if !strings.Contains(src, "по загрузке на слот (weight") {
+		t.Error("the least-connections tag does not state that weight counts there")
+	}
 }
 
 // `/admin/api/version` matches the mux as its own (exact) pattern, so its guard
