@@ -266,6 +266,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <label id="label-rule-balance"><span>Balance</span><select id="rule-balance" onchange="toggleBalanceFields()">
       <option value="">Failover (primary отвечает, fallbacks — подстраховка)</option>
       <option value="round-robin">Round-robin (пул равных бэкендов делит трафик)</option>
+      <option value="least-connections">Least connections (запрос идёт на самого свободного бэкенда)</option>
     </select></label>
     <label id="label-rule-fallbacks">
       <span>Fallbacks</span>
@@ -732,8 +733,8 @@ async function loadRules() {
     }).join(' ');
     // A balancing rule's "fallbacks" are traffic targets, not a rescue chain —
     // the row says so, because a tag is the only place it can.
-    const pool = r.balance === 'round-robin'
-      ? ' <span class="tag" style="background:#17321f;color:#3fb950" title="Балансирует: пул делит трафик по кругу (weight = доля)">round-robin</span>' : '';
+    const pool = r.balance
+      ? ` <span class="tag" style="background:#17321f;color:#3fb950" title="${r.balance === 'least-connections' ? 'Балансирует: пул делит трафик по числу живых запросов' : 'Балансирует: пул делит трафик по кругу (weight = доля)'}">${esc(r.balance)}</span>` : '';
     const jev = r.router === 'jev' && r.jev ? r.jev : null;
     const targetCell = jev
       ? (jev.candidates || []).map(c => {
@@ -872,12 +873,16 @@ function setBalance(value) {
 // Balancing renumbers the fallback row: priority (the failover order) stops
 // meaning anything on the first slot of the pool, and weight starts counting.
 function toggleBalanceFields() {
-  const balanced = document.getElementById('rule-balance').value === 'round-robin';
+  const balance = document.getElementById('rule-balance').value;
+  // Any balance mode makes the fallbacks a pool; only round-robin deals the
+  // traffic out by weight, so least-connections keeps weight dimmed.
+  const pool = balance !== '';
+  const weighted = balance === 'round-robin';
   document.getElementById('label-rule-balance').querySelector('span').textContent =
-    balanced ? 'Fallbacks / pool members' : 'Fallbacks';
+    pool ? 'Fallbacks / pool members' : 'Fallbacks';
   document.querySelectorAll('.fallback-row').forEach(row => {
     const w = row.querySelector('.fb-weight');
-    if (w) w.style.opacity = balanced ? '1' : '0.35';
+    if (w) w.style.opacity = weighted ? '1' : '0.35';
   });
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"llm-api-router/domain"
 )
@@ -229,5 +230,77 @@ func TestHandleBalanceRotationSweepsDeadPools(t *testing.T) {
 	r.rotations.Range(func(k, _ any) bool { keys = append(keys, k.(string)); return true })
 	if len(keys) != 1 || keys[0] != "b,c" {
 		t.Errorf("rotation keys = %v, want only the live pool b,c", keys)
+	}
+}
+
+// A pool whose replicas are not equally fast wants the idle one, not the next
+// slot: a five-minute generation occupies its backend for its whole length, so a
+// rotation that lands the next request on that replica sends it to the tail of a
+// queue. `balance: "least-connections"` orders the pool by requests in flight,
+// fewest first (LiteLLM's `least-busy`, olla's `least-connections`).
+func TestBalanceLeastConnectionsPrefersIdleMember(t *testing.T) {
+	r, _, _, _ := newTestRouter(t)
+	a := serverAttempt{server: &domain.Server{ID: "a"}}
+	b := serverAttempt{server: &domain.Server{ID: "b"}}
+
+	if got := r.balanceLeast([]serverAttempt{a, b}, ""); got[0].server.ID != "a" {
+		t.Errorf("idle pool ordered %v-first, want the declared order kept", got[0].server.ID)
+	}
+	r.countInflight("a", 2)
+	got := r.balanceLeast([]serverAttempt{a, b}, "")
+	if got[0].server.ID != "b" {
+		t.Errorf("busy pool ordered %v-first, want the idle member b", got[0].server.ID)
+	}
+	// A conversation pinned to the busy member keeps its prompt cache: the pin
+	// outranks the load signal, exactly as it outranks the rotation.
+	if got := r.balanceLeast([]serverAttempt{a, b}, "a"); got[0].server.ID != "a" {
+		t.Error("the pinned member was ordered behind the idle one")
+	}
+}
+
+// The signal above has to be real: a request must occupy its backend's slot for
+// exactly the duration of the attempt — one inside the proxied request, zero once
+// it is served — or least-connections routes on a constant and a leak quietly
+// pins every request to whichever replica was least often busy.
+func TestHandleInflightCountsAnAttempt(t *testing.T) {
+	var r *Router
+	during := make(chan int32, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		during <- r.inflightCount("a")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
+	}))
+	defer backend.Close()
+
+	router, store, _, _ := newTestRouter(t)
+	r = router
+	if err := store.AddServer(&domain.Server{ID: "a", Name: "A", URL: backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"gpt-4"},
+		TargetModel: "gpt-4", ServerID: "a", Balance: domain.BalanceLeastConnections,
+		Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+	if got := w.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("status = %d: %s", got, w.Body.String())
+	}
+
+	select {
+	case got := <-during:
+		if got != 1 {
+			t.Errorf("in-flight during the attempt = %d, want 1", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the backend never saw the request")
+	}
+	if got := r.inflightCount("a"); got != 0 {
+		t.Errorf("in-flight after a served request = %d, want 0 (the slot leaked)", got)
 	}
 }

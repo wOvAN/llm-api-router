@@ -13,10 +13,24 @@ const (
 	RouterJev    = "jev"
 )
 
-// BalanceRoundRobin is the one RoutingRule.Balance mode: the rule's own server
-// and its enabled fallbacks are an interchangeable pool, and successive requests
-// start on the next member of it.
-const BalanceRoundRobin = "round-robin"
+// Balance modes for RoutingRule.Balance: the rule's own server and its enabled
+// fallbacks are an interchangeable pool.
+//
+//   - BalanceRoundRobin: successive requests start on the next member of it, in
+//     the proportions the per-member weights deal out.
+//   - BalanceLeastConnections: the member with the fewest requests in flight
+//     goes first. A five-minute generation occupies its backend for the whole
+//     time, so a rotation that lands the next request on that replica sends it
+//     to the tail of a queue (LiteLLM's `least-busy`, olla's `least-connections`).
+const (
+	BalanceRoundRobin       = "round-robin"
+	BalanceLeastConnections = "least-connections"
+)
+
+// Balances reports whether a balance value turns a rule into a pool.
+func Balances(mode string) bool {
+	return mode == BalanceRoundRobin || mode == BalanceLeastConnections
+}
 
 // RoutingRule maps one or more incoming model names to a backend server and target model.
 type RoutingRule struct {
@@ -104,6 +118,11 @@ func (r *RoutingRule) Validate() error {
 	}
 	if r.ServerID == "" {
 		return errors.New("rule has no primary server")
+	}
+	switch r.Balance {
+	case "", BalanceRoundRobin, BalanceLeastConnections:
+	default:
+		return errors.New(`balance must be "round-robin" or "least-connections"`)
 	}
 	return nil
 }

@@ -854,6 +854,12 @@ func TestAddRuleRejectsUnroutableShape(t *testing.T) {
 		{"jev with every candidate disabled",
 			`{"incoming_models":["gpt-4"],"router":"jev","jev":{"server_id":"s2","candidates":[{"server_id":"s1","enabled":false}]},"enabled":true}`,
 			"candidate"},
+		// A balance value the router does not know is otherwise invisible: the
+		// rule loads, the field is read by nobody, and the pool silently routes as
+		// a failover chain.
+		{"unknown balance mode",
+			`{"incoming_models":["gpt-4"],"server_id":"s1","balance":"round_robin","enabled":true}`,
+			"balance"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

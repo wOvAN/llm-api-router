@@ -38,6 +38,7 @@ type Router struct {
 	trace        *trace.Store
 	rotations    sync.Map                  // balanced rule pools: ids -> *atomic.Uint64
 	rotationKeys atomic.Int64              // entries ever stored in rotations
+	inflight     sync.Map                  // server id -> *atomic.Int32: requests in flight now
 	pinMu        sync.Mutex                // guards pins
 	pins         map[string]stickyPin      // conversation -> backend that served it
 	jevMu        sync.Mutex                // guards jevCache and jevSticky
@@ -104,7 +105,7 @@ func (r *Router) sweepRotations() {
 	rules, err := r.store.GetRules("")
 	if err == nil {
 		for _, rule := range rules {
-			if !rule.Enabled || rule.Balance != domain.BalanceRoundRobin || rule.ServerID == "" {
+			if !rule.Enabled || !domain.Balances(rule.Balance) || rule.ServerID == "" {
 				continue
 			}
 			ids := append([]string{rule.ServerID}, fallbackIDs(rule)...)
@@ -185,6 +186,53 @@ func (r *Router) balanceRotation(attempts []serverAttempt, weights []int, pinned
 	rotated := make([]serverAttempt, 0, len(attempts))
 	rotated = append(rotated, attempts[start:]...)
 	return append(rotated, attempts[:start]...)
+}
+
+// countInflight moves a backend's in-flight request count by delta. The map is
+// keyed by the server ids the config defines, so it is bounded by the deployment
+// and needs no sweep.
+func (r *Router) countInflight(id string, delta int32) {
+	v, _ := r.inflight.LoadOrStore(id, new(atomic.Int32))
+	v.(*atomic.Int32).Add(delta)
+}
+
+// inflightCount reports how many requests this router has open on a backend.
+func (r *Router) inflightCount(id string) int32 {
+	if v, ok := r.inflight.Load(id); ok {
+		return v.(*atomic.Int32).Load()
+	}
+	return 0
+}
+
+// balanceLeast orders a balanced rule's attempt list by how busy each member is
+// right now, fewest requests in flight first, ties keeping the declared order (so
+// an idle pool routes exactly like the failover chain). A generation occupies its
+// backend for its whole length, so this is the mode for a pool whose members are
+// not equally fast: the next request goes to the idle replica instead of queueing
+// behind a five-minute answer (LiteLLM's `least-busy`, olla's `least-connections`).
+//
+// A conversation pinned to a member starts there regardless of load — its turns
+// must land on the backend holding its prompt cache, which is the whole point of
+// the pin.
+func (r *Router) balanceLeast(attempts []serverAttempt, pinnedID string) []serverAttempt {
+	if pinnedID != "" {
+		for i, a := range attempts {
+			if a.server.ID == pinnedID {
+				if i == 0 {
+					return attempts
+				}
+				rotated := make([]serverAttempt, 0, len(attempts))
+				rotated = append(rotated, attempts[i:]...)
+				return append(rotated, attempts[:i]...)
+			}
+		}
+	}
+	ordered := make([]serverAttempt, len(attempts))
+	copy(ordered, attempts)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return r.inflightCount(ordered[i].server.ID) < r.inflightCount(ordered[j].server.ID)
+	})
+	return ordered
 }
 
 // orderedFallbacks returns the rule's enabled fallbacks in attempt order:
@@ -408,10 +456,15 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				weights = append(weights, max(fb.Weight, 1))
 			}
 		}
-		if rule.Balance == domain.BalanceRoundRobin && len(attempts) > 1 {
+		if len(attempts) > 1 && domain.Balances(rule.Balance) {
 			// Only a pool has a choice to pin, so only a pool pays the body scan.
 			pinKey = conversationKey(req, body)
-			attempts = r.balanceRotation(attempts, weights, r.stickyGet(pinKey))
+			pinned := r.stickyGet(pinKey)
+			if rule.Balance == domain.BalanceLeastConnections {
+				attempts = r.balanceLeast(attempts, pinned)
+			} else {
+				attempts = r.balanceRotation(attempts, weights, pinned)
+			}
 		}
 	}
 	if max := r.store.GetSettings().Routing.MaxFallbacks; max > 0 && len(attempts) > max+1 {
@@ -599,11 +652,16 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 
-		// releaseQuota is this attempt's single reservation release: Complete is
-		// the only release there is (the tracker keeps no TTL), so a path that
+		// releaseQuota is this attempt's single teardown: Complete is the only
+		// reservation release there is (the tracker keeps no TTL), so a path that
 		// forgets it subtracts the request's declared budget from the server's
-		// TPM headroom for the rest of the process's life.
+		// TPM headroom for the rest of the process's life. It is also where the
+		// attempt's in-flight slot goes back, for the same reason: it is the one
+		// closure every exit path below calls, so the count `least-connections`
+		// reads can not leak a request that never finished.
+		r.countInflight(srv.ID, 1)
 		releaseQuota := func(used int64) {
+			r.countInflight(srv.ID, -1)
 			if r.quota != nil {
 				r.quota.Complete(srv.ID, reservedTokens, used)
 			}

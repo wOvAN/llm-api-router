@@ -277,9 +277,10 @@ func TestGUIEditsBalanceAndWeight(t *testing.T) {
 	for _, want := range []string{
 		`id="rule-balance"`,
 		`value="round-robin"`,
+		`value="least-connections"`,
 		`className = 'fb-weight'`,
 		`fb.weight`,
-		`r.balance === 'round-robin'`,
+		`r.balance === 'least-connections'`,
 		`data.balance`,
 	} {
 		if !strings.Contains(src, want) {
