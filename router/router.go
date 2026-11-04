@@ -513,7 +513,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 		// TPM pre-call reservation: hold the declared output budget so
 		// concurrent requests can't collectively exceed the server's TPM limit.
-		// Released by quota.Complete on every exit path below. The last attempt
+		// Released by releaseQuota on every exit path below. The last attempt
 		// sends even if the reservation would exceed the limit (better to try
 		// than to fail); it simply reserves nothing.
 		estimate := proxy.DeclaredOutputBudget(rewrittenBody)
@@ -525,6 +525,16 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				log.Warnf("[%s] model=%q — skipping TPM-reserved server %s (attempt %d/%d)",
 					req.URL.Path, model, srv.Name, i+1, len(attempts))
 				continue
+			}
+		}
+
+		// releaseQuota is this attempt's single reservation release: Complete is
+		// the only release there is (the tracker keeps no TTL), so a path that
+		// forgets it subtracts the request's declared budget from the server's
+		// TPM headroom for the rest of the process's life.
+		releaseQuota := func(used int64) {
+			if r.quota != nil {
+				r.quota.Complete(srv.ID, reservedTokens, used)
 			}
 		}
 
@@ -638,8 +648,8 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				// usage (TPM).
 				if r.quota != nil {
 					r.quota.RecordRequest(srv.ID)
-					r.quota.Complete(srv.ID, reservedTokens, int64(pm.TotalTokens))
 				}
+				releaseQuota(int64(pm.TotalTokens))
 
 				if pm.StatusCode >= 400 {
 					log.Errorf("[%s] model=%q -> %q on %s returned HTTP %d %s: %s",
@@ -662,13 +672,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			// convention) to keep it distinct from served requests. A disconnect
 			// before any backend response carries nothing to record.
 			if req.Context().Err() != nil {
-				if r.quota != nil {
-					var used int64
-					if pm != nil {
-						used = int64(pm.TotalTokens)
-					}
-					r.quota.Complete(srv.ID, reservedTokens, used)
+				var used int64
+				if pm != nil {
+					used = int64(pm.TotalTokens)
 				}
+				releaseQuota(used)
 				log.Warnf("[%s] model=%q — client disconnected during proxy (attempt %d/%d)",
 					req.URL.Path, model, i+1, len(attempts))
 				if pm != nil && pm.StatusCode > 0 {
@@ -685,9 +693,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					r.rateLimit.RecordFailure(srv.ID, pm.StatusCode,
 						time.Duration(pm.RetryAfterMs)*time.Millisecond)
 				}
-				if r.quota != nil {
-					r.quota.Complete(srv.ID, reservedTokens, int64(pm.TotalTokens))
-				}
+				releaseQuota(int64(pm.TotalTokens))
 				log.Errorf("[%s] model=%q — mid-stream error on %s (attempt %d/%d): %v",
 					req.URL.Path, model, srv.Name, i+1, len(attempts), err)
 				// Record whatever metrics we have
@@ -714,6 +720,13 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 				select {
 				case <-time.After(retryBackoff(retry)):
 				case <-req.Context().Done():
+					// The client is gone and no answer was served: the
+					// reservation is released exactly like every other exit.
+					var used int64
+					if pm != nil {
+						used = int64(pm.TotalTokens)
+					}
+					releaseQuota(used)
 					return
 				}
 				continue
@@ -732,13 +745,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 					r.rateLimit.RecordFailure(srv.ID, 0)
 				}
 			}
-			if r.quota != nil {
-				var used int64
-				if pm != nil {
-					used = int64(pm.TotalTokens)
-				}
-				r.quota.Complete(srv.ID, reservedTokens, used)
+			var used int64
+			if pm != nil {
+				used = int64(pm.TotalTokens)
 			}
+			releaseQuota(used)
 			attemptErrors = append(attemptErrors, err.Error())
 			log.Errorf("[%s] fallback from %s: %v", req.URL.Path, srv.Name, err)
 			break
