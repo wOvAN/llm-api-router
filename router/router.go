@@ -414,6 +414,12 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			attempts = r.balanceRotation(attempts, weights, r.stickyGet(pinKey))
 		}
 	}
+	if max := r.store.GetSettings().Routing.MaxFallbacks; max > 0 && len(attempts) > max+1 {
+		// The primary plus `max` fallbacks is the whole chain this request may
+		// walk. Capping it keeps a total outage from turning one request into
+		// len(chain) x retry-budget of wasted latency.
+		attempts = attempts[:max+1]
+	}
 	if jev != nil && jev.Reason == "blocked" {
 		// Opt-in Noul security gate: the decision model rated the request as
 		// near-certain harm intent. Nothing was forwarded upstream.
@@ -649,6 +655,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			Attempts:       fmt.Sprintf("%d/%d", i+1, len(attempts)),
 			FallbackErrors: attemptErrors,
 			KeepAliveIdle:  srvKeepAlive,
+			Headers:        srv.Headers,
 			Proxy:          srv.ProxyURL(),
 			UpstreamPath:   plan.Path,
 			Convert:        meta.convert,

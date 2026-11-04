@@ -1023,3 +1023,25 @@ func mustReadExample(t *testing.T) []byte {
 	}
 	return data
 }
+
+// A server's static header map is deep-copied on every write: the admin handler
+// decodes a *domain.Server per request and hands it straight here, so a shared
+// map would let a caller mutate the live config after the fact.
+func TestServerHeadersAreDeepCopied(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	headers := map[string]string{"X-Scope-Id": "tenant-7"}
+	if err := store.AddServer(&domain.Server{ID: "s1", URL: "http://a", Headers: headers}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	headers["X-Scope-Id"] = "mutated"
+	stored, ok := store.GetServer("s1")
+	if !ok {
+		t.Fatal("server gone")
+	}
+	if got := stored.Headers["X-Scope-Id"]; got != "tenant-7" {
+		t.Errorf("stored headers = %q, want the value at write time", got)
+	}
+}

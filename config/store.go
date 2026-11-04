@@ -250,6 +250,20 @@ func (s *Store) ModelNames() []string {
 }
 
 // AddServer adds a new server.
+// cloneHeaders deep-copies a server's static header map, so a caller that keeps
+// its own *domain.Server (the admin handler decodes one per request) can not
+// mutate the stored config through the shared map.
+func cloneHeaders(h map[string]string) map[string]string {
+	if h == nil {
+		return nil
+	}
+	out := make(map[string]string, len(h))
+	for k, v := range h {
+		out[k] = v
+	}
+	return out
+}
+
 func (s *Store) AddServer(srv *domain.Server) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -264,6 +278,7 @@ func (s *Store) AddServer(srv *domain.Server) error {
 	added := *srv
 	added.APITypes = apis
 	added.Protocols = protos
+	added.Headers = cloneHeaders(srv.Headers)
 	s.config.Servers[srv.ID] = &added
 	return s.save()
 }
@@ -284,6 +299,7 @@ func (s *Store) UpdateServer(id string, srv *domain.Server) error {
 	updated.ID = id
 	updated.APITypes = apis
 	updated.Protocols = protos
+	updated.Headers = cloneHeaders(srv.Headers)
 	s.config.Servers[id] = &updated
 	return s.save()
 }

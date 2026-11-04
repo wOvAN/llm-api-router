@@ -37,6 +37,18 @@ type Settings struct {
 	// CORS answers cross-origin requests for browser clients. Off by default:
 	// the router is an internal service, and a browser grant is a decision.
 	CORS COSSettings `json:"cors,omitempty"`
+
+	// Routing bounds the failover chain (see router.Handle).
+	Routing RoutingSettings `json:"routing,omitempty"`
+}
+
+// RoutingSettings bounds routing itself. MaxFallbacks caps how many fallback
+// attempts one request may walk (0 = the whole chain, the historical behavior):
+// with a 20-server config and every backend down, an uncapped chain spends each
+// member's retry budget on a request that is already lost. LiteLLM's
+// `max_fallbacks` is the same bound, and its default is 5.
+type RoutingSettings struct {
+	MaxFallbacks int `json:"max_fallbacks,omitempty"`
 }
 
 // InboundSettings is the client-facing rate limit: RPS sustained requests per

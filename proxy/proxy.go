@@ -292,6 +292,10 @@ type RouterHeaders struct {
 	// heartbeat interval. A per-request X-Router-KeepAlive header still
 	// overrides it; zero falls back to the global proxy.KeepAliveIdle.
 	KeepAliveIdle time.Duration
+	// Headers are the server's configured headers, stamped on the upstream request
+	// (overwriting the client's own value under the same name). Not a
+	// client-visible header, like Proxy.
+	Headers map[string]string
 	// Proxy is the server's proxy URL ("" = direct connection). Not a client-visible header.
 	Proxy string
 	// UpstreamPath replaces the client's path when a conversion points the request
@@ -307,6 +311,15 @@ type RouterHeaders struct {
 	// Translate is the per-attempt response translator (nil = passthrough). Not a
 	// client-visible header, like Trace.
 	Translate StreamTranslator
+}
+
+// staticHeaders reads the configured static headers, tolerating a nil
+// RouterHeaders (the proxy accepts one).
+func staticHeaders(rh *RouterHeaders) map[string]string {
+	if rh == nil {
+		return nil
+	}
+	return rh.Headers
 }
 
 // StreamTranslator converts the response from the backend's dialect into the
@@ -1509,6 +1522,12 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		// both satisfies either check.
 		proxyReq.Header.Set("x-api-key", apiKey)
 		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	for name, value := range staticHeaders(rh) {
+		// A gateway in front of the backend can require a header the client has
+		// no business choosing (a tenant id, an internal routing tag), so the
+		// configured value overwrites whatever the client sent under that name.
+		proxyReq.Header.Set(name, value)
 	}
 	proxyReq.Header.Del("Host")
 	// The X-Router-* request namespace is the client's instructions to US (retry

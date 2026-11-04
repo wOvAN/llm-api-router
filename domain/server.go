@@ -52,6 +52,11 @@ type Server struct {
 	// server (seconds). 0 = use the global proxy.KeepAliveIdle. A per-request
 	// X-Router-KeepAlive header still overrides this.
 	KeepAliveIdle int `json:"keep_alive_idle,omitempty"`
+	// Headers are static headers stamped on every upstream request to this server
+	// (a gateway that requires a tenant id or a routing tag). The configured value
+	// overwrites the client's own header of the same name; the client's other
+	// headers ride upstream untouched, as before.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // GetURLForAPIType returns the URL to use for the given API type.

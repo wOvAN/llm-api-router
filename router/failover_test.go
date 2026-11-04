@@ -3,6 +3,8 @@ package router
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,8 @@ import (
 
 	"llm-api-router/config"
 	"llm-api-router/domain"
+	"llm-api-router/metrics"
+	"llm-api-router/trace"
 )
 
 // A backend that answers 429 is throttled, not wrong: the client's request is
@@ -302,5 +306,65 @@ func TestHandleBuffered5xxKeepsExplicitRetryBudget(t *testing.T) {
 	}
 	if got := fallbackCalls.Load(); got != 0 {
 		t.Errorf("fallback hit %d times, want 0", got)
+	}
+}
+
+// A rule with a long fallback chain is a cascade waiting for a bad minute: with
+// every backend down, one request walks the whole list, each with its own retry
+// budget. LiteLLM caps the chain (max_fallbacks, default 5); a router with a
+// 20-server config needs the same bound.
+func TestHandleMaxFallbacksCapsTheChain(t *testing.T) {
+	ids := []string{"primary", "fb1", "fb2", "fb3"}
+	hits := map[string]*atomic.Int32{}
+	urls := map[string]string{}
+	for _, id := range ids {
+		name, counter := id, new(atomic.Int32)
+		hits[name] = counter
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			counter.Add(1)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}))
+		t.Cleanup(backend.Close)
+		urls[name] = backend.URL
+	}
+
+	servers := ""
+	for _, id := range ids {
+		if servers != "" {
+			servers += ","
+		}
+		servers += `"` + id + `":{"id":"` + id + `","name":"` + id + `","url":"` + urls[id] +
+			`","api_types":["openai"]}`
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"servers":{` + servers + `},"profiles":[{"id":"default","name":"default","rules":[` +
+		`{"incoming_models":["gpt-4"],"target_model":"gpt-4","server_id":"primary",` +
+		`"fallbacks":[{"server_id":"fb1"},{"server_id":"fb2"},{"server_id":"fb3"}],"enabled":true}` +
+		`]}],"active_profile_id":"default","settings":{"routing":{"max_fallbacks":1}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	r := New(store, metrics.New(100), nil, nil, nil, trace.New(100, domain.TraceSettings{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if hits["primary"].Load() == 0 {
+		t.Fatal("the primary was never contacted")
+	}
+	if hits["fb1"].Load() == 0 {
+		t.Fatal("the first fallback was never contacted")
+	}
+	if got := hits["fb2"].Load() + hits["fb3"].Load(); got != 0 {
+		t.Errorf("attempts past the cap ran (%d hits on fb2+fb3), want the chain capped at 1 fallback", got)
 	}
 }

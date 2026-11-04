@@ -175,6 +175,9 @@
       "enabled": false,
       "origins": ["http://localhost:3000"]
     },
+    "routing": {
+      "max_fallbacks": 5
+    },
     "convert": {
       "max_tokens_default": 4096,
       "drop_params": false,
