@@ -3,6 +3,7 @@ package router
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -49,9 +50,12 @@ func TestHandleRoundRobinBalancesAcrossReplicas(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 
-	for range 4 {
+	for i := range 4 {
+		// Distinct first turns: four separate conversations, so nothing pins and
+		// the rotation is what spreads them (a conversation that repeats itself
+		// is a pin, pinned by TestHandleRoundRobinPinsConversationToMember).
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-			strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+			strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"turn `+strconv.Itoa(i)+`"}]}`))
 		w := httptest.NewRecorder()
 		r.Handle(w, req)
 		if got := w.Result().StatusCode; got != http.StatusOK {
@@ -107,9 +111,10 @@ func TestHandleRoundRobinHonoursWeights(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 
-	for range 4 {
+	for i := range 4 {
+		// Distinct conversations — the deal-out is the rotation's, not a pin's.
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-			strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+			strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"turn `+strconv.Itoa(i)+`"}]}`))
 		w := httptest.NewRecorder()
 		r.Handle(w, req)
 	}

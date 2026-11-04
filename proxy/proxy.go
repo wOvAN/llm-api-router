@@ -1511,6 +1511,17 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	proxyReq.Header.Del("Host")
+	// The X-Router-* request namespace is the client's instructions to US (retry
+	// budget, heartbeat interval, routing/conversion overrides). A backend has no
+	// use for any of it, and on a converted attempt the upstream request is a
+	// clone of the client's, so scrub the whole namespace here — the one place
+	// every attempt's request passes through. (Our own X-Router-* response
+	// headers are written later, on the way out.)
+	for h := range proxyReq.Header {
+		if strings.HasPrefix(h, "X-Router-") {
+			proxyReq.Header.Del(h)
+		}
+	}
 	proxyReq.GetBody = nil
 	proxyReq.RequestURI = "" // Must be empty for client requests (Clone preserves the server-side value)
 

@@ -37,6 +37,8 @@ type Router struct {
 	caps      *config.CapabilitiesCache
 	trace     *trace.Store
 	rotations sync.Map                  // balanced rule pools: ids -> *atomic.Uint64
+	pinMu     sync.Mutex                // guards pins
+	pins      map[string]stickyPin      // conversation -> backend that served it
 	jevMu     sync.Mutex                // guards jevCache and jevSticky
 	jevCache  map[string]jevCacheEntry  // jev decision cache (opt-in per rule)
 	jevSticky map[string]jevStickyEntry // last jev decision per conversation
@@ -46,7 +48,8 @@ type Router struct {
 func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter,
 	quota *config.QuotaTracker, tr *trace.Store) *Router {
 	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit, quota: quota, trace: tr,
-		caps: config.NewCapabilitiesCache(), jevCache: map[string]jevCacheEntry{}, jevSticky: map[string]jevStickyEntry{}}
+		caps: config.NewCapabilitiesCache(), jevCache: map[string]jevCacheEntry{},
+		jevSticky: map[string]jevStickyEntry{}, pins: map[string]stickyPin{}}
 }
 
 // reqMeta is what a request *is*, computed once at request start: the
@@ -84,7 +87,7 @@ type serverAttempt struct {
 //
 // The counter is keyed by the pool's server ids in order, so a config reload
 // never resets the rotation and two pools never share a counter.
-func (r *Router) balanceRotation(attempts []serverAttempt, weights []int) []serverAttempt {
+func (r *Router) balanceRotation(attempts []serverAttempt, weights []int, pinnedID string) []serverAttempt {
 	ids := make([]string, len(attempts))
 	slots := 0
 	for i, a := range attempts {
@@ -92,6 +95,24 @@ func (r *Router) balanceRotation(attempts []serverAttempt, weights []int) []serv
 		slots += weights[i]
 	}
 	counter, _ := r.rotations.LoadOrStore(strings.Join(ids, ","), new(atomic.Uint64))
+
+	// A conversation already pinned to a member starts there and spends no
+	// rotation: its turns must land on the backend holding its prompt cache, and
+	// letting it advance the shared counter would drift every other
+	// conversation's share along with it.
+	if pinnedID != "" {
+		for i, a := range attempts {
+			if a.server.ID == pinnedID {
+				if i == 0 {
+					return attempts
+				}
+				rotated := make([]serverAttempt, 0, len(attempts))
+				rotated = append(rotated, attempts[i:]...)
+				return append(rotated, attempts[:i]...)
+			}
+		}
+	}
+
 	slot := int(counter.(*atomic.Uint64).Add(1)-1) % slots
 
 	start := 0
@@ -261,6 +282,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 	var jev *jevOutcome
 	var attempts []serverAttempt
+	// pinKey is the conversation identity a balanced rule pins to one backend
+	// ("" = the request carries no identity, so nothing is pinned).
+	pinKey := ""
 	requestStart := time.Now()
 	apiType := apiTypeFromPath(req.URL.Path)
 	// The client's own dialect (from its path) and the per-request conversion
@@ -301,7 +325,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 		if rule.Balance == domain.BalanceRoundRobin && len(attempts) > 1 {
-			attempts = r.balanceRotation(attempts, weights)
+			// Only a pool has a choice to pin, so only a pool pays the body scan.
+			pinKey = conversationKey(req, body)
+			attempts = r.balanceRotation(attempts, weights, r.stickyGet(pinKey))
 		}
 	}
 	if jev != nil && jev.Reason == "blocked" {
@@ -556,11 +582,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			// falling back. Disable per request with X-Router-Retries: 0.
 			numRetries = defaultNumRetries
 		}
-		if h := req.Header.Get("X-Router-Retries"); h != "" {
-			if n, parseErr := strconv.Atoi(h); parseErr == nil && n >= 0 {
-				numRetries = n
-				explicitRetries = true
-			}
+		if n, ok := clientRetries(req.Header.Get("X-Router-Retries")); ok {
+			numRetries = n
+			explicitRetries = true
 		}
 
 		for retry := 0; ; retry++ {
@@ -603,6 +627,11 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 						req.URL.Path, model, targetModel, srv.Name, pm.StatusCode, http.StatusText(pm.StatusCode), pm.ErrorBody)
 				}
 
+				if pinKey != "" && pm.StatusCode < 400 {
+					// The conversation's next turn belongs to the backend that
+					// just cached its prefix.
+					r.stickyPut(pinKey, srv.ID)
+				}
 				r.record(req, requestStart, model, targetModel, srv.ID, *pm, pm.StatusCode, pm.ErrorBody, wasFallback, apiType, jev, meta)
 				return
 			}
@@ -861,9 +890,14 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 // a dying backend (crashed llama.cpp worker, restart) usually recovers within
 // seconds, so retry before marking the server unhealthy and falling back.
 // Override per request via X-Router-Retries ("0" disables retries).
-const defaultNumRetries = 10 // retryBackoff returns the delay before retry attempt n (0-based): 100ms, 250ms,
-// 500ms, then capped at 1s. Keeps retries fast but avoids hammering a failing
-// backend.
+const defaultNumRetries = 10
+
+// maxClientRetries caps what a client may ask for via X-Router-Retries. The
+// budget is a request for patience, not a licence to spend days: on the
+// accepted-then-closed path every retry costs a dial plus up to 1s of backoff,
+// so an unbounded number in the header is a self-inflicted outage per request.
+const maxClientRetries = 100
+
 // sameServerRetries caps the retry loop by what the transport actually reported,
 // because the generous default (absorb a backend that is restarting) is the wrong
 // answer to a backend that is not there:
@@ -931,6 +965,23 @@ func newRequestID() string {
 		return ""
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// retryBackoff returns the delay before retry attempt n (0-based): 100ms, 250ms,
+// 500ms, then capped at 1s. Keeps retries fast but avoids hammering a failing
+// backend.
+// clientRetries parses the per-request retry override: a non-negative integer,
+// capped at maxClientRetries. ok = false for anything the header can not mean
+// (absent, unparseable, negative), which leaves the rule's own budget in place.
+func clientRetries(h string) (int, bool) {
+	if h == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(h)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return min(n, maxClientRetries), true
 }
 
 func retryBackoff(n int) time.Duration {

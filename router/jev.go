@@ -129,9 +129,11 @@ func (r *Router) jevAttempts(req *http.Request, rule *domain.RoutingRule, body [
 
 	// Conversation identity, scoped to the rule's incoming model: the real
 	// decision of a user turn pins the follow-up tool turns of the same
-	// conversation (see jevStickyGet).
+	// conversation (see jevStickyGet). A session header counts as identity too
+	// (the pool-pinning key), so a bridge that sends one gets the pin without a
+	// body-level key.
 	sessionKey := ""
-	if s := jevSessionKey(body); s != "" {
+	if s := conversationKey(req, body); s != "" {
 		sessionKey = requested + "\x00" + s
 	}
 
