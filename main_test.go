@@ -523,3 +523,46 @@ func TestAlertsWebhookReachesBothTrackers(t *testing.T) {
 	}
 	t.Errorf("webhook got %d POSTs, want the down event and the cooldown event", hits.Load())
 }
+
+// A deploy-time validator has to answer with an exit code, not a warning line
+// scrolled past in a container log: a rule naming a server that does not exist
+// boots fine and fails every request on it, which is the worst time to learn it.
+// An unread key is a warning (the router boots with it), a dangling reference is
+// the refusal.
+func TestCheckConfigSeparatesWarningsFromRefusals(t *testing.T) {
+	write := func(t *testing.T, body string) (string, *config.Store) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		store, err := config.NewStore(path)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		return path, store
+	}
+
+	broken := `{
+	  "servers": {"s1": {"id":"s1","url":"http://a","colddown_time":120}},
+	  "profiles": [{"id":"default","name":"default","rules":[
+	    {"incoming_models":["gpt-4"],"server_id":"ghost","target_model":"gpt-4","enabled":true}]}],
+	  "active_profile_id": "default"
+	}`
+	unknown, dangling := auditConfig(write(t, broken))
+	if len(unknown) == 0 || !strings.Contains(unknown[0], "colddown_time") {
+		t.Errorf("a typo'd key is not reported: %v", unknown)
+	}
+	if len(dangling) == 0 || !strings.Contains(dangling[0], "ghost") {
+		t.Errorf("a dangling server reference is not reported: %v", dangling)
+	}
+
+	ok := `{"servers":{"s1":{"id":"s1","url":"http://a"}},
+	  "profiles":[{"id":"default","name":"default","rules":[
+	    {"incoming_models":["gpt-4"],"server_id":"s1","target_model":"gpt-4","enabled":true}]}],
+	  "active_profile_id":"default"}`
+	unknown, dangling = auditConfig(write(t, ok))
+	if len(unknown) != 0 || len(dangling) != 0 {
+		t.Errorf("a clean config is not clean: unknown=%v dangling=%v", unknown, dangling)
+	}
+}

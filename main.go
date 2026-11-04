@@ -103,6 +103,11 @@ func main() {
 	log.InitFromEnv()
 
 	showVersion := flag.Bool("version", false, "print version and exit")
+	// A deploy-time validator: the same audit the router runs on startup, with an
+	// exit code. A config with a dangling server reference boots happily and
+	// answers 500 "server not found" on every request that rule routes, which is
+	// the worst possible moment to find out.
+	checkConfig := flag.Bool("check-config", false, "audit the config file and exit (non-zero on a dangling server reference)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(Version)
@@ -135,6 +140,10 @@ func main() {
 	}
 
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		if *checkConfig {
+			fmt.Fprintf(os.Stderr, "%s does not exist\n", configFile)
+			os.Exit(1)
+		}
 		if err := store.Save(); err != nil {
 			log.Fatalf("Failed to create default config: %v", err)
 		}
@@ -144,14 +153,30 @@ func main() {
 	// Two ways a config silently stops saying what it means, both reported here
 	// where the operator is still looking at the file: a key nobody reads (a
 	// typo, a key from a newer router) and a rule naming a server that is not
-	// defined (a rename, a delete by hand). Warnings, not a refusal — a router
-	// configured for yesterday must still boot.
-	if data, err := os.ReadFile(configFile); err == nil {
-		for _, key := range config.UnknownFields(data) {
-			log.Warnf("Config: unknown key %q — nothing reads it (a typo? it is ignored)", key)
+	// defined (a rename, a delete by hand). At startup both are warnings — a
+	// router configured for yesterday must still boot. Under -check-config the
+	// same two lists answer in the language a pipeline reads, and only the class
+	// that breaks requests is an exit code: refusing to deploy over a typo'd key
+	// would train people to ignore the exit code.
+	unknownKeys, danglingRefs := auditConfig(configFile, store)
+	if *checkConfig {
+		for _, key := range unknownKeys {
+			fmt.Printf("warning: unknown key %q (nothing reads it)\n", key)
 		}
+		for _, ref := range danglingRefs {
+			fmt.Printf("error: %s\n", ref)
+		}
+		fmt.Printf("%s: %d unknown key(s), %d dangling server reference(s)\n",
+			configFile, len(unknownKeys), len(danglingRefs))
+		if len(danglingRefs) > 0 {
+			os.Exit(1)
+		}
+		return
 	}
-	for _, ref := range store.AuditServerRefs() {
+	for _, key := range unknownKeys {
+		log.Warnf("Config: unknown key %q — nothing reads it (a typo? it is ignored)", key)
+	}
+	for _, ref := range danglingRefs {
 		log.Warnf("Config: %s — requests on it will fail until the server exists", ref)
 	}
 
@@ -328,6 +353,19 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+// auditConfig reports the two ways a config silently stops saying what it
+// means: a key nobody reads (a typo, a key written for a newer router), and a
+// rule naming a server the config does not define (a rename, a delete by hand).
+// The severities differ, so the two lists are returned apart: the first is a
+// warning the router boots past, the second fails every request the rule routes.
+func auditConfig(configFile string, store *config.Store) (unknownKeys, danglingRefs []string) {
+	if data, err := os.ReadFile(configFile); err == nil {
+		unknownKeys = config.UnknownFields(data)
+	}
+	danglingRefs = store.AuditServerRefs()
+	return unknownKeys, danglingRefs
 }
 
 // drainTimeout bounds the graceful-shutdown drain. 10s is the right answer for

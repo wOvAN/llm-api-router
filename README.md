@@ -15,6 +15,7 @@ A Go-based reverse proxy that routes LLM inference API requests between multiple
 - **Alerting webhook** — `settings.alerts.webhook` posts a JSON event when a backend goes down, comes back, or is put into its rate-limit cooldown (edge-triggered, deduped, fire-and-forget)
 - **Inbound rate limit + CORS** — opt-in `settings.inbound` (token bucket per client IP in front of `/v1/*`) and `settings.cors` (for browser clients), both off by default
 - **Web GUI** — configure servers and routing rules at runtime via a browser (embedded, rebuilt with `go build`)
+- **Admin write log** — every mutating admin write leaves one log line naming the peer address and what changed, so "who moved routing at 03:14" has an answer; the request body never rides into the log (it holds the backend `api_key`)
 - **Streaming support** — SSE streaming responses are relayed without buffering
 - **Metrics & analytics** — ring buffer of last 100 requests with aggregated summaries by model and server (TTFB, decode time, token throughput)
 - **Usage extraction** — parses token usage from OpenAI, Anthropic, and llama-server response formats (streaming and non-streaming)
@@ -120,6 +121,7 @@ The config is stored in `config.json` (path configurable via `CONFIG_FILE`). You
 - a streamed answer that goes silent for `proxy.StreamIdleTimeout` (default 5 min) is cancelled and reported to the client as a mid-stream error: the bound is a gap between tokens, not a total request timeout, so a long-thinking model is untouched
 - `settings.inbound` (`rps`, `burst`, `per_ip`) limits what clients may send the router (a JSON 429 with `X-RateLimit-*`), `settings.cors` (`enabled`, `origins`) answers cross-origin requests for browser clients; both off by default, and neither touches the admin console
 - Startup warns about config keys it does not read (a typo'd `colddown_time` is otherwise invisible) and about rules naming a server the config does not define; deleting such a server, or adding a rule naming one, is refused (`409`/`400` naming the rules/servers)
+- The same audit runs as a deploy-time validator: `./llm-api-router -check-config` prints every finding and exits `1` on a dangling server reference (an unread key stays a warning — the router boots past it). A missing `CONFIG_FILE` exits `1` rather than creating one
 - Fallback `target_model` empty → inherits the rule's primary `TargetModel`
 - `context_window` (on a rule, a fallback, or a jev candidate) declares the context size that member can fit; a request whose estimated prompt (`bytes/4`) exceeds it is routed past that member to one that declares room (`0`/absent = unguarded)
 
