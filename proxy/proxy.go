@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	xproxy "golang.org/x/net/proxy"
@@ -117,6 +118,20 @@ var KeepAliveIdle = 15 * time.Second
 // client retries seconds later (wasted work, cold-start restart). 0 disables
 // draining (legacy behavior: close upstream immediately).
 var UpstreamDrainTimeout = 10 * time.Minute
+
+// StreamIdleTimeout bounds how long a streamed (text/event-stream) response may
+// stay silent *between reads* before the router cancels it. The other two bounds
+// do not cover this: ResponseHeaderTimeout bounded a header wait that already
+// succeeded, and UpstreamDrainTimeout applies only after the client is gone. A
+// backend that sends headers, streams a piece, and then stops producing is a
+// wedged worker, and the stream would otherwise stay open forever — our own
+// heartbeats keep the client from noticing, so the router holds a connection and a
+// goroutine for a generation nobody is making. The bound is an idle gap, not a
+// total request timeout (LiteLLM's `stream_timeout`, olla's `ReadTimeout`): a JSON
+// answer that takes minutes to compute is a normal slow generation, and the
+// heartbeat path exists precisely for a backend that thinks for a long time.
+// A negative value disables it.
+var StreamIdleTimeout = 5 * time.Minute
 
 // WaitSignalIdle is the silence threshold after which StreamProxy injects a
 // "still waiting" SSE event into an SSE client stream. Long backend think
@@ -1505,7 +1520,12 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		detachedCtx, cancel = context.WithDeadline(detachedCtx, dl)
 		defer cancel()
 	}
-	proxyReq := req.Clone(detachedCtx)
+	// The stream watchdog cancels this (nothing else does), so a wedged backend
+	// ends the attempt instead of wedging it. It is a child of the detached
+	// context on purpose: the client leaving must never reach the backend here.
+	streamCtx, cancelStream := context.WithCancel(detachedCtx)
+	defer cancelStream()
+	proxyReq := req.Clone(streamCtx)
 	proxyReq.URL.Scheme = target.Scheme
 	proxyReq.URL.Host = target.Host
 	proxyReq.URL.Path = targetPath
@@ -1629,6 +1649,32 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	if ws != nil && isStream {
 		ws.Start()
 	}
+	// The stream watchdog. It arms for SSE only, and measures the gap between
+	// reads, so a backend that keeps producing tokens is never touched no matter
+	// how long the generation runs; the heartbeats it competes with are the answer
+	// to a backend that is merely slow to think.
+	var lastRead atomic.Int64
+	if isStream && StreamIdleTimeout > 0 {
+		lastRead.Store(time.Now().UnixNano())
+		interval := max(250*time.Millisecond, min(StreamIdleTimeout/4, 5*time.Second))
+		go func() {
+			tick := time.NewTicker(interval)
+			defer tick.Stop()
+			for {
+				select {
+				case <-streamCtx.Done():
+					return
+				case <-tick.C:
+					if time.Since(time.Unix(0, lastRead.Load())) > StreamIdleTimeout {
+						log.Warnf("[%s] upstream silent for %v mid-stream — cancelling the attempt",
+							req.URL.Path, StreamIdleTimeout)
+						cancelStream()
+						return
+					}
+				}
+			}
+		}()
+	}
 	// Non-SSE bodies (JSON, and the raw audio of TTS/STT streams) have no frames
 	// to split: framing them would hold bytes for a blank line that never
 	// arrives, turning a streamed clip into one delivery at stream end.
@@ -1652,6 +1698,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 			n, readErr = upstreamResp.Body.Read(buf)
 			if n > 0 {
 				chunk = buf[:n]
+				lastRead.Store(time.Now().UnixNano())
 			}
 		}
 		if chunk != nil {
