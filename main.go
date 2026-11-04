@@ -193,14 +193,36 @@ func main() {
 		log.Fatalf("Failed to load admin static files: %v", err)
 	}
 
+	// The client-facing edge, wrapped outside-in: CORS (a browser client reads the
+	// answer, then needs permission to read the routing headers) and the inbound
+	// rate limit (one runaway agent loop otherwise occupies the whole box).
+	// Mounted on the routed endpoints only: the admin GUI and /metrics keep their
+	// own story, and a limiter there is how an operator locks themselves out of
+	// the console during an incident. Both are nil (pass-through) by default.
+	settings := store.GetSettings()
+	var apiHandler http.Handler = http.HandlerFunc(apiRouter.Handle)
+	apiHandler = config.NewInboundLimiter(settings.Inbound).Middleware(apiHandler)
+	apiHandler = config.NewCORS(settings.CORS).Middleware(apiHandler)
+	if settings.Inbound.RPS > 0 {
+		scope := "shared"
+		if settings.Inbound.PerIP {
+			scope = "per client address"
+		}
+		log.Infof("Inbound rate limit: %.4g rps (burst %d, %s)", settings.Inbound.RPS,
+			max(settings.Inbound.Burst, 1), scope)
+	}
+	if len(settings.CORS.Origins) == 0 && settings.CORS.Enabled {
+		log.Warnf("CORS is enabled for ANY origin — set settings.cors.origins to name the ones you mean")
+	}
+
 	mux := http.NewServeMux()
 
 	mux.Handle("/readyz", &ready)
-	mux.HandleFunc("/v1/", apiRouter.Handle)
+	mux.Handle("/v1/", apiHandler)
 	// llama.cpp keeps its TTS route (and the STT alias) outside /v1 — route them
 	// like any other endpoint so audio traffic isn't 404'd at the mux.
-	mux.HandleFunc("/tts", apiRouter.Handle)
-	mux.HandleFunc("/audio/", apiRouter.Handle)
+	mux.Handle("/tts", apiHandler)
+	mux.Handle("/audio/", apiHandler)
 	mux.Handle("/admin/api/", tokenGuard(adminToken, adminHandler))
 
 	// Build version (exact pattern beats the /admin/api/ catch-all above).

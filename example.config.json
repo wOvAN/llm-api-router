@@ -166,6 +166,15 @@
       "models": [],
       "servers": []
     },
+    "inbound": {
+      "rps": 0,
+      "burst": 0,
+      "per_ip": true
+    },
+    "cors": {
+      "enabled": false,
+      "origins": ["http://localhost:3000"]
+    },
     "convert": {
       "max_tokens_default": 4096,
       "drop_params": false,

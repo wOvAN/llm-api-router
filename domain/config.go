@@ -28,6 +28,33 @@ type Settings struct {
 	Trace TraceSettings `json:"trace,omitempty"`
 
 	Convert ConvertSettings `json:"convert,omitempty"`
+
+	// Inbound bounds what clients may send the router (see config.InboundLimiter).
+	// RPS 0 (the default) is unlimited, so a config that never mentions it routes
+	// exactly as before.
+	Inbound InboundSettings `json:"inbound,omitempty"`
+
+	// CORS answers cross-origin requests for browser clients. Off by default:
+	// the router is an internal service, and a browser grant is a decision.
+	CORS COSSettings `json:"cors,omitempty"`
+}
+
+// InboundSettings is the client-facing rate limit: RPS sustained requests per
+// key, Burst the bucket size (0 = ceil(RPS)), PerIP a bucket per client address
+// instead of one shared for the deployment.
+type InboundSettings struct {
+	RPS   float64 `json:"rps,omitempty"`
+	Burst int     `json:"burst,omitempty"`
+	PerIP bool    `json:"per_ip,omitempty"`
+}
+
+// COSSettings enables CORS for the routed endpoints. Origins empty = any origin
+// (the router echoes whatever it is asked); a list = only those origins are
+// echoed back. Credentials are never allowed, so the wildcard is not the
+// ambient-authority footgun it usually is.
+type COSSettings struct {
+	Enabled bool     `json:"enabled,omitempty"`
+	Origins []string `json:"origins,omitempty"`
 }
 
 // TraceSettings are the startup defaults for the on-demand request trace.

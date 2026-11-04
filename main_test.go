@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -303,5 +304,56 @@ func TestDrainTimeoutConfigurable(t *testing.T) {
 		if got := drainTimeout(); got != tc.want {
 			t.Errorf("DRAIN_TIMEOUT=%q → %v, want %v", tc.env, got, tc.want)
 		}
+	}
+}
+
+// The client-facing edge is where a browser client gets permission to read the
+// routing headers and where a runaway agent loop gets a 429 — so both middlewares
+// have to be on the path a request actually takes, and off the path the admin
+// console takes (a limiter there is how an operator locks themselves out of the
+// console during the incident they are logging into it to fix).
+func TestRoutedEndpointsCarryClientMiddlewares(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	source := string(src)
+	for _, route := range []string{`mux.Handle("/v1/", apiHandler)`, `mux.Handle("/tts", apiHandler)`, `mux.Handle("/audio/", apiHandler)`} {
+		if !strings.Contains(source, route) {
+			t.Errorf("main.go no longer routes %s through the wrapped handler", route)
+		}
+	}
+	for _, mw := range []string{"config.NewInboundLimiter(settings.Inbound).Middleware(apiHandler)",
+		"config.NewCORS(settings.CORS).Middleware(apiHandler)"} {
+		if !strings.Contains(source, mw) {
+			t.Errorf("main.go lost a client-edge middleware: %s", mw)
+		}
+	}
+	if strings.Contains(source, `tokenGuard(adminToken, apiHandler)`) {
+		t.Error("the admin console must not pass through the client rate limiter")
+	}
+}
+
+// Averages hide the tail, and the tail is what pages. The summary buckets the
+// Prometheus scrape already uses are what the GUI's percentile column reads.
+func TestGUIShowsLatencyPercentiles(t *testing.T) {
+	src, err := fs.ReadFile(staticFS, "admin/static/index.html")
+	if err != nil {
+		t.Fatalf("read embedded GUI: %v", err)
+	}
+	source := string(src)
+	for _, want := range []string{
+		"function percentile(buckets, q)",
+		"latency_ms_buckets",
+		"data-col=\"p95\"",
+		"${pcell}",
+	} {
+		if !strings.Contains(source, want) {
+			t.Errorf("the GUI lost %q", want)
+		}
+	}
+	// The bounds are a Go list; the GUI copy has to say where it came from.
+	if !strings.Contains(source, "domain.LatencyBucketsMs") {
+		t.Error("the GUI's bucket bounds lost their pointer to the Go list they mirror")
 	}
 }
