@@ -230,6 +230,22 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("X-Router-Request-Id", meta.requestID)
 	meta.class, meta.features = trace.Classify(req.URL.Path, req.Header.Get("Content-Type"), body)
 
+	// Anthropic clients ask what a prompt costs before sending it (Claude Code
+	// fires bursts of these to decide when to compact). The answer needs no
+	// generation, and most backends do not serve the endpoint at all — an
+	// OpenAI-only backend answers 404, which the client can only log — so the
+	// router answers with the same chars/4 estimate the context-window gate and
+	// the Jev state use, over the whole body (system prompt, every turn, the
+	// tool schemas: the material a real tokenizer would charge for). LiteLLM
+	// calls the provider's real count_tokens first; a stdlib-only router has no
+	// tokenizer, so the number is an estimate and X-Router-Count-Tokens says so.
+	if strings.Contains(req.URL.Path, "/count_tokens") {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Router-Count-Tokens", "estimate")
+		fmt.Fprintf(w, `{"input_tokens":%d}`, len(body)/4)
+		return
+	}
+
 	model, err := extractModel(body)
 	if err != nil {
 		// Endpoints with no JSON "model" field: audio uploads (OpenAI, llama.cpp,

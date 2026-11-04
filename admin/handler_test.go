@@ -792,3 +792,42 @@ func TestListServersReportsCooldown(t *testing.T) {
 		t.Errorf("cooldown_reason = %q, want the triggering status", got)
 	}
 }
+
+// A rule naming a server that does not exist answers 500 for every request on
+// its models, so the admin API refuses it the way it refuses a bad body.
+func TestAddRuleRejectsUnknownServer(t *testing.T) {
+	h, store, _ := newTestHandler(t)
+	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
+
+	body := strings.NewReader(`{"incoming_models":["gpt-4"],"target_model":"gpt-4","server_id":"s1","fallbacks":[{"server_id":"ghost"}],"enabled":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/rules", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want 400: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ghost") {
+		t.Errorf("body = %s, want it to name the missing server", w.Body.String())
+	}
+}
+
+// Deleting a server a rule depends on is the same breakage, one click away.
+func TestDeleteServerReportsReferencedServer(t *testing.T) {
+	h, store, _ := newTestHandler(t)
+	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
+	_ = store.AddRule(&domain.RoutingRule{IncomingModels: []string{"gpt-4"},
+		TargetModel: "gpt-4", ServerID: "s1", Enabled: true})
+
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/servers/s1", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("got status %d, want 409: %s", w.Code, w.Body.String())
+	}
+	if _, ok := store.GetServer("s1"); !ok {
+		t.Error("the server was deleted despite the refusal")
+	}
+}

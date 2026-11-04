@@ -49,6 +49,36 @@ type RoutingRule struct {
 // IsJev reports whether the rule routes via a decision model.
 func (r *RoutingRule) IsJev() bool { return r.Router == RouterJev && r.Jev != nil }
 
+// ServerRef is one backend a rule names, plus the role it plays there.
+type ServerRef struct {
+	ID   string
+	Role string
+}
+
+// ServerRefs lists every backend the rule names: its primary, its enabled
+// fallbacks, and for a jev rule the decision server and the candidate pool.
+// Routing reads these one at a time; the admin API and the startup audit read
+// them all, so a delete that would strand a rule can be refused and a
+// hand-edited config that names a dead server can be reported.
+func (r *RoutingRule) ServerRefs() []ServerRef {
+	refs := make([]ServerRef, 0, 1+len(r.Fallbacks))
+	if r.ServerID != "" {
+		refs = append(refs, ServerRef{ID: r.ServerID, Role: "primary server"})
+	}
+	for _, fb := range r.Fallbacks {
+		refs = append(refs, ServerRef{ID: fb.ServerID, Role: "fallback server"})
+	}
+	if r.Jev != nil {
+		if r.Jev.ServerID != "" {
+			refs = append(refs, ServerRef{ID: r.Jev.ServerID, Role: "jev decision server"})
+		}
+		for _, c := range r.Jev.Candidates {
+			refs = append(refs, ServerRef{ID: c.ServerID, Role: "jev candidate"})
+		}
+	}
+	return refs
+}
+
 // IsModelPattern reports whether an incoming-model entry is a wildcard pattern
 // (`gpt-*`, `claude-?`) rather than a model name. A pattern lets one rule own a
 // whole model family; the client's own name is then what the backend gets

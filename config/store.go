@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strings"
 	"sync"
 
 	"llm-api-router/domain"
@@ -294,8 +295,90 @@ func (s *Store) DeleteServer(id string) error {
 	if _, exists := s.config.Servers[id]; !exists {
 		return fmt.Errorf("server %q not found", id)
 	}
+	// A rule left naming a deleted server answers 500 for every request on its
+	// models, at request time, far from the delete that caused it.
+	if refs := s.references(id); len(refs) > 0 {
+		return fmt.Errorf("server %q is used by %s", id, strings.Join(refs, "; "))
+	}
 	delete(s.config.Servers, id)
 	return s.save()
+}
+
+// references lists the rules (in every profile, active or not) that name a
+// server. Caller must hold s.mu.
+func (s *Store) references(id string) []string {
+	var out []string
+	for _, p := range s.config.Profiles {
+		for _, rule := range p.Rules {
+			for _, ref := range rule.ServerRefs() {
+				if ref.ID == id {
+					out = append(out, fmt.Sprintf("rule %q in profile %q (%s)",
+						strings.Join(rule.IncomingModels, ", "), p.Name, ref.Role))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// ServerReferences lists the rules that name a server, across every profile.
+func (s *Store) ServerReferences(id string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.references(id)
+}
+
+// AuditServerRefs reports every rule that names a server the config does not
+// define — the shape a hand-edited config.json takes after a server is renamed.
+// Routing answers 500 for such a rule, so the operator hears about it at
+// startup instead of from a client.
+func (s *Store) AuditServerRefs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []string
+	for _, p := range s.config.Profiles {
+		for _, rule := range p.Rules {
+			for _, ref := range rule.ServerRefs() {
+				if _, ok := s.config.Servers[ref.ID]; !ok {
+					out = append(out, fmt.Sprintf("rule %q in profile %q names missing %s %q",
+						strings.Join(rule.IncomingModels, ", "), p.Name, ref.Role, ref.ID))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// RuleCount reports how many rules a profile holds (empty id = active profile) —
+// the admin API's bounds check before it refuses a rule on its contents.
+func (s *Store) RuleCount(profileID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p := s.resolveProfile(profileID)
+	if p == nil {
+		return 0
+	}
+	return len(p.Rules)
+}
+
+// MissingServers reports the server ids a rule names that the config does not
+// define — the admin API's answer to a rule written against a server that is not
+// there yet.
+func (s *Store) MissingServers(rule *domain.RoutingRule) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []string
+	for _, ref := range rule.ServerRefs() {
+		if ref.ID == "" {
+			continue
+		}
+		if _, ok := s.config.Servers[ref.ID]; !ok {
+			out = append(out, fmt.Sprintf("%s %q", ref.Role, ref.ID))
+		}
+	}
+	return out
 }
 
 // AddRule appends a new routing rule to the active profile.

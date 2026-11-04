@@ -138,6 +138,20 @@ func main() {
 		log.Infof("Created default config file: %s", configFile)
 	}
 
+	// Two ways a config silently stops saying what it means, both reported here
+	// where the operator is still looking at the file: a key nobody reads (a
+	// typo, a key from a newer router) and a rule naming a server that is not
+	// defined (a rename, a delete by hand). Warnings, not a refusal — a router
+	// configured for yesterday must still boot.
+	if data, err := os.ReadFile(configFile); err == nil {
+		for _, key := range config.UnknownFields(data) {
+			log.Warnf("Config: unknown key %q — nothing reads it (a typo? it is ignored)", key)
+		}
+	}
+	for _, ref := range store.AuditServerRefs() {
+		log.Warnf("Config: %s — requests on it will fail until the server exists", ref)
+	}
+
 	metricsStore := metrics.New(100)
 
 	healthTracker := config.NewHealthTracker(store, 30*time.Second)
@@ -255,7 +269,7 @@ func main() {
 		log.Infof("Shutting down...")
 		ready.SetDraining(true)
 		healthTracker.Stop()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), drainTimeout())
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Errorf("Server shutdown error: %v", err)
@@ -265,6 +279,7 @@ func main() {
 	log.Infof("LLM API Router %s starting on %s", Version, addr)
 	log.Infof("Admin GUI: http://localhost%s/admin", addr)
 	log.Infof("API routes: http://localhost%s/v1/*", addr)
+	log.Infof("Shutdown drain: %s (DRAIN_TIMEOUT)", drainTimeout())
 	if adminToken == "" {
 		log.Warnf("ADMIN_TOKEN is unset — the admin API (backend keys, routing config) and /metrics are unauthenticated")
 	}
@@ -272,4 +287,23 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+// drainTimeout bounds the graceful-shutdown drain. 10s is the right answer for
+// an API that answers in milliseconds and a footgun for one that generates for
+// five minutes: /readyz pulls the replica out of the pool the moment the signal
+// lands, so nothing new arrives during the drain and the only thing the bound
+// protects is a wedged connection. A deployment that streams long generations
+// wants minutes, not seconds.
+func drainTimeout() time.Duration {
+	v := os.Getenv("DRAIN_TIMEOUT")
+	if v == "" {
+		return 10 * time.Second
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Warnf("DRAIN_TIMEOUT=%q is not a duration (try 30s, 5m) — using 10s", v)
+		return 10 * time.Second
+	}
+	return d
 }

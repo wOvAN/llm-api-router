@@ -923,3 +923,99 @@ func TestModelNamesListLiterals(t *testing.T) {
 		t.Errorf("ModelNames() = %v, want [%s]", got, want)
 	}
 }
+
+// A rule that names a server which no longer exists routes every request on it
+// to a 500 "server not found" — at request time, far from the delete that
+// caused it. So the delete is the place to refuse: the operator gets the
+// answer while the cause is still on screen.
+func TestDeleteServerRefusesReferencedServer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	for _, s := range []*domain.Server{{ID: "s1", URL: "http://a"}, {ID: "s2", URL: "http://b"}} {
+		if err := store.AddServer(s); err != nil {
+			t.Fatalf("AddServer: %v", err)
+		}
+	}
+	if err := store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4"}, TargetModel: "gpt-4", ServerID: "s1",
+		Fallbacks: []domain.FallbackEntry{{ServerID: "s2"}}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	if err := store.DeleteServer("s2"); err == nil {
+		t.Fatal("a server named by a rule's fallbacks was deleted; its rule now 500s")
+	}
+	if _, ok := store.GetServer("s2"); !ok {
+		t.Error("the refused delete removed the server anyway")
+	}
+	if refs := store.ServerReferences("s2"); len(refs) != 1 || !strings.Contains(refs[0], "gpt-4") {
+		t.Errorf("ServerReferences(s2) = %v, want one reference naming the rule's models", refs)
+	}
+	if err := store.DeleteServer("s1"); err == nil {
+		t.Fatal("a server named as a rule's primary was deleted")
+	}
+}
+
+// A hand-edited config.json (the other way a dangling reference arrives) gets
+// the same report, at startup, as a warning: booting a router that answers 500
+// for one model is not a reason to refuse to boot.
+func TestAuditServerRefsNamesDanglingReferences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.AddServer(&domain.Server{ID: "s1", URL: "http://a"}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"gpt-4", "o3"}, TargetModel: "gpt-4", ServerID: "s1",
+		Fallbacks: []domain.FallbackEntry{{ServerID: "ghost"}}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	got := store.AuditServerRefs()
+	if len(got) != 1 || !strings.Contains(got[0], "ghost") || !strings.Contains(got[0], "o3") {
+		t.Fatalf("AuditServerRefs() = %v, want one line naming the ghost server and the rule", got)
+	}
+}
+
+// A typo in a key is otherwise invisible: the field is dropped on the floor and
+// the operator spends the afternoon wondering why cooldown_time "does nothing".
+func TestUnknownFieldsReportsTypos(t *testing.T) {
+	data := []byte(`{
+	  "servers": {"s1": {"id":"s1","url":"http://a","colddown_time":120}},
+	  "profiles": [{"id":"default","name":"default","rules":[
+	    {"incoming_models":["gpt-4"],"server_id":"s1","target_model":"gpt-4","context_windw":128000,"enabled":true}]}],
+	  "active_profile_id": "default",
+	  "settings": {"convert": {"max_tokens_defalt": 4096}}
+	}`)
+	got := UnknownFields(data)
+	want := map[string]bool{"colddown_time": true, "context_windw": true, "max_tokens_defalt": true}
+	if len(got) != len(want) {
+		t.Fatalf("UnknownFields() = %v, want the three typos %v", got, want)
+	}
+	for _, k := range got {
+		if !want[k] {
+			t.Errorf("UnknownFields() reported %q, which is not a typo in this config", k)
+		}
+	}
+
+	if extra := UnknownFields(mustReadExample(t)); len(extra) != 0 {
+		t.Errorf("the reference config carries unknown keys %v", extra)
+	}
+}
+
+func mustReadExample(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "example.config.json"))
+	if err != nil {
+		t.Fatalf("read example.config.json: %v", err)
+	}
+	return data
+}

@@ -182,6 +182,12 @@ func (h *Handler) updateServer(w http.ResponseWriter, req *http.Request, id stri
 
 func (h *Handler) deleteServer(w http.ResponseWriter, req *http.Request, id string) {
 	if err := h.store.DeleteServer(id); err != nil {
+		// A referenced server is not "not found" — it is a delete that would
+		// strand rules, which is the operator's problem to resolve first.
+		if strings.Contains(err.Error(), "is used by") {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -338,6 +344,10 @@ func (h *Handler) addRule(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if err := h.validateRuleRefs(&rule); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := h.store.AddRuleToProfile(rulesProfileID(req), &rule); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
@@ -356,9 +366,18 @@ func (h *Handler) updateRule(w http.ResponseWriter, req *http.Request, idxStr st
 		return
 	}
 
+	if idx < 0 || idx >= h.store.RuleCount(rulesProfileID(req)) {
+		writeError(w, http.StatusNotFound, "rule index out of range")
+		return
+	}
+
 	var rule domain.RoutingRule
 	if err := json.NewDecoder(req.Body).Decode(&rule); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if err := h.validateRuleRefs(&rule); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := h.store.UpdateRuleInProfile(rulesProfileID(req), idx, &rule); err != nil {
@@ -366,6 +385,16 @@ func (h *Handler) updateRule(w http.ResponseWriter, req *http.Request, idxStr st
 		return
 	}
 	writeJSON(w, http.StatusOK, rule)
+}
+
+// validateRuleRefs refuses a rule that names a server the config does not
+// define: every request on its models would answer 500 "server not found", far
+// from the click that created it.
+func (h *Handler) validateRuleRefs(rule *domain.RoutingRule) error {
+	if missing := h.store.MissingServers(rule); len(missing) > 0 {
+		return fmt.Errorf("rule names undefined servers: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func (h *Handler) deleteRule(w http.ResponseWriter, req *http.Request, idxStr string) {

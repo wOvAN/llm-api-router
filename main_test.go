@@ -284,3 +284,24 @@ func TestAllAdminRoutesAreGuarded(t *testing.T) {
 		t.Fatalf("found %d admin routes in main.go — the file no longer wires them the way this test reads it", routed)
 	}
 }
+
+// The drain bound has to fit the traffic: 10s is right for an API that answers
+// in milliseconds and cuts a five-minute generation in half. /readyz already
+// pulls the replica out of the pool the moment the signal lands, so the drain is
+// free to be generous — it just has to be the operator's call.
+func TestDrainTimeoutConfigurable(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want time.Duration
+	}{
+		{"", 10 * time.Second},
+		{"5m", 5 * time.Minute},
+		{"0s", 0},
+		{"nonsense", 10 * time.Second},
+	} {
+		t.Setenv("DRAIN_TIMEOUT", tc.env)
+		if got := drainTimeout(); got != tc.want {
+			t.Errorf("DRAIN_TIMEOUT=%q → %v, want %v", tc.env, got, tc.want)
+		}
+	}
+}
