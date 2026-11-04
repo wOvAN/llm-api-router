@@ -232,6 +232,21 @@ func TestReadinessReportsDrain(t *testing.T) {
 // and for how long — lives in memory and is visible in the GUI. A Prometheus
 // scrape has to see it too, or the alerting layer is blind to exactly the state
 // that decides where traffic goes.
+// The metrics view has to show what the client-facing rate limit shed: those
+// requests reach no backend, so they appear in no per-model table, and an
+// operator with a stalled agent loop sees an idle router.
+func TestGUIShowsInboundDenials(t *testing.T) {
+	src := guiSource(t)
+	for _, want := range []string{
+		`id="inbound-denied"`,
+		`data.inbound_denied`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("the metrics tab is missing %s", want)
+		}
+	}
+}
+
 func TestServerStateMetricsRendersHealth(t *testing.T) {
 	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {
@@ -250,10 +265,16 @@ func TestServerStateMetricsRendersHealth(t *testing.T) {
 	rl := config.NewRateLimiter(5, time.Minute, 5*time.Minute)
 	rl.RecordFailure("s1", http.StatusTooManyRequests, 30*time.Second)
 
-	out := serverStateMetrics(health, rl, store.GetConfig().Servers)
+	limiter := config.NewInboundLimiter(domain.InboundSettings{RPS: 1, Burst: 1})
+	for range 3 {
+		limiter.Allow("1.2.3.4") // one fits, two are shed
+	}
+
+	out := serverStateMetrics(health, rl, store.GetConfig().Servers, limiter.Denied())
 	for _, want := range []string{
 		`llm_router_server_healthy{server="s1"} 1`,
 		`llm_router_server_healthy{server="s2"} 0`,
+		`llm_router_inbound_denied_total 2`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -352,8 +373,8 @@ func TestRoutedEndpointsCarryClientMiddlewares(t *testing.T) {
 			t.Errorf("main.go no longer routes %s through the wrapped handler", route)
 		}
 	}
-	for _, mw := range []string{"config.NewInboundLimiter(s.Inbound).Middleware(h)",
-		"config.NewCORS(s.CORS).Middleware(h)"} {
+	for _, mw := range []string{"e.limiter = config.NewInboundLimiter(s.Inbound)",
+		"h = e.limiter.Middleware(h)", "h = config.NewCORS(s.CORS).Middleware(h)"} {
 		if !strings.Contains(source, mw) {
 			t.Errorf("main.go lost a client-edge middleware: %s", mw)
 		}

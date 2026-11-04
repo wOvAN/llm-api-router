@@ -49,7 +49,7 @@ func (rs *readyState) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 // rate-limit cooldown — as Prometheus gauges. The GUI shows both; a scrape has to
 // see them too, or alerting is blind to the exact state that moves traffic.
 func serverStateMetrics(health *config.HealthTracker, rl *config.RateLimiter,
-	servers map[string]*domain.Server) string {
+	servers map[string]*domain.Server, inboundDenied int64) string {
 	var sb strings.Builder
 	sb.WriteString("# HELP llm_router_server_healthy Server marked healthy by the health tracker (1) or not (0).\n")
 	sb.WriteString("# TYPE llm_router_server_healthy gauge\n")
@@ -73,6 +73,9 @@ func serverStateMetrics(health *config.HealthTracker, rl *config.RateLimiter,
 				strconv.Itoa(int(d.Round(time.Second).Seconds())) + "\n")
 		}
 	}
+	sb.WriteString("# HELP llm_router_inbound_denied_total Requests the inbound rate limit turned away.\n")
+	sb.WriteString("# TYPE llm_router_inbound_denied_total counter\n")
+	sb.WriteString("llm_router_inbound_denied_total " + strconv.FormatInt(inboundDenied, 10) + "\n")
 	return sb.String()
 }
 
@@ -195,6 +198,10 @@ func main() {
 	adminHandler := admin.NewHandler(store, metricsStore, healthTracker, traceStore)
 	// The GUI reports which servers are in their rate-limit cooldown, and why.
 	adminHandler.SetRateLimiter(rateLimiter)
+	// The metrics view reports what the client-facing limit shed. Read through the
+	// edge, not the limiter it built at startup: a reload rebuilds the chain, and a
+	// captured limiter would freeze the counter at the object it replaced.
+	adminHandler.SetInboundLimiter(apiHandler.Denied)
 	// A reload changes the settings the client edge is built from and the ones the
 	// probe and the failure tracker read, so all of them move together.
 	adminHandler.SetOnReload(func() {
@@ -256,7 +263,7 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		out := metricsStore.PrometheusMetrics() +
-			serverStateMetrics(healthTracker, rateLimiter, store.GetConfig().Servers)
+			serverStateMetrics(healthTracker, rateLimiter, store.GetConfig().Servers, apiHandler.Denied())
 		if _, err := w.Write([]byte(out)); err != nil {
 			log.Errorf("[%s] failed to write metrics response: %v", req.URL.Path, err)
 		}
@@ -354,9 +361,10 @@ func applyRuntimeSettings(store *config.Store, health *config.HealthTracker, lim
 // two are the only chain assembled at startup, so the chain itself is what has to
 // be swappable.
 type clientEdge struct {
-	store *config.Store
-	inner http.Handler
-	next  atomic.Pointer[http.Handler]
+	store   *config.Store
+	inner   http.Handler
+	next    atomic.Pointer[http.Handler]
+	limiter *config.InboundLimiter // kept for its denial counter (see Denied)
 }
 
 func newClientEdge(store *config.Store, inner http.Handler) *clientEdge {
@@ -365,11 +373,19 @@ func newClientEdge(store *config.Store, inner http.Handler) *clientEdge {
 	return e
 }
 
+// Denied reports how many requests the inbound rate limit has turned away (0
+// when the limit is off). Shedding traffic has to reach the operator, not only
+// the client that got the 429.
+func (e *clientEdge) Denied() int64 {
+	return e.limiter.Denied()
+}
+
 // Rebuild assembles the chain from the settings the store holds right now.
 func (e *clientEdge) Rebuild() {
 	s := e.store.GetSettings()
 	h := e.inner
-	h = config.NewInboundLimiter(s.Inbound).Middleware(h)
+	e.limiter = config.NewInboundLimiter(s.Inbound)
+	h = e.limiter.Middleware(h)
 	h = config.NewCORS(s.CORS).Middleware(h)
 	e.next.Store(&h)
 }

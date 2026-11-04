@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"llm-api-router/domain"
@@ -22,11 +23,12 @@ const inboundSweepAt = 4096
 // is a full outage: every slot, every request, forever. Denied requests answer
 // 429 with the headers a client already reads.
 type InboundLimiter struct {
-	mu    sync.Mutex
-	rps   float64
-	burst float64
-	perIP bool
-	keys  map[string]*inboundBucket
+	mu     sync.Mutex
+	rps    float64
+	burst  float64
+	perIP  bool
+	keys   map[string]*inboundBucket
+	denied atomic.Int64 // requests the bucket turned away (see Denied)
 }
 
 type inboundBucket struct {
@@ -48,6 +50,17 @@ func NewInboundLimiter(s domain.InboundSettings) *InboundLimiter {
 		burst = math.Ceil(s.RPS)
 	}
 	return &InboundLimiter{rps: s.RPS, burst: burst, perIP: s.PerIP, keys: map[string]*inboundBucket{}}
+}
+
+// Denied reports how many requests the bucket has turned away since the process
+// started. Shedding traffic is invisible to the operator otherwise: the client
+// that got the 429 reads the headers, and the person watching the box sees a
+// router with plenty of free GPU and no explanation.
+func (l *InboundLimiter) Denied() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.denied.Load()
 }
 
 // Allow spends one token for a key ("" = the shared bucket). Denied requests
@@ -74,6 +87,7 @@ func (l *InboundLimiter) Allow(key string) (bool, time.Duration) {
 		b.tokens--
 		return true, 0
 	}
+	l.denied.Add(1)
 	return false, time.Duration(math.Ceil((1 - b.tokens) / l.rps * float64(time.Second)))
 }
 

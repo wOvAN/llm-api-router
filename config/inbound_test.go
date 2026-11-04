@@ -102,3 +102,21 @@ func TestInboundLimiterSharedKey(t *testing.T) {
 		t.Error("shared bucket: second request served")
 	}
 }
+
+// Shedding traffic has to be visible to the operator, not only to the client
+// that got the 429: a limiter that fires in silence is indistinguishable from a
+// backend that is merely slow.
+func TestInboundLimiterCountsDenials(t *testing.T) {
+	l := NewInboundLimiter(domain.InboundSettings{RPS: 1, Burst: 2})
+	for range 5 {
+		l.Allow("1.2.3.4") // burst 2, so three of these are over budget
+	}
+	if got := l.Denied(); got != 3 {
+		t.Errorf("Denied() = %d, want 3 (allowed requests are not counted)", got)
+	}
+	l.Allow("1.2.3.4")
+	var nilLimiter *InboundLimiter
+	if got := nilLimiter.Denied(); got != 0 {
+		t.Errorf("Denied() on a disabled limiter = %d, want 0", got)
+	}
+}

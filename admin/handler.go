@@ -39,6 +39,9 @@ type Handler struct {
 	// middleware chain is assembled from settings once, so a reload has to
 	// rebuild it (main installs the hook).
 	onReload func()
+	// inboundDenied reports how many requests the client-facing rate limit has
+	// turned away (nil = no limiter installed).
+	inboundDenied func() int64
 }
 
 // NewHandler creates a new admin handler.
@@ -56,6 +59,14 @@ func (h *Handler) SetRateLimiter(rl *config.RateLimiter) {
 // SetOnReload installs the hook run after POST /admin/api/config/reload succeeds.
 func (h *Handler) SetOnReload(fn func()) {
 	h.onReload = fn
+}
+
+// SetInboundLimiter installs the client-facing rate limit's denial counter, so
+// the metrics view can show shedding that no routed request records. It is a
+// lookup, not the limiter itself: a config reload rebuilds the chain, and the
+// handler must read the limiter that exists now.
+func (h *Handler) SetInboundLimiter(denied func() int64) {
+	h.inboundDenied = denied
 }
 
 // ServeHTTP routes admin API requests.
@@ -516,10 +527,18 @@ func (h *Handler) reloadConfig(w http.ResponseWriter, req *http.Request) {
 func (h *Handler) getMetrics(w http.ResponseWriter, req *http.Request) {
 	summaries := h.metrics.Summaries()
 	active := h.metrics.ActiveRequests()
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"summaries":       summaries,
 		"active_requests": active,
-	})
+	}
+	// The inbound limit lives outside this handler (it is a client middleware, not
+	// a routed one), so its counter arrives as a lookup. An operator watching the
+	// GUI has to see shedding here: "the router is idle and my requests vanish" is
+	// otherwise indistinguishable from a sick backend.
+	if h.inboundDenied != nil {
+		payload["inbound_denied"] = h.inboundDenied()
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (h *Handler) getRecentRequests(w http.ResponseWriter, req *http.Request) {

@@ -905,3 +905,28 @@ func TestDeleteServerReportsReferencedServer(t *testing.T) {
 		t.Error("the server was deleted despite the refusal")
 	}
 }
+
+// The client-facing rate limit lives outside the routed path, so a request it
+// turns away appears in no per-model table. The metrics view has to say so, or
+// "the router is idle and my traffic vanishes" reads as a sick backend.
+func TestMetricsReportsInboundDenials(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	limiter := config.NewInboundLimiter(domain.InboundSettings{RPS: 1, Burst: 1})
+	for range 3 {
+		limiter.Allow("1.2.3.4") // one fits, two are shed
+	}
+	h.SetInboundLimiter(limiter.Denied)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/metrics", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var payload map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode metrics: %v — %s", err, w.Body.String())
+	}
+	if got, ok := payload["inbound_denied"]; !ok {
+		t.Fatalf("payload has no inbound_denied: %s", w.Body.String())
+	} else if n, _ := got.(float64); n == 0 {
+		t.Errorf("inbound_denied = %v, want the denials the limiter counted", got)
+	}
+}
