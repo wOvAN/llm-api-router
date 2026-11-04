@@ -119,22 +119,22 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   </div>
   <h2>Summary by Server</h2>
   <table>
-    <thead><tr><th class="sortable" data-table="sum-server" data-col="name">Server</th><th class="sortable" data-table="sum-server" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-server" data-col="success_count">OK</th><th class="sortable" data-table="sum-server" data-col="error_count">Errors</th><th class="sortable" data-table="sum-server" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-server" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-server" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-server" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-server" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-server" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-server" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-server" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-server" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-server" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-server" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-server" data-col="total_bytes">Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-server" data-col="name">Server</th><th class="sortable" data-table="sum-server" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-server" data-col="success_count">OK</th><th class="sortable" data-table="sum-server" data-col="error_count">Errors</th><th class="sortable" data-table="sum-server" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-server" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-server" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-server" data-col="p95" title="from the latency histogram buckets: median / 95th / 99th percentile">P50/P95/P99</th><th class="sortable" data-table="sum-server" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-server" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-server" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-server" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-server" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-server" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-server" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-server" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-server" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="server-metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Summary by Model</h2>
   <table>
-    <thead><tr><th class="sortable" data-table="sum-model" data-col="name">Model</th><th class="sortable" data-table="sum-model" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-model" data-col="success_count">OK</th><th class="sortable" data-table="sum-model" data-col="error_count">Errors</th><th class="sortable" data-table="sum-model" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-model" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-model" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-model" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-model" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-model" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-model" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-model" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-model" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-model" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-model" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-model" data-col="total_bytes">Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-model" data-col="name">Model</th><th class="sortable" data-table="sum-model" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-model" data-col="success_count">OK</th><th class="sortable" data-table="sum-model" data-col="error_count">Errors</th><th class="sortable" data-table="sum-model" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-model" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-model" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-model" data-col="p95" title="from the latency histogram buckets: median / 95th / 99th percentile">P50/P95/P99</th><th class="sortable" data-table="sum-model" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-model" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-model" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-model" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-model" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-model" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-model" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-model" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-model" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Summary by Target Model / Server</h2>
   <table>
-    <thead><tr><th class="sortable" data-table="sum-target" data-col="name">Target Model / Server</th><th class="sortable" data-table="sum-target" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-target" data-col="success_count">OK</th><th class="sortable" data-table="sum-target" data-col="error_count">Errors</th><th class="sortable" data-table="sum-target" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-target" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-target" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-target" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-target" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-target" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-target" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-target" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-target" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-target" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-target" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-target" data-col="total_bytes">Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-target" data-col="name">Target Model / Server</th><th class="sortable" data-table="sum-target" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-target" data-col="success_count">OK</th><th class="sortable" data-table="sum-target" data-col="error_count">Errors</th><th class="sortable" data-table="sum-target" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-target" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-target" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-target" data-col="p95" title="from the latency histogram buckets: median / 95th / 99th percentile">P50/P95/P99</th><th class="sortable" data-table="sum-target" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-target" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-target" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-target" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-target" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-target" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-target" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-target" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-target" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="target-metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Summary by Request Class</h2>
   <table>
-    <thead><tr><th class="sortable" data-table="sum-class" data-col="name">Class</th><th class="sortable" data-table="sum-class" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-class" data-col="success_count">OK</th><th class="sortable" data-table="sum-class" data-col="error_count">Errors</th><th class="sortable" data-table="sum-class" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-class" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-class" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-class" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-class" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-class" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-class" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-class" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-class" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-class" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-class" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-class" data-col="total_bytes">Bytes</th></tr></thead>
+    <thead><tr><th class="sortable" data-table="sum-class" data-col="name">Class</th><th class="sortable" data-table="sum-class" data-col="total_requests">Requests</th><th class="sortable" data-table="sum-class" data-col="success_count">OK</th><th class="sortable" data-table="sum-class" data-col="error_count">Errors</th><th class="sortable" data-table="sum-class" data-col="fallback_count">Fallbacks</th><th class="sortable" data-table="sum-class" data-col="avg_latency_ms">Avg Latency</th><th class="sortable" data-table="sum-class" data-col="min_max">Min/Max</th><th class="sortable" data-table="sum-class" data-col="p95" title="from the latency histogram buckets: median / 95th / 99th percentile">P50/P95/P99</th><th class="sortable" data-table="sum-class" data-col="avg_prefill_tok_per_sec">Prefill tok/s</th><th class="sortable" data-table="sum-class" data-col="avg_decode_tok_per_sec">Decode tok/s</th><th class="sortable" data-table="sum-class" data-col="total_prompt_tokens">P Tok</th><th class="sortable" data-table="sum-class" data-col="total_completion_tokens">C Tok</th><th class="sortable" data-table="sum-class" data-col="total_cached_tokens">Cached</th><th class="sortable" data-table="sum-class" data-col="cache_hit">Cache hit</th><th class="sortable" data-table="sum-class" data-col="total_reasoning_tokens">Reasoning</th><th class="sortable" data-table="sum-class" data-col="total_cache_creation_tokens">Cache New</th><th class="sortable" data-table="sum-class" data-col="total_bytes">Bytes</th></tr></thead>
     <tbody id="class-metrics-body"></tbody>
   </table>
   <h2 style="margin-top:20px;">Recent Requests</h2>
@@ -389,6 +389,7 @@ function sortData(data, col, dir) {
     else if (col === 'target_model') { va = a.target_model; vb = b.target_model; }
     else if (col === 'server_id') { va = a.server_id; vb = b.server_id; }
     else if (col === 'min_max') { va = a.min_latency_ms; vb = b.min_latency_ms; }
+    else if (col === 'p95') { va = percentile(a.latency_ms_buckets, 0.95); vb = percentile(b.latency_ms_buckets, 0.95); }
     else if (col === 'cache_hit') { va = cacheHitRatio(a); vb = cacheHitRatio(b); }
     else { va = a[col]; vb = b[col]; } // summary rows: flat summary JSON fields
     return sortCompare(va, vb) * (dir === 'desc' ? -1 : 1);
@@ -1376,7 +1377,7 @@ function getJevCandidates() {
 // --- Init ---
 // Restore sort state from cookies
 function restoreSortState() {
-  const summaryCols = ['name', 'total_requests', 'success_count', 'error_count', 'fallback_count', 'avg_latency_ms', 'min_max', 'avg_prefill_tok_per_sec', 'avg_decode_tok_per_sec', 'total_prompt_tokens', 'total_completion_tokens', 'total_cached_tokens', 'total_reasoning_tokens', 'total_cache_creation_tokens', 'total_bytes', 'cache_hit'];
+  const summaryCols = ['name', 'total_requests', 'success_count', 'error_count', 'fallback_count', 'avg_latency_ms', 'min_max', 'p95', 'avg_prefill_tok_per_sec', 'avg_decode_tok_per_sec', 'total_prompt_tokens', 'total_completion_tokens', 'total_cached_tokens', 'total_reasoning_tokens', 'total_cache_creation_tokens', 'total_bytes', 'cache_hit'];
   const tables = {
     servers: ['id', 'name', 'url', 'api_types'],
     rules: ['idx', 'enabled', 'incoming_models', 'target_model', 'server_id'],
@@ -1458,9 +1459,30 @@ function cacheHitRatio(s) {
   return denom > 0 ? 100 * (s.total_cached_tokens || 0) / denom : 0;
 }
 
+// LATENCY_BUCKETS_MS are the histogram upper bounds the backend aggregates over
+// (domain.LatencyBucketsMs — keep the two lists in step). The buckets are
+// cumulative counts, so a percentile is the first bound whose count reaches the
+// rank; the last bucket is +Inf and has no finite bound to quote.
+const LATENCY_BUCKETS_MS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000];
+
+function percentile(buckets, q) {
+  if (!buckets || !buckets.length) return 0;
+  const total = buckets[buckets.length - 1];
+  if (!total) return 0;
+  const rank = Math.ceil(q * total);
+  for (let i = 0; i < LATENCY_BUCKETS_MS.length; i++) {
+    if (buckets[i] >= rank) return LATENCY_BUCKETS_MS[i];
+  }
+  return 0; // the whole tail is past the last bound
+}
+
 function summaryRow(key, s) {
   const avgLat = s.avg_latency_ms ? s.avg_latency_ms.toFixed(0) + 'ms' : '-';
   const minMax = (s.min_latency_ms || s.max_latency_ms) ? s.min_latency_ms + 'ms / ' + s.max_latency_ms + 'ms' : '-';
+  // Averages hide the tail, which is the part that pages: the histogram the
+  // /metrics scrape already uses says where it actually lands.
+  const pcts = [0.5, 0.95, 0.99].map(q => percentile(s.latency_ms_buckets, q));
+  const pcell = pcts.some(v => v > 0) ? pcts.map(v => v || '>300s').join(' / ') : '-';
   const prefill = s.avg_prefill_tok_per_sec ? s.avg_prefill_tok_per_sec.toFixed(1) : '-';
   const decode = s.avg_decode_tok_per_sec ? s.avg_decode_tok_per_sec.toFixed(1) : '-';
   const promptTok = s.total_prompt_tokens || '-';
@@ -1482,6 +1504,7 @@ function summaryRow(key, s) {
     <td>${s.fallback_count}</td>
     <td>${avgLat}</td>
     <td>${minMax}</td>
+    <td>${pcell}</td>
     <td>${prefill}</td>
     <td>${decode}</td>
     <td>${promptTok}</td>
