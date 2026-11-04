@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -461,4 +462,42 @@ func TestRuntimeSettingsApplyFromConfig(t *testing.T) {
 	if !health.ProbeConfigured("/ready", 3*time.Second, 7*time.Second) {
 		t.Error("settings.health did not reach the tracker (path /ready, 3s probe, 7s interval)")
 	}
+}
+
+// settings.alerts.webhook has to reach both hook sites — a backend the health
+// probe lost, and a backend the failure tracker cooled down — and the wiring lives
+// in the same reload path as the other runtime knobs, so a reload can move it.
+func TestAlertsWebhookReachesBothTrackers(t *testing.T) {
+	var hits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+	}))
+	defer backend.Close()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"servers":{},"profiles":[{"id":"default","name":"default","rules":[]}],` +
+		`"active_profile_id":"default","settings":{"alerts":{"webhook":"` + backend.URL + `"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	health := config.NewHealthTracker(store, 30*time.Second, nil)
+	limiter := config.NewRateLimiter(5, time.Minute, 5*time.Minute)
+
+	applyRuntimeSettings(store, health, limiter)
+	health.MarkUnhealthy("s1") // no status entry yet: the down edge needs a known-healthy server
+	health.MarkHealthy("s1")
+	health.MarkUnhealthy("s1")
+	limiter.RecordFailure("s1", 429)
+
+	for range 20 {
+		if hits.Load() >= 2 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("webhook got %d POSTs, want the down event and the cooldown event", hits.Load())
 }

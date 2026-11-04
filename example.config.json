@@ -187,6 +187,9 @@
       "allowed_fails": 5,
       "cooldown_seconds": 300
     },
+    "alerts": {
+      "webhook": ""
+    },
     "convert": {
       "max_tokens_default": 4096,
       "drop_params": false,

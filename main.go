@@ -220,6 +220,11 @@ func main() {
 	if len(settings.CORS.Origins) == 0 && settings.CORS.Enabled {
 		log.Warnf("CORS is enabled for ANY origin — set settings.cors.origins to name the ones you mean")
 	}
+	// The URL itself stays out of the log: a Slack/Discord webhook is a secret
+	// anyone who can read the container logs would have.
+	if settings.Alerts.Webhook != "" {
+		log.Infof("Alerting webhook armed (settings.alerts.webhook): backend down/back and cooldown events are posted there")
+	}
 
 	mux := http.NewServeMux()
 
@@ -334,6 +339,11 @@ func applyRuntimeSettings(store *config.Store, health *config.HealthTracker, lim
 	health.SetInterval(time.Duration(s.Health.IntervalSeconds) * time.Second)
 	health.SetProbe(s.Health.Path, time.Duration(s.Health.TimeoutSeconds)*time.Second)
 	limiter.SetThresholds(s.Limiter.AllowedFails, time.Duration(s.Limiter.CooldownSeconds)*time.Second)
+	// A nil alerter (no webhook configured) is the silent case, so the install is
+	// unconditional: a reload that clears the webhook has to clear the hook too.
+	alerter := config.NewWebhookAlerter(s.Alerts.Webhook)
+	health.SetAlerter(alerter)
+	limiter.SetAlerter(alerter)
 }
 
 // clientEdge is the client-facing middleware chain, rebuilt on a config reload.

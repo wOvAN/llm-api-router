@@ -46,6 +46,18 @@ type Settings struct {
 
 	// Limiter tunes the failure tracker that cools a backend down.
 	Limiter LimiterSettings `json:"limiter,omitempty"`
+
+	// Alerts is the out-of-band notice for the events nobody is watching the GUI
+	// for: a backend going down, coming back, entering its cooldown. Webhook empty
+	// (the default) sends nothing, so a config that never mentions it is silent.
+	Alerts AlertSettings `json:"alerts,omitempty"`
+}
+
+// AlertSettings is the alerting webhook (LiteLLM's alert_to_webhook_url). Events
+// are edge-triggered and deduped per event text inside a minute, so a flapping
+// backend can not fill a channel.
+type AlertSettings struct {
+	Webhook string `json:"webhook,omitempty"`
 }
 
 // HealthSettings tunes the health probe. IntervalSeconds is how often the downed

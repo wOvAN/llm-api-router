@@ -49,6 +49,7 @@ type RateLimiter struct {
 	window      time.Duration                 // time window for counting failures
 	cooldownDur time.Duration                 // how long to skip the server
 	cooldownFor func(id string) time.Duration // optional per-server cooldown override (0 = global)
+	alerter     Alerter                       // cooldown starts leave the process here
 }
 
 // NewRateLimiter creates a rate limiter with the given parameters.
@@ -91,6 +92,18 @@ func (rl *RateLimiter) SetCooldownOverride(fn func(id string) time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	rl.cooldownFor = fn
+}
+
+// SetAlerter installs the out-of-band notice for cooldown starts (nil = none) —
+// the one router-side event an operator cannot see after the fact: the router
+// quietly stopped sending traffic to that backend.
+func (rl *RateLimiter) SetAlerter(a Alerter) {
+	if rl == nil {
+		return
+	}
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.alerter = a
 }
 
 // cooldownDuration returns the cooldown duration for a server (override or global).
@@ -202,6 +215,11 @@ func (rl *RateLimiter) RecordFailure(id string, status int, retryAfter ...time.D
 			rl.reason[id] = reason
 			log.Warnf("[ratelimit] %s put into cooldown (%s, %d in %v, cooldown %v)",
 				id, reason, count, rl.window, dur)
+			// Already edge-triggered: the branch above is reached only when the
+			// server was not already cooling down.
+			if rl.alerter != nil {
+				rl.alerter.Notify("server " + id + " cooling down (" + reason + ")")
+			}
 			return true
 		}
 	}

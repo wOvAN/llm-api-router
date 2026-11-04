@@ -20,6 +20,7 @@ type HealthTracker struct {
 	status    map[string]bool      // true = healthy
 	throttled map[string]time.Time // a 429 answer's Retry-After window: do not probe inside it
 	caps      *CapabilitiesCache   // the probe's /v1/models listing lands here
+	alerter   Alerter              // edge events (down/back) leave the process here
 	store     *Store
 	interval  time.Duration
 	timeout   time.Duration
@@ -82,6 +83,15 @@ func (t *HealthTracker) SetInterval(interval time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.interval = interval
+}
+
+// SetAlerter installs the out-of-band notice for health transitions (nil = none).
+// Installed separately from the constructor so a config reload can move the
+// webhook without rebuilding the tracker.
+func (t *HealthTracker) SetAlerter(a Alerter) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.alerter = a
 }
 
 // Start begins the background health checker.
@@ -259,19 +269,34 @@ func (t *HealthTracker) IsHealthy(id string) bool {
 // MarkHealthy marks a server as healthy.
 func (t *HealthTracker) MarkHealthy(id string) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	// A server the tracker has never seen (added through the admin API after
+	// Start()) has no status at all; it is not "back" from anything.
+	healthy, known := t.status[id]
+	wasDown := known && !healthy
 	t.status[id] = true
 	delete(t.throttled, id) // a success ends the throttle conversation
+	alerter := t.alerter
+	t.mu.Unlock()
+	// Edge-triggered: the router calls this on every successful request, so
+	// without the edge test a healthy backend alerts once per request.
+	if wasDown && alerter != nil {
+		alerter.Notify("server " + id + " is back")
+	}
 }
 
 // MarkUnhealthy marks a server as unhealthy.
 func (t *HealthTracker) MarkUnhealthy(id string) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.status[id] {
-		log.Warnf("[health] %s is down", id)
-	}
+	wasUp := t.status[id]
 	t.status[id] = false
+	alerter := t.alerter
+	t.mu.Unlock()
+	if wasUp {
+		log.Warnf("[health] %s is down", id)
+		if alerter != nil {
+			alerter.Notify("server " + id + " is down")
+		}
+	}
 }
 
 // GetStatus returns a copy of the current health status map.
