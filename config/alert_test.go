@@ -132,6 +132,29 @@ func TestWebhookAlerterPostsEachEvent(t *testing.T) {
 	}
 }
 
+// An unreachable webhook is the operator's most likely first encounter with
+// alerting (a typo'd URL), and the path is fire-and-forget by design — so it must
+// neither block the caller nor take the process down with it.
+func TestWebhookAlerterSurvivesAnUnreachableEndpoint(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := dead.URL
+	dead.Close()
+
+	a := NewWebhookAlerter(url)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 5 {
+			a.Notify("server s1 is down")
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Notify blocked on an unreachable webhook")
+	}
+}
+
 // No webhook configured means no alerts, and no nil dereference on the way.
 func TestNewWebhookAlerterIsEmptyWhenUnset(t *testing.T) {
 	if a := NewWebhookAlerter(""); a != nil {

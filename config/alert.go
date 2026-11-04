@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"llm-api-router/pkg/log"
 )
 
 // Alerter is the operator's out-of-band notice: one edge event (a backend went
@@ -65,8 +67,18 @@ func (a *webhookAlerter) Notify(event string) {
 	go func() {
 		resp, err := a.client.Post(a.url, "application/json", bytes.NewReader(body))
 		if err != nil {
+			// An alerting path must not touch the request path, so this is
+			// fire-and-forget — which is exactly why the failure has to reach the
+			// log: an operator who typo'd the webhook URL is otherwise silently
+			// alertless. The dedup window bounds the noise to one line per event
+			// per minute.
+			log.Warnf("[alerts] %s — the alert was lost (%v)", event, err)
 			return
 		}
 		_ = resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			log.Warnf("[alerts] %s — the webhook answered %s, so it likely never landed",
+				event, http.StatusText(resp.StatusCode))
+		}
 	}()
 }
