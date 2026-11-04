@@ -10,7 +10,9 @@ A Go-based reverse proxy that routes LLM inference API requests between multiple
 - **Model name remapping** — map incoming model names to different backend model names (e.g., `opus` → `haiku`)
 - **Fallback servers** — automatic failover when the primary is unavailable **or answers 429/5xx** (a backend that is throttled or dying serves nothing, so the next one is tried), with per-fallback model overrides
 - **Wildcard rules** — one rule can own a model family (`qwen3-*`); the client's own model name then rides to the backend untouched
-- **Pool balancing** — `balance: "round-robin"` shares traffic across a pool of interchangeable backends, weighted per member
+- **Pool balancing** — `balance: "round-robin"` shares traffic across a pool of interchangeable backends, weighted per member, with a conversation pinned to the member that served its first turn (a pool is N separate prompt caches)
+- **Local `count_tokens`** — `POST /v1/messages/count_tokens` is answered by the router (a `bytes/4` estimate over the whole body, tool schemas included), so a client that asks before sending pays no generation
+- **Inbound rate limit + CORS** — opt-in `settings.inbound` (token bucket per client IP in front of `/v1/*`) and `settings.cors` (for browser clients), both off by default
 - **Web GUI** — configure servers and routing rules at runtime via a browser (embedded, rebuilt with `go build`)
 - **Streaming support** — SSE streaming responses are relayed without buffering
 - **Metrics & analytics** — ring buffer of last 100 requests with aggregated summaries by model and server (TTFB, decode time, token throughput)
@@ -49,6 +51,7 @@ The server starts on port 8080 (configurable via `PORT`):
 |----------|---------|-------------|
 | `PORT` | `8080` | HTTP listen port |
 | `CONFIG_FILE` | `config.json` | Path to config file |
+| `DRAIN_TIMEOUT` | `10s` | Graceful-shutdown drain bound (Go duration; `0` = close immediately). Raise it for long generations |
 | `ADMIN_TOKEN` | *(unset)* | Bearer token required by `/admin/api/*` and `/metrics` (unset = both open; the GUI asks on its first 401) |
 
 ## Config File
@@ -110,7 +113,9 @@ The config is stored in `config.json` (path configurable via `CONFIG_FILE`). You
 - Base URL paths are deduplicated (e.g. `api.openai.com/v1` + `/v1/chat/completions` → `api.openai.com/v1/chat/completions`)
 - Rules are matched by an **exact** name first, then by the **most specific wildcard** (`path.Match` globs: `qwen3-*`, `claude-?`); disabled rules (`"enabled": false`) are silently skipped
 - A rule matched by a pattern has no single target: an **empty `target_model` is pass-through** — the client's model name is sent to the backend as-is (and `target_model` empty on an exact rule does the same)
-- `balance: "round-robin"` turns the rule's `server_id` + enabled `fallbacks` into one pool sharing traffic; `fallbacks[].weight` (default 1) is that member's share, ignored by a failover-only rule
+- `balance: "round-robin"` turns the rule's `server_id` + enabled `fallbacks` into one pool sharing traffic; `fallbacks[].weight` (default 1) is that member's share, ignored by a failover-only rule. A conversation (session header, else a fingerprint of its opening turn) sticks to the member that served its first turn for 30 min, so a multi-turn chat does not pay a cold prompt cache every turn
+- `settings.inbound` (`rps`, `burst`, `per_ip`) limits what clients may send the router (a JSON 429 with `X-RateLimit-*`), `settings.cors` (`enabled`, `origins`) answers cross-origin requests for browser clients; both off by default, and neither touches the admin console
+- Startup warns about config keys it does not read (a typo'd `colddown_time` is otherwise invisible) and about rules naming a server the config does not define; deleting such a server, or adding a rule naming one, is refused (`409`/`400` naming the rules/servers)
 - Fallback `target_model` empty → inherits the rule's primary `TargetModel`
 - `context_window` (on a rule, a fallback, or a jev candidate) declares the context size that member can fit; a request whose estimated prompt (`bytes/4`) exceeds it is routed past that member to one that declares room (`0`/absent = unguarded)
 
@@ -178,6 +183,7 @@ Metrics are kept in a ring buffer (last 100 requests) and aggregated by model an
 - Token counts (prompt, completion, cached)
 - Token throughput (prefill and decode tokens/sec)
 - Native llama-server timings override wall-clock when present
+- The Metrics tab renders `P50/P95/P99` per summary row, from the same latency histogram buckets
 - `GET /metrics` (Prometheus text format): the same figures per model / server / target model / request class, plus status-class counters, latency and TTFB **histograms** (so p95 is computable), and `llm_router_server_healthy` / `llm_router_server_cooldown_seconds` gauges
 - `GET /readyz` answers `ready`, or `503 draining` once shutdown started — a load balancer pulls a replica out of the pool before its drain cuts a generation short
 
