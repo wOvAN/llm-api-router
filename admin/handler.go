@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -47,6 +48,22 @@ type Handler struct {
 // NewHandler creates a new admin handler.
 func NewHandler(store *config.Store, m *metrics.Store, health *config.HealthTracker, tr *trace.Store) *Handler {
 	return &Handler{store: store, metrics: m, health: health, trace: tr}
+}
+
+// audit records a config-mutating admin write: who, from where, what changed.
+// The GUI edits the live config, which holds every backend api_key, and the
+// store keeps one generation of .bak — so without a log line "what changed
+// routing at 03:14" is unrecoverable once the file is rewritten, and a box more
+// than one person can reach has no answer for who did it. The actor is the peer
+// address, never X-Forwarded-For (the same stance as RequestMetric.ClientIP: a
+// header any client can write is no attribution), and the payload is never
+// logged — the server body is where the api_key lives.
+func (h *Handler) audit(req *http.Request, format string, args ...any) {
+	actor := req.RemoteAddr
+	if host, _, err := net.SplitHostPort(actor); err == nil {
+		actor = host
+	}
+	log.Infof("[admin] %s %s %s", actor, req.Method, fmt.Sprintf(format, args...))
 }
 
 // SetRateLimiter installs the rate limiter whose cooldown the server list
@@ -184,6 +201,7 @@ func (h *Handler) addServer(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	h.audit(req, "add server %s (%s)", srv.ID, srv.URL)
 	writeJSON(w, http.StatusCreated, srv)
 }
 
@@ -198,6 +216,7 @@ func (h *Handler) updateServer(w http.ResponseWriter, req *http.Request, id stri
 		return
 	}
 	srv.ID = id
+	h.audit(req, "update server %s", id)
 	writeJSON(w, http.StatusOK, srv)
 }
 
@@ -212,6 +231,7 @@ func (h *Handler) deleteServer(w http.ResponseWriter, req *http.Request, id stri
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	h.audit(req, "delete server %s", id)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -382,6 +402,7 @@ func (h *Handler) addRule(w http.ResponseWriter, req *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
+	h.audit(req, "add rule %s -> %s in profile %s", strings.Join(rule.IncomingModels, ","), rule.ServerID, pid)
 	writeJSON(w, http.StatusCreated, rule)
 }
 
@@ -410,6 +431,7 @@ func (h *Handler) updateRule(w http.ResponseWriter, req *http.Request, idxStr st
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	h.audit(req, "update rule #%d (%s) in profile %s", idx, strings.Join(rule.IncomingModels, ","), rulesProfileID(req))
 	writeJSON(w, http.StatusOK, rule)
 }
 
@@ -436,6 +458,7 @@ func (h *Handler) deleteRule(w http.ResponseWriter, req *http.Request, idxStr st
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	h.audit(req, "delete rule #%d in profile %s", idx, rulesProfileID(req))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -462,6 +485,7 @@ func (h *Handler) addProfile(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	h.audit(req, "add profile %q (id %s, copy_from_active=%t)", body.Name, id, body.CopyFromActive)
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "name": body.Name})
 }
 
@@ -481,6 +505,7 @@ func (h *Handler) renameProfile(w http.ResponseWriter, req *http.Request, id str
 		writeError(w, status, err.Error())
 		return
 	}
+	h.audit(req, "rename profile %s -> %q", id, body.Name)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "renamed"})
 }
 
@@ -493,6 +518,7 @@ func (h *Handler) deleteProfile(w http.ResponseWriter, req *http.Request, id str
 		writeError(w, status, err.Error())
 		return
 	}
+	h.audit(req, "delete profile %s", id)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -501,6 +527,7 @@ func (h *Handler) activateProfile(w http.ResponseWriter, req *http.Request, id s
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	h.audit(req, "activate profile %s", id)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "activated", "active_profile_id": id})
 }
 
@@ -519,6 +546,7 @@ func (h *Handler) reloadConfig(w http.ResponseWriter, req *http.Request) {
 	if h.onReload != nil {
 		h.onReload()
 	}
+	h.audit(req, "reload config from file")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 }
 
@@ -548,6 +576,7 @@ func (h *Handler) getRecentRequests(w http.ResponseWriter, req *http.Request) {
 
 func (h *Handler) resetMetrics(w http.ResponseWriter, req *http.Request) {
 	h.metrics.Reset()
+	h.audit(req, "reset metrics")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
 }
 
@@ -602,6 +631,10 @@ func (h *Handler) setTrace(w http.ResponseWriter, req *http.Request) {
 	} else {
 		h.trace.Stop()
 	}
+	// Prompt capture is the one admin toggle that turns a privacy trade-off on,
+	// so the switch itself belongs in the log.
+	h.audit(req, "trace capture %s (seconds=%d models=%v servers=%v)",
+		map[bool]string{true: "armed", false: "disarmed"}[body.Enabled], body.Seconds, body.Models, body.Servers)
 	writeJSON(w, http.StatusOK, h.trace.Window())
 }
 
@@ -609,5 +642,6 @@ func (h *Handler) setTrace(w http.ResponseWriter, req *http.Request) {
 // is not switching collection off).
 func (h *Handler) resetTrace(w http.ResponseWriter, req *http.Request) {
 	h.trace.Reset()
+	h.audit(req, "clear trace ring")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
 }

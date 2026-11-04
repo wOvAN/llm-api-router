@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"llm-api-router/config"
 	"llm-api-router/domain"
 	"llm-api-router/metrics"
+	"llm-api-router/pkg/log"
 	"llm-api-router/trace"
 )
 
@@ -928,5 +930,44 @@ func TestMetricsReportsInboundDenials(t *testing.T) {
 		t.Fatalf("payload has no inbound_denied: %s", w.Body.String())
 	} else if n, _ := got.(float64); n == 0 {
 		t.Errorf("inbound_denied = %v, want the denials the limiter counted", got)
+	}
+}
+
+// The config file holds every backend's api_key and the whole routing table, the
+// GUI edits it live, and the store keeps one generation of `.bak`. Without a log
+// line, "what changed routing at 03:14" is unrecoverable after a reload, and a
+// shared box has no answer for who did it.
+func TestAdminWritesAreLogged(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	var buf bytes.Buffer
+	prev := log.Default()
+	log.SetDefault(log.New(&buf, log.LevelInfo))
+	t.Cleanup(func() { log.SetDefault(prev) })
+
+	if err := h.store.AddServer(&domain.Server{ID: "s1", URL: "http://x"}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	body := `{"incoming_models":["gpt-4"],"target_model":"gpt-4","server_id":"s1","enabled":true}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/rules", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "203.0.113.9:5555"
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated && w.Code != http.StatusOK {
+		t.Fatalf("add rule: %d %s", w.Code, w.Body.String())
+	}
+	// A read must not spam the log.
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/rules", nil))
+
+	out := buf.String()
+	if !strings.Contains(out, "[admin]") || !strings.Contains(out, "203.0.113.9") {
+		t.Errorf("the write left no audit line naming the actor:\n%s", out)
+	}
+	if !strings.Contains(out, "rule") {
+		t.Errorf("the audit line does not say what changed:\n%s", out)
+	}
+	if strings.Count(out, "[admin]") != 1 {
+		t.Errorf("reads must not be audited, got:\n%s", out)
 	}
 }
