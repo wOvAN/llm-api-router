@@ -22,6 +22,8 @@ type HealthTracker struct {
 	caps      *CapabilitiesCache   // the probe's /v1/models listing lands here
 	store     *Store
 	interval  time.Duration
+	timeout   time.Duration
+	probePath string
 	stopCh    chan struct{}
 }
 
@@ -36,8 +38,50 @@ func NewHealthTracker(store *Store, interval time.Duration, caps *CapabilitiesCa
 		caps:      caps,
 		store:     store,
 		interval:  interval,
+		timeout:   healthProbeTimeout,
+		probePath: healthProbePath,
 		stopCh:    make(chan struct{}),
 	}
+}
+
+// Defaults for the probe, overridable through settings.health.
+const (
+	healthProbePath    = "/v1/models"
+	healthProbeTimeout = 5 * time.Second
+)
+
+// SetProbe tunes the probe's endpoint and per-request bound ("" / 0 keep the
+// defaults). Installed separately from the constructor so a config reload can move
+// it, and so a backend that does not serve /v1/models can be probed at the route
+// it does: a probe against a path the backend lacks reads as an outage.
+func (t *HealthTracker) SetProbe(path string, timeout time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if path != "" {
+		t.probePath = path
+	}
+	if timeout > 0 {
+		t.timeout = timeout
+	}
+}
+
+// ProbeConfigured reports the probe's current endpoint, per-request bound and
+// tick interval (a test's window on the three knobs settings.health tunes).
+func (t *HealthTracker) ProbeConfigured(path string, timeout, interval time.Duration) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.probePath == path && t.timeout == timeout && t.interval == interval
+}
+
+// SetInterval moves the probe interval (0 keeps it). The loop reads it each tick,
+// so a reload applies on the next one.
+func (t *HealthTracker) SetInterval(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.interval = interval
 }
 
 // Start begins the background health checker.
@@ -59,14 +103,17 @@ func (t *HealthTracker) Stop() {
 }
 
 func (t *HealthTracker) loop() {
-	ticker := time.NewTicker(t.interval)
-	defer ticker.Stop()
-
 	for {
+		// The interval is read every tick, so SetInterval applies without a
+		// restart (a ticker built at start would freeze the startup value).
+		t.mu.RLock()
+		interval := t.interval
+		t.mu.RUnlock()
+
 		select {
 		case <-t.stopCh:
 			return
-		case <-ticker.C:
+		case <-time.After(interval):
 			t.checkAll()
 		}
 	}
@@ -118,20 +165,29 @@ func (t *HealthTracker) forgetRemoved(cfg *domain.Config) {
 // URL override for OpenAI, scheme defaulted to https, /v1 suffix dedup'd
 // against the probe path.
 func ModelsURL(srv *domain.Server) string {
+	return probeURL(srv, healthProbePath)
+}
+
+// probeURL joins a server's base URL and a probe path, applying the /v1 dedup.
+func probeURL(srv *domain.Server, path string) string {
 	rawURL := srv.GetURLForAPIType(domain.APITypeOpenAI)
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "https://" + rawURL
 	}
-	u := strings.TrimRight(rawURL, "/") + "/v1/models"
+	u := strings.TrimRight(rawURL, "/") + path
 	return strings.ReplaceAll(u, "/v1/v1", "/v1")
 }
 
 // checkServer pings the server's /v1/models endpoint.
 func (t *HealthTracker) checkServer(srv *domain.Server) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.mu.RLock()
+	timeout, probePath := t.timeout, t.probePath
+	t.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ModelsURL(srv), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL(srv, probePath), nil)
 	if err != nil {
 		log.Debugf("[health] %s: failed to create probe request: %v", srv.Name, err)
 		return false

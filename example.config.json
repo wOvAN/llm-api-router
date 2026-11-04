@@ -178,6 +178,15 @@
     "routing": {
       "max_fallbacks": 5
     },
+    "health": {
+      "interval_seconds": 30,
+      "timeout_seconds": 5,
+      "path": "/v1/models"
+    },
+    "limiter": {
+      "allowed_fails": 5,
+      "cooldown_seconds": 300
+    },
     "convert": {
       "max_tokens_default": 4096,
       "drop_params": false,

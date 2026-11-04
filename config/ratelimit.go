@@ -66,6 +66,22 @@ func NewRateLimiter(maxFails int, window, cooldownDur time.Duration) *RateLimite
 	}
 }
 
+// SetThresholds moves the global failure threshold and cooldown duration (0 keeps
+// the current value), so an operator can keep a flaky-but-recovering backend in
+// rotation without a restart. A per-server cooldown_time still beats the global
+// cooldown, and a backend's Retry-After beats the global default.
+func (rl *RateLimiter) SetThresholds(maxFails int, cooldown time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if maxFails > 0 {
+		rl.maxFails = maxFails
+		rl.maxFails4xx = maxFails * 2
+	}
+	if cooldown > 0 {
+		rl.cooldownDur = cooldown
+	}
+}
+
 // SetCooldownOverride installs a lazy per-server cooldown duration lookup.
 // The function is called with a server ID and returns the cooldown duration
 // for that server; a non-positive value falls back to the global default.

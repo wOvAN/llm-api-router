@@ -156,7 +156,6 @@ func main() {
 
 	capsCache := config.NewCapabilitiesCache()
 	healthTracker := config.NewHealthTracker(store, 30*time.Second, capsCache)
-	healthTracker.Start()
 
 	// Rate limiter: skip server after 5 failures within 60s, cooldown for 5min.
 	// 429/401/403 cooldown immediately; per-server cooldown_time (seconds)
@@ -196,9 +195,14 @@ func main() {
 	adminHandler := admin.NewHandler(store, metricsStore, healthTracker, traceStore)
 	// The GUI reports which servers are in their rate-limit cooldown, and why.
 	adminHandler.SetRateLimiter(rateLimiter)
-	// A reload changes the settings the client edge is built from, so the edge is
-	// rebuilt with them.
-	adminHandler.SetOnReload(apiHandler.Rebuild)
+	// A reload changes the settings the client edge is built from and the ones the
+	// probe and the failure tracker read, so all of them move together.
+	adminHandler.SetOnReload(func() {
+		apiHandler.Rebuild()
+		applyRuntimeSettings(store, healthTracker, rateLimiter)
+	})
+	applyRuntimeSettings(store, healthTracker, rateLimiter)
+	healthTracker.Start()
 
 	adminStatic, err := fs.Sub(staticFS, "admin/static")
 	if err != nil {
@@ -320,6 +324,18 @@ func main() {
 // lands, so nothing new arrives during the drain and the only thing the bound
 // protects is a wedged connection. A deployment that streams long generations
 // wants minutes, not seconds.
+// applyRuntimeSettings moves the health probe and the failure tracker to the
+// settings the config holds now: a probe interval, a probe path, a failure
+// threshold and a cooldown are all things an operator tunes while the box is
+// running (a backend that does not serve /v1/models reads as an outage until the
+// path is fixed; a flaky-but-recovering GPU is why the threshold exists).
+func applyRuntimeSettings(store *config.Store, health *config.HealthTracker, limiter *config.RateLimiter) {
+	s := store.GetSettings()
+	health.SetInterval(time.Duration(s.Health.IntervalSeconds) * time.Second)
+	health.SetProbe(s.Health.Path, time.Duration(s.Health.TimeoutSeconds)*time.Second)
+	limiter.SetThresholds(s.Limiter.AllowedFails, time.Duration(s.Limiter.CooldownSeconds)*time.Second)
+}
+
 // clientEdge is the client-facing middleware chain, rebuilt on a config reload.
 // A middleware is built once from its settings, so mounting the built chain
 // freezes settings.inbound and settings.cors at their startup values: raising the

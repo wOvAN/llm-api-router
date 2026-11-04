@@ -430,3 +430,35 @@ func TestClientEdgeFollowsConfigReload(t *testing.T) {
 			"want the bucket's one token spent on the first request and the second denied", !first, !second)
 	}
 }
+
+// The probe and the failure tracker read their knobs from the config, at startup
+// and on every reload: a backend that does not serve /v1/models reads as an outage
+// until the path is fixed, and a flaky-but-recovering GPU is benched for the
+// router's default five minutes until the threshold is raised.
+func TestRuntimeSettingsApplyFromConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"servers":{},"profiles":[{"id":"default","name":"default","rules":[]}],` +
+		`"active_profile_id":"default","settings":{"health":{"interval_seconds":7,"timeout_seconds":3,` +
+		`"path":"/ready"},"limiter":{"allowed_fails":1,"cooldown_seconds":2}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	health := config.NewHealthTracker(store, 30*time.Second, nil)
+	limiter := config.NewRateLimiter(5, time.Minute, 5*time.Minute)
+
+	applyRuntimeSettings(store, health, limiter)
+
+	limiter.RecordFailure("s1", 500)
+	if _, _, ok := limiter.Cooldown("s1"); !ok {
+		t.Error("limiter.allowed_fails did not reach the tracker (1 failure must cool the server down)")
+	}
+	// The probe knobs are not observable without a backend, so assert on the one
+	// the tracker exposes: the interval moved off the 30s constructor value.
+	if !health.ProbeConfigured("/ready", 3*time.Second, 7*time.Second) {
+		t.Error("settings.health did not reach the tracker (path /ready, 3s probe, 7s interval)")
+	}
+}

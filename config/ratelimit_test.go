@@ -356,3 +356,24 @@ func TestRateLimiterCooldownOverrideBeatsRetryAfter(t *testing.T) {
 		t.Errorf("cooldown = %v, want the configured 40s to beat the 5s hint", d)
 	}
 }
+
+// The failure threshold and the cooldown are operator knobs (LiteLLM's
+// allowed_fails / cooldown_time): a flaky GPU that recovers in seconds should not
+// be benched for five minutes on the router's default.
+func TestRateLimiterThresholdsAreConfigurable(t *testing.T) {
+	rl := NewRateLimiter(5, time.Minute, 5*time.Minute)
+	rl.RecordFailure("s1", 500)
+	if _, _, ok := rl.Cooldown("s1"); ok {
+		t.Fatal("the default threshold (5) cooled the server down after one failure")
+	}
+
+	rl.SetThresholds(1, 2*time.Second)
+	rl.RecordFailure("s1", 500)
+	expiry, reason, ok := rl.Cooldown("s1")
+	if !ok {
+		t.Fatal("the configured threshold (1) did not cool the server down")
+	}
+	if left := time.Until(expiry); left <= 0 || left > 2*time.Second+50*time.Millisecond {
+		t.Errorf("cooldown = %v, want the configured 2s (reason %q)", left, reason)
+	}
+}

@@ -40,6 +40,31 @@ type Settings struct {
 
 	// Routing bounds the failover chain (see router.Handle).
 	Routing RoutingSettings `json:"routing,omitempty"`
+
+	// Health tunes the background probe of the backends.
+	Health HealthSettings `json:"health,omitempty"`
+
+	// Limiter tunes the failure tracker that cools a backend down.
+	Limiter LimiterSettings `json:"limiter,omitempty"`
+}
+
+// HealthSettings tunes the health probe. IntervalSeconds is how often the downed
+// servers are re-probed (0 = 30s); TimeoutSeconds bounds one probe (0 = 5s); Path
+// is the endpoint probed ("" = /v1/models — a backend that does not serve it, or
+// serves a richer readiness route, needs the override or it reads as an outage).
+type HealthSettings struct {
+	IntervalSeconds int    `json:"interval_seconds,omitempty"`
+	TimeoutSeconds  int    `json:"timeout_seconds,omitempty"`
+	Path            string `json:"path,omitempty"`
+}
+
+// LimiterSettings tunes the rate limiter. AllowedFails is how many failures in
+// the 60s window cool a backend down (0 = 5; other-4xx use 2x, as before), and
+// CooldownSeconds is that cooldown (0 = 5min). A per-server cooldown_time still
+// beats CooldownSeconds, and a backend's Retry-After beats the default.
+type LimiterSettings struct {
+	AllowedFails    int `json:"allowed_fails,omitempty"`
+	CooldownSeconds int `json:"cooldown_seconds,omitempty"`
 }
 
 // RoutingSettings bounds routing itself. MaxFallbacks caps how many fallback

@@ -159,3 +159,32 @@ func TestHealthProbeBacksOffAfter429(t *testing.T) {
 		t.Errorf("backend probed %d times within its Retry-After window, want 1", got)
 	}
 }
+
+// A backend that does not serve /v1/models is not an outage: the probe has to be
+// pointed at the readiness route it does serve, and the per-probe bound is the
+// same knob a slow-loading model needs.
+func TestHealthProbeEndpointIsConfigurable(t *testing.T) {
+	var seen []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.Path)
+		if r.URL.Path == "/ready" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer backend.Close()
+
+	tt := NewHealthTracker(newHealthStore(t, backend.URL), time.Hour, nil)
+	tt.MarkUnhealthy("s1")
+	tt.checkAll()
+	if tt.IsHealthy("s1") {
+		t.Fatal("the default probe path is /v1/models, which this backend 404s")
+	}
+
+	tt.SetProbe("/ready", 2*time.Second)
+	tt.checkAll()
+	if !tt.IsHealthy("s1") {
+		t.Errorf("the probe still probes %v, want the configured /ready", seen)
+	}
+}
