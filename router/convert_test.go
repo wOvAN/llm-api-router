@@ -33,7 +33,7 @@ func newRouterWithSettings(t *testing.T, configJSON string) (*Router, *config.St
 	}
 	ms := metrics.New(100)
 	ts := trace.New(100, domain.TraceSettings{})
-	return New(store, ms, nil, nil, nil, ts), store, ms, ts
+	return New(store, ms, nil, nil, nil, ts, nil), store, ms, ts
 }
 
 // A backend that declares nothing is byte-for-byte passthrough: the client's path
@@ -186,10 +186,10 @@ func TestHandleRefusalLeavesHealthClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	health := config.NewHealthTracker(store, time.Hour)
+	health := config.NewHealthTracker(store, time.Hour, nil)
 	rateLimit := config.NewRateLimiter(5, 60*time.Second, 5*time.Minute)
 	quota := config.NewQuotaTracker()
-	r := New(store, metrics.New(100), health, rateLimit, quota, trace.New(100, domain.TraceSettings{}))
+	r := New(store, metrics.New(100), health, rateLimit, quota, trace.New(100, domain.TraceSettings{}), nil)
 	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: backend.URL,
 		APITypes:  []domain.APIType{domain.APITypeOpenAI},
 		Protocols: []domain.ServerProtocol{{Path: "/v1/chat/completions"}}}); err != nil {

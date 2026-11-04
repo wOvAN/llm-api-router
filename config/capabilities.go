@@ -100,6 +100,19 @@ func (c *CapabilitiesCache) Audio(ctx context.Context, srv *domain.Server, model
 	return entry.audio[model], entry.audio[model]
 }
 
+// Observe records a /v1/models listing the caller already fetched (the health
+// probe fetches one every interval) as the server's capabilities.
+func (c *CapabilitiesCache) Observe(serverID string, body []byte) {
+	if c == nil || serverID == "" {
+		return
+	}
+	caps := parseCapabilities(body)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	caps.fetched = time.Now()
+	c.entries[serverID] = caps
+}
+
 func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapabilities {
 	out := serverCapabilities{vision: make(map[string]*bool), audio: make(map[string]bool)}
 
@@ -144,6 +157,12 @@ func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapa
 		log.Debugf("[capabilities] %s: read probe response: %v", srv.Name, err)
 		return out
 	}
+	return parseCapabilities(body)
+}
+
+// parseCapabilities reads a /v1/models listing into per-model capability facts.
+func parseCapabilities(body []byte) serverCapabilities {
+	out := serverCapabilities{vision: make(map[string]*bool), audio: make(map[string]bool)}
 
 	var payload struct {
 		Data []struct {
@@ -157,7 +176,7 @@ func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapa
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		log.Debugf("[capabilities] %s: parse probe response: %v", srv.Name, err)
+		log.Debugf("[capabilities] probe response is not a model listing: %v", err)
 		return out
 	}
 

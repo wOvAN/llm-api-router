@@ -397,10 +397,10 @@ func CapConvertNotes(notes []string) []string {
 	return notes
 }
 
-// parseRetryAfter reads a Retry-After header, which RFC 9110 allows in two
+// ParseRetryAfter reads a Retry-After header, which RFC 9110 allows in two
 // shapes: delta-seconds, or an HTTP-date to retry at. Absent, unparseable, or a
 // date already past is 0 (no hint) — the caller falls back to its own default.
-func parseRetryAfter(v string) time.Duration {
+func ParseRetryAfter(v string) time.Duration {
 	if v == "" {
 		return 0
 	}
@@ -448,7 +448,7 @@ func (m *metricsWriter) WriteHeader(code int) {
 	m.statusCode = code
 	m.contentType = m.ResponseWriter.Header().Get("Content-Type")
 	m.contentEncoding = m.ResponseWriter.Header().Get("Content-Encoding")
-	m.retryAfter = parseRetryAfter(m.ResponseWriter.Header().Get("Retry-After"))
+	m.retryAfter = ParseRetryAfter(m.ResponseWriter.Header().Get("Retry-After"))
 	if m.trace != nil {
 		// A compressed body is bytes: the relay forwards it as-is and only the
 		// metrics extractor decompresses it, so the trace stubs it (with size +
@@ -1574,7 +1574,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		if len(pre) <= peekLimit {
 			// The peek path never writes through mw, so mw.WriteHeader (which is
 			// where Retry-After is normally captured) never ran for this response.
-			mw.retryAfter = parseRetryAfter(upstreamResp.Header.Get("Retry-After"))
+			mw.retryAfter = ParseRetryAfter(upstreamResp.Header.Get("Retry-After"))
 			m := mw.metrics()
 			m.StatusCode = upstreamResp.StatusCode
 			if len(pre) > 4096 {

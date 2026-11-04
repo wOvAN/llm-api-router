@@ -213,7 +213,7 @@ func TestServerStateMetricsRendersHealth(t *testing.T) {
 			t.Fatalf("AddServer: %v", err)
 		}
 	}
-	health := config.NewHealthTracker(store, time.Hour)
+	health := config.NewHealthTracker(store, time.Hour, nil)
 	health.Start()
 	defer health.Stop()
 	health.MarkUnhealthy("s2")

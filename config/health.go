@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"io"
 	"maps"
 	"net/http"
 	"strings"
@@ -15,20 +16,27 @@ import (
 
 // HealthTracker tracks server health status with a background checker.
 type HealthTracker struct {
-	mu       sync.RWMutex
-	status   map[string]bool // true = healthy
-	store    *Store
-	interval time.Duration
-	stopCh   chan struct{}
+	mu        sync.RWMutex
+	status    map[string]bool      // true = healthy
+	throttled map[string]time.Time // a 429 answer's Retry-After window: do not probe inside it
+	caps      *CapabilitiesCache   // the probe's /v1/models listing lands here
+	store     *Store
+	interval  time.Duration
+	stopCh    chan struct{}
 }
 
-// NewHealthTracker creates a tracker with the given check interval.
-func NewHealthTracker(store *Store, interval time.Duration) *HealthTracker {
+// NewHealthTracker creates a tracker with the given check interval. caps (nil
+// allowed) is the capability cache the probe's /v1/models body feeds, so a
+// server's listing is refreshed by the probe that already happens instead of by
+// a second walk to the same URL.
+func NewHealthTracker(store *Store, interval time.Duration, caps *CapabilitiesCache) *HealthTracker {
 	return &HealthTracker{
-		status:   make(map[string]bool),
-		store:    store,
-		interval: interval,
-		stopCh:   make(chan struct{}),
+		status:    make(map[string]bool),
+		throttled: make(map[string]time.Time),
+		caps:      caps,
+		store:     store,
+		interval:  interval,
+		stopCh:    make(chan struct{}),
 	}
 }
 
@@ -67,17 +75,26 @@ func (t *HealthTracker) loop() {
 func (t *HealthTracker) checkAll() {
 	cfg := t.store.GetConfig()
 	for id, srv := range cfg.Servers {
-		t.mu.Lock()
-		if _, exists := t.status[id]; !exists {
-			t.status[id] = true
+		// A server the tracker has never probed starts healthy (the historical
+		// behavior: only a probe failure marks one down), and a healthy server is
+		// not re-probed — only the ones that are down are watched for recovery.
+		// (Start() marks every configured server healthy once, which is what
+		// gives a server added later through the admin API the same start.)
+		if t.IsHealthy(id) {
+			continue
 		}
-		t.mu.Unlock()
-		if !t.IsHealthy(id) {
-			// Server is marked unhealthy — check if it's back
-			if t.checkServer(srv) {
-				log.Infof("[health] %s is back", srv.Name)
-				t.MarkHealthy(id)
-			}
+		t.mu.RLock()
+		throttled := time.Now().Before(t.throttled[id])
+		t.mu.RUnlock()
+		if throttled {
+			// The backend asked not to be probed inside this window. Probing it
+			// every tick is how a health check becomes the reason it stays 429.
+			log.Debugf("[health] %s: inside its Retry-After window, probe skipped", srv.Name)
+			continue
+		}
+		if t.checkServer(srv) {
+			log.Infof("[health] %s is back", srv.Name)
+			t.MarkHealthy(id)
 		}
 	}
 }
@@ -120,20 +137,42 @@ func (t *HealthTracker) checkServer(srv *domain.Server) bool {
 		log.Debugf("[health] %s: probe failed: %v", srv.Name, err)
 		return false
 	}
-	if err := resp.Body.Close(); err != nil {
-		log.Warnf("[health] %s: failed to close probe response body: %v", srv.Name, err)
-	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Warnf("[health] %s: failed to close probe response body: %v", srv.Name, err)
+		}
+	}()
+
 	// An HTTP answer is not an outage. 401/403/429 say the backend is up and
 	// refusing us — a missing/expired api_key, a throttled probe endpoint — and
 	// the rate limiter reports that with the status as its reason, where the GUI
 	// can show it. Marking it down instead leaves a red "down" server that has
 	// been answering every probe all along.
 	switch resp.StatusCode {
-	case http.StatusOK, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
-		if resp.StatusCode != http.StatusOK {
-			log.Warnf("[health] %s is up but answers %s to the probe — check its api_key",
-				srv.Name, http.StatusText(resp.StatusCode))
+	case http.StatusOK:
+		// The probe has the model listing in hand; the capability cache walks to
+		// this same URL for the same payload, so it gets the answer here — and a
+		// server that just came back has just re-discovered its models.
+		if t.caps != nil {
+			if body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)); err == nil {
+				t.caps.Observe(srv.ID, body)
+			}
 		}
+		return true
+	case http.StatusTooManyRequests:
+		// The backend is throttling the probe. Obey it: probing on every tick is
+		// how a health check becomes the reason the server stays 429.
+		if d := proxy.ParseRetryAfter(resp.Header.Get("Retry-After")); d > 0 {
+			t.mu.Lock()
+			t.throttled[srv.ID] = time.Now().Add(d)
+			t.mu.Unlock()
+		}
+		log.Warnf("[health] %s is up but answers %s to the probe — check its api_key",
+			srv.Name, http.StatusText(resp.StatusCode))
+		return true
+	case http.StatusUnauthorized, http.StatusForbidden:
+		log.Warnf("[health] %s is up but answers %s to the probe — check its api_key",
+			srv.Name, http.StatusText(resp.StatusCode))
 		return true
 	}
 	return false
@@ -149,8 +188,9 @@ func (t *HealthTracker) IsHealthy(id string) bool {
 // MarkHealthy marks a server as healthy.
 func (t *HealthTracker) MarkHealthy(id string) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.status[id] = true
-	t.mu.Unlock()
+	delete(t.throttled, id) // a success ends the throttle conversation
 }
 
 // MarkUnhealthy marks a server as unhealthy.

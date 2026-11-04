@@ -314,6 +314,9 @@ func TestDeleteRuleOutOfRange(t *testing.T) {
 
 func TestListProfiles(t *testing.T) {
 	h, store, _ := newTestHandler(t)
+	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s2", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s3", URL: "http://localhost"})
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}
@@ -365,6 +368,9 @@ func TestAddProfile(t *testing.T) {
 
 func TestRenameProfile(t *testing.T) {
 	h, store, _ := newTestHandler(t)
+	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s2", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s3", URL: "http://localhost"})
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}
@@ -388,6 +394,9 @@ func TestRenameProfile(t *testing.T) {
 
 func TestDeleteProfile(t *testing.T) {
 	h, store, _ := newTestHandler(t)
+	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s2", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s3", URL: "http://localhost"})
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}
@@ -412,6 +421,9 @@ func TestDeleteProfile(t *testing.T) {
 
 func TestActivateProfile(t *testing.T) {
 	h, store, _ := newTestHandler(t)
+	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s2", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s3", URL: "http://localhost"})
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}
@@ -436,6 +448,9 @@ func TestActivateProfile(t *testing.T) {
 
 func TestRulesWithProfileID(t *testing.T) {
 	h, store, _ := newTestHandler(t)
+	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s2", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s3", URL: "http://localhost"})
 	if _, err := store.AddProfile("prod", false); err != nil {
 		t.Fatalf("AddProfile: %v", err)
 	}

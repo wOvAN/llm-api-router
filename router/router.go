@@ -46,9 +46,12 @@ type Router struct {
 
 // New creates a new Router.
 func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, rateLimit *config.RateLimiter,
-	quota *config.QuotaTracker, tr *trace.Store) *Router {
+	quota *config.QuotaTracker, tr *trace.Store, caps *config.CapabilitiesCache) *Router {
+	if caps == nil {
+		caps = config.NewCapabilitiesCache()
+	}
 	return &Router{store: store, metrics: m, health: health, rateLimit: rateLimit, quota: quota, trace: tr,
-		caps: config.NewCapabilitiesCache(), jevCache: map[string]jevCacheEntry{},
+		caps: caps, jevCache: map[string]jevCacheEntry{},
 		jevSticky: map[string]jevStickyEntry{}, pins: map[string]stickyPin{}}
 }
 
@@ -242,7 +245,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	if strings.Contains(req.URL.Path, "/count_tokens") {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Router-Count-Tokens", "estimate")
-		fmt.Fprintf(w, `{"input_tokens":%d}`, len(body)/4)
+		_, _ = fmt.Fprintf(w, `{"input_tokens":%d}`, len(body)/4)
 		return
 	}
 

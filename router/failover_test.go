@@ -36,7 +36,7 @@ func TestHandleUpstream429FailsOverAtOnce(t *testing.T) {
 
 	r, store, ms, _ := newTestRouter(t)
 	rl := config.NewRateLimiter(5, 60*time.Second, 5*time.Minute)
-	r = New(store, r.metrics, nil, rl, nil, nil)
+	r = New(store, r.metrics, nil, rl, nil, nil, nil)
 
 	for _, s := range []*domain.Server{
 		{ID: "primary", Name: "Primary", URL: primary.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}},

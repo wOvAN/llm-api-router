@@ -38,8 +38,8 @@ func newHealthRouter(t *testing.T) (*Router, *config.Store, *config.HealthTracke
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	health := config.NewHealthTracker(store, time.Hour)
-	return New(store, metrics.New(100), health, nil, nil, trace.New(100, domain.TraceSettings{})), store, health
+	health := config.NewHealthTracker(store, time.Hour, nil)
+	return New(store, metrics.New(100), health, nil, nil, trace.New(100, domain.TraceSettings{}), nil), store, health
 }
 
 func chatOK(w http.ResponseWriter) {

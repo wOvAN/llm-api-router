@@ -35,7 +35,7 @@ func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store, *trace
 	}
 	ms := metrics.New(100)
 	ts := trace.New(100, domain.TraceSettings{})
-	return New(store, ms, nil, nil, nil, ts), store, ms, ts
+	return New(store, ms, nil, nil, nil, ts, nil), store, ms, ts
 }
 
 // addTestRoute wires one incoming model to one backend, with no retries: a
@@ -1013,7 +1013,7 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 	// 2. NOT mark server unhealthy
 	// 3. NOT record metrics (request was aborted, not completed)
 	_, store, ms, _ := newTestRouter(t)
-	health := config.NewHealthTracker(store, 0) // no auto-check
+	health := config.NewHealthTracker(store, 0, nil) // no auto-check
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "primary",
@@ -1038,7 +1038,7 @@ func TestHandleClientDisconnectNoFallback(t *testing.T) {
 	})
 
 	// Create router with health tracker
-	r := New(store, ms, health, nil, nil, nil)
+	r := New(store, ms, health, nil, nil, nil, nil)
 
 	// Simulate client disconnect by cancelling context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1701,7 +1701,7 @@ func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
 
 	// Build a router with a real rate limiter (newTestRouter passes nil).
 	rl := config.NewRateLimiter(5, 60*time.Second, 5*time.Minute)
-	r = New(store, r.metrics, nil, rl, nil, nil)
+	r = New(store, r.metrics, nil, rl, nil, nil, nil)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "primary",
@@ -1793,7 +1793,7 @@ func TestQuotaTPMBlocksRoutesToFallback(t *testing.T) {
 		}
 		return 0, 0
 	})
-	r = New(store, r.metrics, nil, nil, q, nil)
+	r = New(store, r.metrics, nil, nil, q, nil, nil)
 
 	_ = store.AddServer(&domain.Server{
 		ID:       "primary",

@@ -154,7 +154,8 @@ func main() {
 
 	metricsStore := metrics.New(100)
 
-	healthTracker := config.NewHealthTracker(store, 30*time.Second)
+	capsCache := config.NewCapabilitiesCache()
+	healthTracker := config.NewHealthTracker(store, 30*time.Second, capsCache)
 	healthTracker.Start()
 
 	// Rate limiter: skip server after 5 failures within 60s, cooldown for 5min.
@@ -182,7 +183,7 @@ func main() {
 	// persisted, so a restart can not leave prompt capture switched on).
 	traceStore := trace.New(100, store.GetSettings().Trace)
 
-	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter, quotaTracker, traceStore)
+	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter, quotaTracker, traceStore, capsCache)
 	adminHandler := admin.NewHandler(store, metricsStore, healthTracker, traceStore)
 	// The GUI reports which servers are in their rate-limit cooldown, and why.
 	adminHandler.SetRateLimiter(rateLimiter)

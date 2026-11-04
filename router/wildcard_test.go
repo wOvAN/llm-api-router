@@ -65,8 +65,8 @@ func TestListModelsSkipsPatternsAndReportsHealth(t *testing.T) {
 	defer backend.Close()
 
 	r, store, _, _ := newTestRouter(t)
-	health := config.NewHealthTracker(store, time.Hour)
-	r = New(store, r.metrics, health, nil, nil, nil)
+	health := config.NewHealthTracker(store, time.Hour, nil)
+	r = New(store, r.metrics, health, nil, nil, nil, nil)
 
 	if err := store.AddServer(&domain.Server{ID: "s1", Name: "s1", URL: backend.URL,
 		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
