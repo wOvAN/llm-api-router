@@ -27,7 +27,8 @@
       "protocols": [{ "path": "/v1/chat/completions" }, { "path": "/v1/messages" }],
       "cooldown_time": 120,
       "tpm_limit": 100000,
-      "rpm_limit": 60
+      "rpm_limit": 60,
+      "max_parallel_requests": 4
     },
     "local-audio": {
       "id": "local-audio",

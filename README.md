@@ -111,6 +111,7 @@ The config is stored in `config.json` (path configurable via `CONFIG_FILE`). You
 - Legacy top-level `rules` arrays auto-migrate to a single `default` profile on load (the file is rewritten in the new shape on the next save)
 - `api_types` accepts `"openai"` and/or `"anthropic"` per server; legacy `api_type` (string) is auto-migrated to array on load
 - Each server can specify `openai_url` / `anthropic_url` overrides; falls back to base `url`
+- `max_parallel_requests` (per server, `0` = unlimited) is how many generations that backend serves at once: past it the router routes around the server to a member with room, because a saturated backend queues the overflow rather than refusing it (llama.cpp `-np`, vLLM's max concurrent sequences) — LiteLLM's `max_parallel_requests` is the same knob
 - Each server can route through a proxy: `proxy` (empty = direct connection) with a `proxy_enabled` toggle (default off; `true` enables the proxy, otherwise the proxy URL is ignored). Supported schemes: `http`, `https`, `socks5`, `socks5h`, `socks4`, `socks4a`
 - Base URL paths are deduplicated (e.g. `api.openai.com/v1` + `/v1/chat/completions` → `api.openai.com/v1/chat/completions`)
 - Rules are matched by an **exact** name first, then by the **most specific wildcard** (`path.Match` globs: `qwen3-*`, `claude-?`); disabled rules (`"enabled": false`) are silently skipped

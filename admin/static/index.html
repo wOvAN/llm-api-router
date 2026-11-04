@@ -207,6 +207,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
       <label><span>Cooldown Time (сек, 0 = глобальный 5 мин)</span><input id="server-cooldown" type="number" min="0" step="1" value="0"></label>
       <label><span>TPM Limit (токенов/мин, 0 = без лимита)</span><input id="server-tpm" type="number" min="0" step="1" value="0"></label>
       <label><span>RPM Limit (запросов/мин, 0 = без лимита)</span><input id="server-rpm" type="number" min="0" step="1" value="0"></label>
+      <label><span>Max Parallel (одновременных генераций, 0 = без лимита)</span><input id="server-parallel" type="number" min="0" step="1" value="0"></label>
     </div>
     <div id="server-test-result" style="margin-bottom:12px;font-size:0.8rem;display:none;"></div>
     <div class="btn-row">
@@ -584,6 +585,7 @@ async function saveServer() {
     cooldown_time: parseInt(document.getElementById('server-cooldown').value, 10) || 0,
     tpm_limit: parseInt(document.getElementById('server-tpm').value, 10) || 0,
     rpm_limit: parseInt(document.getElementById('server-rpm').value, 10) || 0,
+    max_parallel_requests: parseInt(document.getElementById('server-parallel').value, 10) || 0,
   });
   const method = id ? 'PUT' : 'POST';
   const url = id ? API + '/servers/' + encodeURIComponent(data.id) : API + '/servers';
@@ -618,6 +620,7 @@ async function editServer(id) {
   document.getElementById('server-cooldown').value = s.cooldown_time || 0;
   document.getElementById('server-tpm').value = s.tpm_limit || 0;
   document.getElementById('server-rpm').value = s.rpm_limit || 0;
+  document.getElementById('server-parallel').value = s.max_parallel_requests || 0;
 }
 
 async function deleteServer(id) {

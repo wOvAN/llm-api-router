@@ -48,6 +48,12 @@ type Server struct {
 	TPMLimit int64 `json:"tpm_limit,omitempty"`
 	// RPMLimit caps requests-per-minute sent to this server (0 = unlimited).
 	RPMLimit int64 `json:"rpm_limit,omitempty"`
+	// MaxParallelRequests is how many generations this backend serves at once
+	// (0 = unlimited). A server with N slots does not refuse the N+1-th request,
+	// it queues it, and queue time is invisible to the caller — so the operator's
+	// knowledge of the launch command (`llama-server -np 4`) is what turns a
+	// saturated replica into a routing signal.
+	MaxParallelRequests int `json:"max_parallel_requests,omitempty"`
 	// KeepAliveIdle overrides the SSE keep-alive heartbeat interval for this
 	// server (seconds). 0 = use the global proxy.KeepAliveIdle. A per-request
 	// X-Router-KeepAlive header still overrides this.

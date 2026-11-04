@@ -304,3 +304,66 @@ func TestHandleInflightCountsAnAttempt(t *testing.T) {
 		t.Errorf("in-flight after a served request = %d, want 0 (the slot leaked)", got)
 	}
 }
+
+// A backend with N slots answers the N+1-th request by queueing it, not by
+// refusing it, and queue time is invisible to the caller. `max_parallel_requests`
+// lets the operator state the slot count so the router sends the overflow to the
+// member that has room instead.
+func TestHandleSkipsServerAtParallelCap(t *testing.T) {
+	release := make(chan struct{})
+	busy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
+	}))
+	defer busy.Close()
+	free := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
+	}))
+	defer free.Close()
+
+	router, store, _, _ := newTestRouter(t)
+	if err := store.AddServer(&domain.Server{ID: "busy", Name: "busy", URL: busy.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}, MaxParallelRequests: 1}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddServer(&domain.Server{ID: "free", Name: "free", URL: free.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"gpt-4"},
+		ServerID: "busy", TargetModel: "gpt-4", NumRetries: -1, Enabled: true,
+		Fallbacks: []domain.FallbackEntry{{ServerID: "free"}}}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		w := httptest.NewRecorder()
+		router.Handle(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for router.inflightCount("busy") == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := router.inflightCount("busy"); got != 1 {
+		t.Fatalf("in-flight on busy = %d, want 1 (the first request never reached it)", got)
+	}
+
+	w := httptest.NewRecorder()
+	router.Handle(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if got := w.Result().Header.Get("X-Router-Server"); got != "free" {
+		t.Errorf("server = %q, want free: a server at its parallel cap must be skipped, not queued on",
+			w.Result().Header.Get("X-Router-Fallback-Errors"))
+	}
+
+	close(release)
+	<-firstDone
+	if got := router.inflightCount("busy"); got != 0 {
+		t.Errorf("in-flight after both finished = %d, want 0 (the slot leaked)", got)
+	}
+}

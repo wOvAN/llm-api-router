@@ -566,3 +566,18 @@ func TestCheckConfigSeparatesWarningsFromRefusals(t *testing.T) {
 		t.Errorf("a clean config is not clean: unknown=%v dangling=%v", unknown, dangling)
 	}
 }
+
+// The parallel cap is a knob an operator reads off the backend's own launch
+// command (`-np 4`), so the form that carries tpm/rpm has to carry it too.
+func TestGUIServerFormEditsParallelCap(t *testing.T) {
+	src := guiSource(t)
+	if !strings.Contains(src, `id="server-parallel"`) {
+		t.Error("the server form has no parallel-cap input")
+	}
+	if save := funcBody(t, src, "function saveServer()"); !strings.Contains(save, "max_parallel_requests") {
+		t.Error("saveServer does not send max_parallel_requests — a save would clear the declared cap")
+	}
+	if fill := funcBody(t, src, "function editServer("); !strings.Contains(fill, "server-parallel") {
+		t.Error("editServer does not restore the declared cap into the form")
+	}
+}

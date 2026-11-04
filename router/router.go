@@ -553,6 +553,18 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 
+		// Skip a server at its declared parallel cap (except the last attempt).
+		// A saturated backend queues what we send it, which reads to the client as
+		// a backend that has gone slow; the in-flight count is the same one
+		// least-connections reads, incremented when the attempt is sent and
+		// released by its teardown, so the cap is measured in served generations.
+		if i < len(attempts)-1 && srv.MaxParallelRequests > 0 &&
+			r.inflightCount(srv.ID) >= int32(srv.MaxParallelRequests) {
+			log.Warnf("[%s] model=%q — skipping %s: %d requests in flight, declared cap %d (attempt %d/%d)",
+				req.URL.Path, model, srv.Name, r.inflightCount(srv.ID), srv.MaxParallelRequests, i+1, len(attempts))
+			continue
+		}
+
 		// Skip quota-exceeded servers (TPM/RPM at limit; except the last attempt)
 		if r.quota != nil && !r.quota.Allow(srv.ID) && i < len(attempts)-1 {
 			tokens, reqs := r.quota.Usage(srv.ID)
