@@ -168,3 +168,66 @@ func TestHandleBalanceOffKeepsFailoverOrder(t *testing.T) {
 		t.Errorf("hits = a %d, b %d, want 4 and 0 (no balancing requested)", a.Load(), b.Load())
 	}
 }
+
+// Config churn is how a long-lived router grows its rotation map: every pool
+// composition the process has ever balanced leaves a counter behind, and a GUI
+// operator edits rules on purpose. The sweep keeps what the active profile can
+// build right now.
+func TestHandleBalanceRotationSweepsDeadPools(t *testing.T) {
+	handler := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
+	}
+	servers := map[string]string{}
+	for _, name := range []string{"a", "b", "c"} {
+		srv := httptest.NewServer(http.HandlerFunc(handler))
+		t.Cleanup(srv.Close)
+		servers[name] = srv.URL
+	}
+
+	r, store, _, _ := newTestRouter(t)
+	for id, url := range servers {
+		if err := store.AddServer(&domain.Server{ID: id, Name: id, URL: url,
+			APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+			t.Fatalf("AddServer: %v", err)
+		}
+	}
+
+	original := rotationSweepAt
+	t.Cleanup(func() { rotationSweepAt = original })
+	rotationSweepAt = 2
+
+	// Three pools in a row: the first two compositions stop existing when their
+	// rule is replaced, so their counters are dead weight by the third request.
+	pools := [][]string{{"a", "b"}, {"a", "c"}, {"b", "c"}}
+	for i, pool := range pools {
+		if i > 0 {
+			if err := store.DeleteRuleFromProfile("", 0); err != nil {
+				t.Fatalf("DeleteRuleFromProfile: %v", err)
+			}
+		}
+		rule := &domain.RoutingRule{IncomingModels: []string{"gpt-4"},
+			TargetModel: "gpt-4", ServerID: pool[0], Balance: domain.BalanceRoundRobin,
+			Enabled: true}
+		for _, id := range pool[1:] {
+			rule.Fallbacks = append(rule.Fallbacks, domain.FallbackEntry{ServerID: id})
+		}
+		if err := store.AddRule(rule); err != nil {
+			t.Fatalf("AddRule: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"turn `+
+				strconv.Itoa(i)+`"}]}`))
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+		if got := w.Result().StatusCode; got != http.StatusOK {
+			t.Fatalf("pool %v: status = %d: %s", pool, got, w.Body.String())
+		}
+	}
+
+	var keys []string
+	r.rotations.Range(func(k, _ any) bool { keys = append(keys, k.(string)); return true })
+	if len(keys) != 1 || keys[0] != "b,c" {
+		t.Errorf("rotation keys = %v, want only the live pool b,c", keys)
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -349,8 +350,8 @@ func TestRoutedEndpointsCarryClientMiddlewares(t *testing.T) {
 			t.Errorf("main.go no longer routes %s through the wrapped handler", route)
 		}
 	}
-	for _, mw := range []string{"config.NewInboundLimiter(settings.Inbound).Middleware(apiHandler)",
-		"config.NewCORS(settings.CORS).Middleware(apiHandler)"} {
+	for _, mw := range []string{"config.NewInboundLimiter(s.Inbound).Middleware(h)",
+		"config.NewCORS(s.CORS).Middleware(h)"} {
 		if !strings.Contains(source, mw) {
 			t.Errorf("main.go lost a client-edge middleware: %s", mw)
 		}
@@ -381,5 +382,51 @@ func TestGUIShowsLatencyPercentiles(t *testing.T) {
 	// The bounds are a Go list; the GUI copy has to say where it came from.
 	if !strings.Contains(source, "domain.LatencyBucketsMs") {
 		t.Error("the GUI's bucket bounds lost their pointer to the Go list they mirror")
+	}
+}
+
+// The client edge is assembled from settings once, so a config reload has to
+// rebuild it: an operator who raises settings.inbound.rps in config.json and hits
+// POST /admin/api/config/reload (the GUI's natural apply) must not be editing a
+// file that nothing reads any more.
+func TestClientEdgeFollowsConfigReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	write := func(rps float64) {
+		body := fmt.Sprintf(`{"servers":{},"profiles":[{"id":"default","name":"default",`+
+			`"rules":[]}],"active_profile_id":"default",`+
+			`"settings":{"inbound":{"rps":%g,"burst":1,"per_ip":true}}}`, rps)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	write(0)
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	edge := newClientEdge(store, inner)
+
+	denied := func() bool {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.RemoteAddr = "203.0.113.7:4444"
+		w := httptest.NewRecorder()
+		edge.ServeHTTP(w, req)
+		return w.Result().StatusCode == http.StatusTooManyRequests
+	}
+	if denied() {
+		t.Fatal("rps 0 must be unlimited (no limiter built)")
+	}
+
+	write(1)
+	if err := store.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	edge.Rebuild()
+	if first, second := denied(), denied(); first || !second {
+		t.Errorf("after a reload the limiter is not in force: first allowed=%v second allowed=%v, "+
+			"want the bucket's one token spent on the first request and the second denied", !first, !second)
 	}
 }

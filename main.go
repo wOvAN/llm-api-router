@@ -184,15 +184,6 @@ func main() {
 	traceStore := trace.New(100, store.GetSettings().Trace)
 
 	apiRouter := router.New(store, metricsStore, healthTracker, rateLimiter, quotaTracker, traceStore, capsCache)
-	adminHandler := admin.NewHandler(store, metricsStore, healthTracker, traceStore)
-	// The GUI reports which servers are in their rate-limit cooldown, and why.
-	adminHandler.SetRateLimiter(rateLimiter)
-
-	adminStatic, err := fs.Sub(staticFS, "admin/static")
-	if err != nil {
-		log.Fatalf("Failed to load admin static files: %v", err)
-	}
-
 	// The client-facing edge, wrapped outside-in: CORS (a browser client reads the
 	// answer, then needs permission to read the routing headers) and the inbound
 	// rate limit (one runaway agent loop otherwise occupies the whole box).
@@ -200,9 +191,20 @@ func main() {
 	// own story, and a limiter there is how an operator locks themselves out of
 	// the console during an incident. Both are nil (pass-through) by default.
 	settings := store.GetSettings()
-	var apiHandler http.Handler = http.HandlerFunc(apiRouter.Handle)
-	apiHandler = config.NewInboundLimiter(settings.Inbound).Middleware(apiHandler)
-	apiHandler = config.NewCORS(settings.CORS).Middleware(apiHandler)
+	apiHandler := newClientEdge(store, http.HandlerFunc(apiRouter.Handle))
+
+	adminHandler := admin.NewHandler(store, metricsStore, healthTracker, traceStore)
+	// The GUI reports which servers are in their rate-limit cooldown, and why.
+	adminHandler.SetRateLimiter(rateLimiter)
+	// A reload changes the settings the client edge is built from, so the edge is
+	// rebuilt with them.
+	adminHandler.SetOnReload(apiHandler.Rebuild)
+
+	adminStatic, err := fs.Sub(staticFS, "admin/static")
+	if err != nil {
+		log.Fatalf("Failed to load admin static files: %v", err)
+	}
+
 	if settings.Inbound.RPS > 0 {
 		scope := "shared"
 		if settings.Inbound.PerIP {
@@ -318,6 +320,40 @@ func main() {
 // lands, so nothing new arrives during the drain and the only thing the bound
 // protects is a wedged connection. A deployment that streams long generations
 // wants minutes, not seconds.
+// clientEdge is the client-facing middleware chain, rebuilt on a config reload.
+// A middleware is built once from its settings, so mounting the built chain
+// freezes settings.inbound and settings.cors at their startup values: raising the
+// rate limit in config.json and hitting reload — the GUI's natural apply — would
+// edit a file nothing reads any more. settings.convert is read per request; these
+// two are the only chain assembled at startup, so the chain itself is what has to
+// be swappable.
+type clientEdge struct {
+	store *config.Store
+	inner http.Handler
+	next  atomic.Pointer[http.Handler]
+}
+
+func newClientEdge(store *config.Store, inner http.Handler) *clientEdge {
+	e := &clientEdge{store: store, inner: inner}
+	e.Rebuild()
+	return e
+}
+
+// Rebuild assembles the chain from the settings the store holds right now.
+func (e *clientEdge) Rebuild() {
+	s := e.store.GetSettings()
+	h := e.inner
+	h = config.NewInboundLimiter(s.Inbound).Middleware(h)
+	h = config.NewCORS(s.CORS).Middleware(h)
+	e.next.Store(&h)
+}
+
+func (e *clientEdge) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if h := e.next.Load(); h != nil {
+		(*h).ServeHTTP(w, req)
+	}
+}
+
 func drainTimeout() time.Duration {
 	v := os.Getenv("DRAIN_TIMEOUT")
 	if v == "" {

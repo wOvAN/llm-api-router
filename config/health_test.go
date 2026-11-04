@@ -25,6 +25,25 @@ func newHealthStore(t *testing.T, url string) *Store {
 	return store
 }
 
+// A deleted server leaves nothing behind. The tracker records an entry per server
+// it has ever probed, so a long-lived process with churned config would keep
+// answering about ghosts: GetStatus is the admin server list's view of health.
+func TestHealthTrackerForgetsDeletedServers(t *testing.T) {
+	store := newHealthStore(t, "http://127.0.0.1:1")
+	tt := NewHealthTracker(store, time.Hour, nil)
+	tt.MarkUnhealthy("s1")
+	if _, ok := tt.GetStatus()["s1"]; !ok {
+		t.Fatal("the fixture left no status entry to sweep")
+	}
+	if err := store.DeleteServer("s1"); err != nil {
+		t.Fatalf("DeleteServer: %v", err)
+	}
+	tt.checkAll()
+	if _, ok := tt.GetStatus()["s1"]; ok {
+		t.Error("the tracker still reports health for a server the config does not define")
+	}
+}
+
 // A probe that answers 401/403/429 is a backend that is up and refusing us (a
 // missing or expired api_key, a throttled /v1/models) — not an outage. Marking
 // it down hides the real cause: the GUI prints "down", the router skips it, and

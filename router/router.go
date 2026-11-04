@@ -29,19 +29,20 @@ import (
 
 // Router handles incoming LLM API requests and routes them to configured backends.
 type Router struct {
-	store     *config.Store
-	metrics   *metrics.Store
-	health    *config.HealthTracker
-	rateLimit *config.RateLimiter
-	quota     *config.QuotaTracker
-	caps      *config.CapabilitiesCache
-	trace     *trace.Store
-	rotations sync.Map                  // balanced rule pools: ids -> *atomic.Uint64
-	pinMu     sync.Mutex                // guards pins
-	pins      map[string]stickyPin      // conversation -> backend that served it
-	jevMu     sync.Mutex                // guards jevCache and jevSticky
-	jevCache  map[string]jevCacheEntry  // jev decision cache (opt-in per rule)
-	jevSticky map[string]jevStickyEntry // last jev decision per conversation
+	store        *config.Store
+	metrics      *metrics.Store
+	health       *config.HealthTracker
+	rateLimit    *config.RateLimiter
+	quota        *config.QuotaTracker
+	caps         *config.CapabilitiesCache
+	trace        *trace.Store
+	rotations    sync.Map                  // balanced rule pools: ids -> *atomic.Uint64
+	rotationKeys atomic.Int64              // entries ever stored in rotations
+	pinMu        sync.Mutex                // guards pins
+	pins         map[string]stickyPin      // conversation -> backend that served it
+	jevMu        sync.Mutex                // guards jevCache and jevSticky
+	jevCache     map[string]jevCacheEntry  // jev decision cache (opt-in per rule)
+	jevSticky    map[string]jevStickyEntry // last jev decision per conversation
 }
 
 // New creates a new Router.
@@ -90,6 +91,48 @@ type serverAttempt struct {
 //
 // The counter is keyed by the pool's server ids in order, so a config reload
 // never resets the rotation and two pools never share a counter.
+// rotationSweepAt bounds the rotation map (var for tests).
+var rotationSweepAt = int64(256)
+
+// sweepRotations forgets the rotation counters of pools the active profile can
+// no longer build. Counters are cheap; an unbounded map in a process that runs
+// for months is the thing worth bounding, and the key is the pool's server ids
+// in order, so a reordering is a new pool (which is the honest reading: the
+// rotation slot means something per composition).
+func (r *Router) sweepRotations() {
+	live := map[string]bool{}
+	rules, err := r.store.GetRules("")
+	if err == nil {
+		for _, rule := range rules {
+			if !rule.Enabled || rule.Balance != domain.BalanceRoundRobin || rule.ServerID == "" {
+				continue
+			}
+			ids := append([]string{rule.ServerID}, fallbackIDs(rule)...)
+			if len(ids) > 1 {
+				live[strings.Join(ids, ",")] = true
+			}
+		}
+	}
+	r.rotations.Range(func(k, _ any) bool {
+		if !live[k.(string)] {
+			r.rotations.Delete(k)
+		}
+		return true
+	})
+	r.rotationKeys.Store(int64(len(live)))
+}
+
+// fallbackIDs lists the enabled fallback servers of a rule in the order routing
+// builds its attempt list, so a pool key computed here matches the runtime one.
+func fallbackIDs(rule *domain.RoutingRule) []string {
+	fbs := orderedFallbacks(rule)
+	ids := make([]string, 0, len(fbs))
+	for _, fb := range fbs {
+		ids = append(ids, fb.ServerID)
+	}
+	return ids
+}
+
 func (r *Router) balanceRotation(attempts []serverAttempt, weights []int, pinnedID string) []serverAttempt {
 	ids := make([]string, len(attempts))
 	slots := 0
@@ -97,7 +140,17 @@ func (r *Router) balanceRotation(attempts []serverAttempt, weights []int, pinned
 		ids[i] = a.server.ID
 		slots += weights[i]
 	}
-	counter, _ := r.rotations.LoadOrStore(strings.Join(ids, ","), new(atomic.Uint64))
+	key := strings.Join(ids, ",")
+	counter, loaded := r.rotations.LoadOrStore(key, new(atomic.Uint64))
+	if !loaded {
+		// A composition this process has never balanced before. Config churn (a
+		// fallback removed, a server deleted) is how the map grows in a
+		// long-lived router with a GUI, so past a handful of dead pools the
+		// sweep drops the keys the active profile can no longer build.
+		if r.rotationKeys.Add(1) > rotationSweepAt {
+			r.sweepRotations()
+		}
+	}
 
 	// A conversation already pinned to a member starts there and spends no
 	// rotation: its turns must land on the backend holding its prompt cache, and

@@ -35,6 +35,10 @@ type Handler struct {
 	health    *config.HealthTracker
 	rateLimit *config.RateLimiter
 	trace     *trace.Store
+	// onReload runs after a successful config reload: the client-facing
+	// middleware chain is assembled from settings once, so a reload has to
+	// rebuild it (main installs the hook).
+	onReload func()
 }
 
 // NewHandler creates a new admin handler.
@@ -47,6 +51,11 @@ func NewHandler(store *config.Store, m *metrics.Store, health *config.HealthTrac
 // handler's existing call sites stay as they are.
 func (h *Handler) SetRateLimiter(rl *config.RateLimiter) {
 	h.rateLimit = rl
+}
+
+// SetOnReload installs the hook run after POST /admin/api/config/reload succeeds.
+func (h *Handler) SetOnReload(fn func()) {
+	h.onReload = fn
 }
 
 // ServeHTTP routes admin API requests.
@@ -495,6 +504,9 @@ func (h *Handler) reloadConfig(w http.ResponseWriter, req *http.Request) {
 	if err := h.store.Load(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to reload config: "+err.Error())
 		return
+	}
+	if h.onReload != nil {
+		h.onReload()
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 }

@@ -74,6 +74,7 @@ func (t *HealthTracker) loop() {
 
 func (t *HealthTracker) checkAll() {
 	cfg := t.store.GetConfig()
+	t.forgetRemoved(cfg)
 	for id, srv := range cfg.Servers {
 		// A server the tracker has never probed starts healthy (the historical
 		// behavior: only a probe failure marks one down), and a healthy server is
@@ -95,6 +96,20 @@ func (t *HealthTracker) checkAll() {
 		if t.checkServer(srv) {
 			log.Infof("[health] %s is back", srv.Name)
 			t.MarkHealthy(id)
+		}
+	}
+}
+
+// forgetRemoved drops the tracker's entries for servers the config no longer
+// defines (the sweep runs on every tick, so a delete can not leave a ghost
+// behind). Caller must not hold t.mu.
+func (t *HealthTracker) forgetRemoved(cfg *domain.Config) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id := range t.status {
+		if _, ok := cfg.Servers[id]; !ok {
+			delete(t.status, id)
+			delete(t.throttled, id)
 		}
 	}
 }
