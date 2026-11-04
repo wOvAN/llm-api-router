@@ -169,6 +169,11 @@ func apiTypeFromPath(path string) domain.APIType {
 	return domain.APITypeOpenAI
 }
 
+// localAnswerServer is the server key for a request the router answered itself
+// (no backend was contacted), so the traffic is visible in the per-server
+// summary instead of invisible.
+const localAnswerServer = "router"
+
 // clientIP is the peer address the connection arrived on. X-Forwarded-For and
 // X-Real-IP are deliberately not consulted, for the inbound limiter's reason
 // (config.InboundLimiter): they are the client's word for where it came from, so
@@ -216,6 +221,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 
 	// Classification is always on and costs a byte scan: metrics, the trace and
 	// the GUI then describe a request with the same words.
+	requestStart := time.Now()
 	meta := &reqMeta{}
 	// Every response carries a request id and the metric carries the same one, so
 	// a client can quote a number in a bug report without the trace window being
@@ -238,9 +244,21 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	// calls the provider's real count_tokens first; a stdlib-only router has no
 	// tokenizer, so the number is an estimate and X-Router-Count-Tokens says so.
 	if strings.Contains(req.URL.Path, "/count_tokens") {
+		answer := fmt.Sprintf(`{"input_tokens":%d}`, len(body)/4)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Router-Count-Tokens", "estimate")
-		_, _ = fmt.Fprintf(w, `{"input_tokens":%d}`, len(body)/4)
+		_, _ = fmt.Fprint(w, answer)
+		// The router answering is not the request disappearing. Claude Code fires
+		// these in bursts every turn, so this is the most frequent caller in the
+		// room, and a metric with no backend to name is recorded under
+		// server:router. It is not counted in active_requests: the answer is
+		// written in microseconds, and that gauge is about work in flight.
+		model, _ := extractModel(body)
+		r.record(req, requestStart, model, "", localAnswerServer, proxy.ProxyMetrics{
+			StatusCode:   http.StatusOK,
+			ResponseSize: int64(len(answer)),
+			PromptTokens: len(body) / 4,
+		}, http.StatusOK, "", false, apiTypeFromPath(req.URL.Path), nil, meta)
 		return
 	}
 
@@ -299,7 +317,6 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	// pinKey is the conversation identity a balanced rule pins to one backend
 	// ("" = the request carries no identity, so nothing is pinned).
 	pinKey := ""
-	requestStart := time.Now()
 	apiType := apiTypeFromPath(req.URL.Path)
 	// The client's own dialect (from its path) and the per-request conversion
 	// override; heartbeats keep keying on apiType — they are for the client.

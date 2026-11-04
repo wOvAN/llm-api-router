@@ -9,6 +9,11 @@ import (
 // source of the vocabulary the metrics, the trace and the GUI all speak.
 func EndpointLabel(path string) string {
 	switch {
+	case strings.Contains(path, "/count_tokens"):
+		// Its own class: the router answers these locally, and an operator
+		// reading the summary table has to be able to tell that traffic from
+		// the generations beside it.
+		return "count_tokens"
 	case strings.Contains(path, "/messages"):
 		return "messages"
 	case strings.Contains(path, "/chat/completions"):
