@@ -148,6 +148,48 @@ func TestHandleAllBackendsFailServeLastBackendAnswer(t *testing.T) {
 	}
 }
 
+// A router behind this router (a chained deployment) answers with its own
+// X-Router-* headers, describing its inner hop. The buffered answer is relayed
+// with the backend's headers, so the namespace has to stay ours: a client that
+// reads X-Router-Server off a failed request has to get the backend this router
+// actually served it from, which is also what the metric records.
+func TestHandleBufferedAnswerDoesNotCarryTheInnerHopsRouterHeaders(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Router-Server", "inner")
+		w.Header().Set("X-Router-Attempts", "7/9")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"type":"overloaded","message":"inner says no"}}`))
+	}))
+	defer backend.Close()
+
+	r, store, _, _ := newTestRouter(t)
+	if err := store.AddServer(&domain.Server{ID: "s1", Name: "S1", URL: backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}}); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	if err := store.AddRule(&domain.RoutingRule{IncomingModels: []string{"gpt-4"},
+		TargetModel: "gpt-4", ServerID: "s1", Enabled: true}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want the backend's 503", res.StatusCode)
+	}
+	if got := res.Header.Get("X-Router-Server"); got != "s1" {
+		t.Errorf("X-Router-Server = %q, want the server this router served from", got)
+	}
+	if got := res.Header.Get("X-Router-Attempts"); got != "" && got != "1/1" {
+		t.Errorf("X-Router-Attempts = %q, want our own count, not the inner hop's", got)
+	}
+}
+
 // The other side of the same line: a 4xx other than 429 is the client's request
 // being wrong, which reads identically at every backend. Failing over would
 // spend a full generation on a request that deserves the answer it got.

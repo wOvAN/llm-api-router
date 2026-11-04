@@ -813,10 +813,20 @@ func (r *Router) serveLastAnswer(w http.ResponseWriter, req *http.Request, reque
 		if k == "Content-Length" || k == "Transfer-Encoding" {
 			continue // our own framing; the body may have been rewritten
 		}
+		if strings.HasPrefix(k, "X-Router-") {
+			// The namespace describes the hop that wrote it. A chained
+			// deployment's inner router stamps its own serving server, and that
+			// must not outvote ours (the metric records the outer one).
+			continue
+		}
 		w.Header().Del(k)
 		for _, v := range values {
 			w.Header().Add(k, v)
 		}
+	}
+	w.Header().Set("X-Router-Server", answer.serverID)
+	if srv, ok := r.store.GetServer(answer.serverID); ok {
+		w.Header().Set("X-Router-Server-Name", srv.Name)
 	}
 	w.Header().Set("X-Router-Status", strconv.Itoa(resp.StatusCode))
 	w.WriteHeader(resp.StatusCode)
