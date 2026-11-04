@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -288,6 +289,12 @@ func (s *Store) UpdateServer(id string, srv *domain.Server) error {
 }
 
 // DeleteServer removes a server.
+// ErrServerReferenced marks a DeleteServer refusal: the server exists, and a
+// rule names it. The admin API answers that with 409 (the operator has rules to
+// fix) and a missing server with 404, so the two have to be distinguishable
+// without reading a message.
+var ErrServerReferenced = errors.New("server is referenced by rules")
+
 func (s *Store) DeleteServer(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -298,7 +305,7 @@ func (s *Store) DeleteServer(id string) error {
 	// A rule left naming a deleted server answers 500 for every request on its
 	// models, at request time, far from the delete that caused it.
 	if refs := s.references(id); len(refs) > 0 {
-		return fmt.Errorf("server %q is used by %s", id, strings.Join(refs, "; "))
+		return fmt.Errorf("%w: server %q is used by %s", ErrServerReferenced, id, strings.Join(refs, "; "))
 	}
 	delete(s.config.Servers, id)
 	return s.save()
@@ -360,6 +367,16 @@ func (s *Store) RuleCount(profileID string) int {
 		return 0
 	}
 	return len(p.Rules)
+}
+
+// ProfileExists reports whether the profile with the given ID ("" = the active
+// one) is defined. The admin API checks it before validating a rule body, so a
+// write against a profile that does not exist answers 404 about the profile
+// instead of 400 about the rule.
+func (s *Store) ProfileExists(id string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.resolveProfile(id) != nil
 }
 
 // MissingServers reports the server ids a rule names that the config does not

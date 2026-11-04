@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -946,8 +947,11 @@ func TestDeleteServerRefusesReferencedServer(t *testing.T) {
 		t.Fatalf("AddRule: %v", err)
 	}
 
-	if err := store.DeleteServer("s2"); err == nil {
-		t.Fatal("a server named by a rule's fallbacks was deleted; its rule now 500s")
+	// The refusal is typed, not a sentence: the admin API answers 409 for a
+	// referenced server and 404 for a missing one, and a reworded message must
+	// not silently flip the status code.
+	if err := store.DeleteServer("s2"); !errors.Is(err, ErrServerReferenced) {
+		t.Fatalf("DeleteServer(s2) err = %v, want it to wrap ErrServerReferenced", err)
 	}
 	if _, ok := store.GetServer("s2"); !ok {
 		t.Error("the refused delete removed the server anyway")
@@ -955,8 +959,11 @@ func TestDeleteServerRefusesReferencedServer(t *testing.T) {
 	if refs := store.ServerReferences("s2"); len(refs) != 1 || !strings.Contains(refs[0], "gpt-4") {
 		t.Errorf("ServerReferences(s2) = %v, want one reference naming the rule's models", refs)
 	}
-	if err := store.DeleteServer("s1"); err == nil {
-		t.Fatal("a server named as a rule's primary was deleted")
+	if err := store.DeleteServer("s1"); !errors.Is(err, ErrServerReferenced) {
+		t.Errorf("DeleteServer(s1) err = %v, want it to wrap ErrServerReferenced", err)
+	}
+	if err := store.DeleteServer("ghost"); errors.Is(err, ErrServerReferenced) {
+		t.Errorf("DeleteServer(ghost) err = %v, want a plain not-found", err)
 	}
 }
 

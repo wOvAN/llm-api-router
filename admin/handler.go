@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -184,7 +185,7 @@ func (h *Handler) deleteServer(w http.ResponseWriter, req *http.Request, id stri
 	if err := h.store.DeleteServer(id); err != nil {
 		// A referenced server is not "not found" — it is a delete that would
 		// strand rules, which is the operator's problem to resolve first.
-		if strings.Contains(err.Error(), "is used by") {
+		if errors.Is(err, config.ErrServerReferenced) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -344,11 +345,16 @@ func (h *Handler) addRule(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if err := h.validateRuleRefs(&rule); err != nil {
+	pid := rulesProfileID(req)
+	if !h.store.ProfileExists(pid) {
+		writeError(w, http.StatusNotFound, "profile not found")
+		return
+	}
+	if err := h.validateRule(&rule); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.store.AddRuleToProfile(rulesProfileID(req), &rule); err != nil {
+	if err := h.store.AddRuleToProfile(pid, &rule); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -376,7 +382,7 @@ func (h *Handler) updateRule(w http.ResponseWriter, req *http.Request, idxStr st
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if err := h.validateRuleRefs(&rule); err != nil {
+	if err := h.validateRule(&rule); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -390,7 +396,10 @@ func (h *Handler) updateRule(w http.ResponseWriter, req *http.Request, idxStr st
 // validateRuleRefs refuses a rule that names a server the config does not
 // define: every request on its models would answer 500 "server not found", far
 // from the click that created it.
-func (h *Handler) validateRuleRefs(rule *domain.RoutingRule) error {
+func (h *Handler) validateRule(rule *domain.RoutingRule) error {
+	if err := rule.Validate(); err != nil {
+		return err
+	}
 	if missing := h.store.MissingServers(rule); len(missing) > 0 {
 		return fmt.Errorf("rule names undefined servers: %s", strings.Join(missing, ", "))
 	}

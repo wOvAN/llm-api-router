@@ -828,6 +828,59 @@ func TestAddRuleRejectsUnknownServer(t *testing.T) {
 	}
 }
 
+// A rule the router can not serve is a per-request 500 on its models, far from
+// the click that created it, so the write path refuses the shapes the router
+// has no answer for: no incoming model, no primary, a jev rule whose router,
+// decision server, or candidate pool is missing.
+func TestAddRuleRejectsUnroutableShape(t *testing.T) {
+	h, store, _ := newTestHandler(t)
+	_ = store.AddServer(&domain.Server{ID: "s1", URL: "http://localhost"})
+	_ = store.AddServer(&domain.Server{ID: "s2", URL: "http://localhost"})
+
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"no models", `{"incoming_models":[],"server_id":"s1","enabled":true}`, "incoming model"},
+		{"no primary", `{"incoming_models":["gpt-4"],"server_id":"","enabled":true}`, "primary server"},
+		{"jev without its router", `{"incoming_models":["gpt-4"],"router":"jev","enabled":true}`, "jev"},
+		{"jev without a decision server",
+			`{"incoming_models":["gpt-4"],"router":"jev","jev":{"candidates":[{"server_id":"s1"}]},"enabled":true}`,
+			"decision server"},
+		{"jev with an empty pool",
+			`{"incoming_models":["gpt-4"],"router":"jev","jev":{"server_id":"s2","candidates":[]},"enabled":true}`,
+			"candidate"},
+		{"jev with every candidate disabled",
+			`{"incoming_models":["gpt-4"],"router":"jev","jev":{"server_id":"s2","candidates":[{"server_id":"s1","enabled":false}]},"enabled":true}`,
+			"candidate"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/admin/api/rules", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("got status %d, want 400: %s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.want) {
+				t.Errorf("body = %s, want it to name the %s", w.Body.String(), tc.want)
+			}
+		})
+	}
+
+	// The shape a jev rule is supposed to have still saves.
+	ok := httptest.NewRequest(http.MethodPost, "/admin/api/rules", strings.NewReader(
+		`{"incoming_models":["gpt-4"],"router":"jev","jev":{"server_id":"s2","candidates":[{"server_id":"s1"}]},"enabled":true}`))
+	ok.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, ok)
+	if w.Code != http.StatusOK && w.Code != http.StatusCreated {
+		t.Fatalf("a well-formed jev rule was refused: %d %s", w.Code, w.Body.String())
+	}
+}
+
 // Deleting a server a rule depends on is the same breakage, one click away.
 func TestDeleteServerReportsReferencedServer(t *testing.T) {
 	h, store, _ := newTestHandler(t)

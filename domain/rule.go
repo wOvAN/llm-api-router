@@ -1,6 +1,9 @@
 package domain
 
-import "strings"
+import (
+	"errors"
+	"strings"
+)
 
 // Router kinds for RoutingRule.Router. Empty (RouterStatic) routes to the
 // rule's own ServerID/TargetModel/Fallbacks; RouterJev asks a System One
@@ -77,6 +80,32 @@ func (r *RoutingRule) ServerRefs() []ServerRef {
 		}
 	}
 	return refs
+}
+
+// Validate reports a rule shape the router has no answer for, so a write path
+// can refuse it at the click instead of answering 500 on every request for its
+// models. Routing reads these fields one at a time and stays permissive (a
+// config written for a newer router must still boot); this is the admin API's
+// contract.
+func (r *RoutingRule) Validate() error {
+	if len(r.IncomingModels) == 0 {
+		return errors.New("rule names no incoming model")
+	}
+	if r.Router == RouterJev {
+		switch {
+		case r.Jev == nil:
+			return errors.New(`rule sets router "jev" but carries no jev router`)
+		case r.Jev.ServerID == "":
+			return errors.New("jev rule has no decision server")
+		case len(r.Jev.EnabledCandidates()) == 0:
+			return errors.New("jev rule has no enabled candidate server")
+		}
+		return nil
+	}
+	if r.ServerID == "" {
+		return errors.New("rule has no primary server")
+	}
+	return nil
 }
 
 // IsModelPattern reports whether an incoming-model entry is a wildcard pattern
