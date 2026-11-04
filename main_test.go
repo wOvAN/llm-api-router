@@ -94,6 +94,32 @@ func TestGUIServerFormPreservesUnmanagedFields(t *testing.T) {
 	}
 }
 
+// The rule dialog is the same machine with more unmanaged fields: a rule's
+// num_retries and convert, a fallback's convert and context_window, and a jev
+// candidate's convert have no control in the form, so a GUI save of a rule
+// edited in config.json must carry them over — and a rule row's identity is its
+// server id, so reordering the pool does not shift conversion settings onto the
+// neighbour that moved into the slot.
+func TestGUIRuleFormPreservesUnmanagedFields(t *testing.T) {
+	src := guiSource(t)
+	save := funcBody(t, src, "async function saveRule()")
+	if !strings.Contains(save, "mergeRule(editingRule, data)") {
+		t.Error("saveRule PUTs the fields its inputs set and nothing else, erasing num_retries/convert")
+	}
+	if !strings.Contains(src, "async function editRule(idx)") ||
+		!strings.Contains(funcBody(t, src, "async function editRule(idx)"), "editingRule = r") {
+		t.Error("editRule never records the rule it opened, so a merge has nothing to merge into")
+	}
+	merge := funcBody(t, src, "function mergeRule(existing, data)")
+	if !strings.Contains(merge, "Object.assign({}, existing, data)") {
+		t.Error("mergeRule does not let the form's values override the stored rule")
+	}
+	rows := funcBody(t, src, "function mergeRows(rows, previous)")
+	if !strings.Contains(rows, "p.server_id === row.server_id") {
+		t.Error("mergeRows aligns rows by position, so reordering a pool shifts convert/context_window")
+	}
+}
+
 func TestGUIShowsConversion(t *testing.T) {
 	src := guiSource(t)
 	i := strings.Index(src, "r.convert_notes")

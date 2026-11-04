@@ -316,6 +316,35 @@ window.fetch = async (url, opts = {}) => {
 // fields the form does not render (`protocols`, and whatever comes after it).
 let editingServer = null;
 
+// The last rule object the edit form was opened with, for the same reason: a
+// rule carries `num_retries` and `convert`, a fallback carries `convert` and
+// `context_window`, and a jev candidate carries `convert` — none of them have a
+// control in the dialog, so a save has to carry them over.
+let editingRule = null;
+
+// mergeRows re-attaches the fields a row form does not render to the row that
+// came from them: a row's identity is its server id (a reordered list must not
+// shift the conversion settings of its neighbours), and a genuinely new row
+// merges against the row that stood in its slot.
+function mergeRows(rows, previous) {
+  const prev = previous || [];
+  return rows.map((row, i) => Object.assign({},
+    prev.find(p => p && p.server_id === row.server_id) || prev[i] || {}, row));
+}
+
+// mergeRule is the rule dialog's guarantee: what the form renders overrides the
+// stored rule, and everything the form does not render survives the save.
+function mergeRule(existing, data) {
+  if (!existing) return data;
+  const out = Object.assign({}, existing, data);
+  out.fallbacks = mergeRows(data.fallbacks || [], existing.fallbacks);
+  if (data.jev) {
+    data.jev.candidates = mergeRows(data.jev.candidates || [],
+      (existing.jev && existing.jev.candidates) || []);
+  }
+  return out;
+}
+
 // --- Version ---
 async function loadVersion() {
   try {
@@ -818,6 +847,7 @@ function writeModelPair(sel, inp, value) {
 
 async function openRuleModal() {
   await populateServerDropdown();
+  editingRule = null;
   document.getElementById('rule-edit-idx').value = '';
   document.getElementById('rule-modal-title').textContent = 'Add Routing Rule';
   document.getElementById('rule-incoming').value = '';
@@ -917,7 +947,8 @@ async function saveRule() {
   }
   const method = idx !== '' ? 'PUT' : 'POST';
   const url = ruleURL(idx !== '' ? idx : null);
-  const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const payload = mergeRule(editingRule, data);
+  const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
   if (!res.ok) {
     const err = await res.json().catch(() => ({error: res.statusText}));
     alert('Save failed: ' + (err.error || res.statusText));
@@ -950,6 +981,7 @@ async function editRule(idx) {
   const rules = await res.json();
   const r = rules[idx];
   if (!r) return;
+  editingRule = r;
   await populateServerDropdown();
   document.getElementById('rule-edit-idx').value = idx;
   document.getElementById('rule-modal-title').textContent = 'Edit Rule #' + idx;
