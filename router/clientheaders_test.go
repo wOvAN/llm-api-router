@@ -66,3 +66,36 @@ func TestClientRetriesOverrideIsClamped(t *testing.T) {
 		}
 	}
 }
+
+// The inbound limiter refuses to read X-Forwarded-For for the same reason the
+// metric must not: the header is the client's word for where it came from, so
+// honouring it lets any client sign its traffic as anyone else's, and the recent
+// request list is the operator's view of who is hammering the box.
+func TestHandleClientIPIgnoresForgedForwardedHeaders(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
+	}))
+	defer backend.Close()
+
+	for _, name := range []string{"X-Forwarded-For", "X-Real-IP"} {
+		r, store, ms, _ := newTestRouter(t)
+		addTestRoute(t, store, "gpt-4", backend.URL)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set(name, "203.0.113.9, 10.0.0.1")
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+		if got := w.Result().StatusCode; got != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200: %s", name, got, w.Body.String())
+		}
+		recent := ms.Recent()
+		if len(recent) == 0 {
+			t.Fatalf("%s: no metric recorded", name)
+		}
+		if ip := recent[0].ClientIP; ip != "192.0.2.1" { // httptest's peer address
+			t.Errorf("%s: ClientIP = %q, want the peer address the connection arrived on", name, ip)
+		}
+	}
+}

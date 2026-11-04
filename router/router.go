@@ -169,18 +169,13 @@ func apiTypeFromPath(path string) domain.APIType {
 	return domain.APITypeOpenAI
 }
 
-// clientIP extracts the client IP from the request, checking X-Forwarded-For
-// and X-Real-IP first (for proxied traffic), then falling back to RemoteAddr.
+// clientIP is the peer address the connection arrived on. X-Forwarded-For and
+// X-Real-IP are deliberately not consulted, for the inbound limiter's reason
+// (config.InboundLimiter): they are the client's word for where it came from, so
+// honouring them lets any client sign its traffic as anyone else's — in the GUI,
+// where an operator reads the list to see who is hammering the box. Behind a
+// load balancer every row says the balancer, which is the honest answer.
 func clientIP(req *http.Request) string {
-	if fwd := req.Header.Get("X-Forwarded-For"); fwd != "" {
-		if before, _, ok := strings.Cut(fwd, ","); ok {
-			return strings.TrimSpace(before)
-		}
-		return strings.TrimSpace(fwd)
-	}
-	if rip := req.Header.Get("X-Real-IP"); rip != "" {
-		return strings.TrimSpace(rip)
-	}
 	if ip, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
 		return ip
 	}
