@@ -121,7 +121,7 @@ func newStack(t *testing.T, backend http.Handler) *stack {
 		t.Fatalf("AddServer: %v", err)
 	}
 
-	rt := router.New(st.store, st.ms, nil, nil, nil, nil)
+	rt := router.New(st.store, st.ms, nil, nil, nil, nil, nil)
 	st.proxy = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rt.Handle(&teeWriter{ResponseWriter: w, mu: &st.mu, body: &st.clientBody}, r)
 	}))
