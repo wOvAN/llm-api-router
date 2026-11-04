@@ -17,12 +17,10 @@ type Plan struct {
 }
 
 // Options are the conversion knobs (see domain.ConvertSettings). The router builds
-// them from settings once per request; AnthropicVersion is used by the inverse
-// spoke (phase 3).
+// them from settings once per request.
 type Options struct {
-	MaxTokens        int
-	DropParams       bool
-	AnthropicVersion string
+	MaxTokens  int
+	DropParams bool
 }
 
 // Edge names the conversion this plan performs, e.g. "messages>chat"; "" for an
@@ -38,7 +36,7 @@ func (p Plan) Edge() string {
 // construction site so the router and the admin preview can never disagree
 // about the defaults.
 func OptionsFrom(s domain.ConvertSettings) Options {
-	return Options{MaxTokens: s.MaxTokens(), DropParams: s.DropParams, AnthropicVersion: s.Version()}
+	return Options{MaxTokens: s.MaxTokens(), DropParams: s.DropParams}
 }
 
 // Decide picks the upstream dialect for one attempt.

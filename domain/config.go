@@ -75,13 +75,11 @@ type TraceSettings struct {
 // the injection off, so such a request is refused naming `max_tokens`. DropParams
 // turns the default refusal (a 400 naming the field) into a silent drop recorded in
 // RequestMetric.ConvertNotes. Probe is reserved for the capability probe (out of
-// scope here); AnthropicVersion is the anthropic_version a synthesized Anthropic
-// request carries (phase 3).
+// scope here).
 type ConvertSettings struct {
-	MaxTokensDefault int    `json:"max_tokens_default,omitempty"`
-	DropParams       bool   `json:"drop_params,omitempty"`
-	Probe            bool   `json:"probe,omitempty"`
-	AnthropicVersion string `json:"anthropic_version,omitempty"`
+	MaxTokensDefault int  `json:"max_tokens_default,omitempty"`
+	DropParams       bool `json:"drop_params,omitempty"`
+	Probe            bool `json:"probe,omitempty"`
 }
 
 func (c ConvertSettings) MaxTokens() int {
@@ -95,11 +93,4 @@ func (c ConvertSettings) MaxTokens() int {
 		return 4096
 	}
 	return c.MaxTokensDefault
-}
-
-func (c ConvertSettings) Version() string {
-	if c.AnthropicVersion == "" {
-		return "2023-06-01"
-	}
-	return c.AnthropicVersion
 }

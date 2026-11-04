@@ -178,8 +178,7 @@
     "convert": {
       "max_tokens_default": 4096,
       "drop_params": false,
-      "probe": false,
-      "anthropic_version": "2023-06-01"
+      "probe": false
     }
   }
 }

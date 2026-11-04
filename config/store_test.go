@@ -808,11 +808,8 @@ func TestConvertSettingsDefaults(t *testing.T) {
 	if c.MaxTokens() != 4096 {
 		t.Fatalf("MaxTokens() = %d, want the 4096 default", c.MaxTokens())
 	}
-	if c.Version() != "2023-06-01" {
-		t.Fatalf("Version() = %q, want the anthropic default", c.Version())
-	}
-	c = domain.ConvertSettings{MaxTokensDefault: 1024, AnthropicVersion: "2024-10-22"}
-	if c.MaxTokens() != 1024 || c.Version() != "2024-10-22" {
+	c = domain.ConvertSettings{MaxTokensDefault: 1024}
+	if c.MaxTokens() != 1024 {
 		t.Fatalf("explicit values must win: %+v", c)
 	}
 	// The operator-facing sentinel: a negative default means "the client must bring
