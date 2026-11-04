@@ -1664,6 +1664,13 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 				select {
 				case <-streamCtx.Done():
 					return
+				case <-req.Context().Done():
+					// The client is gone: the post-disconnect drain owns this
+					// connection now, bounded by UpstreamDrainTimeout, and its whole
+					// purpose is letting the backend finish the generation. A watchdog
+					// for a live client's stream must not be the thing that cuts that
+					// generation short.
+					return
 				case <-tick.C:
 					if time.Since(time.Unix(0, lastRead.Load())) > StreamIdleTimeout {
 						log.Warnf("[%s] upstream silent for %v mid-stream — cancelling the attempt",

@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -76,5 +78,55 @@ func TestStreamProxyStreamIdleTimeoutIgnoresSlowJSON(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "finish_reason") {
 		t.Errorf("body = %s, want the backend's answer relayed", w.Body.String())
+	}
+}
+
+// The watchdog bounds a stream with a client watching it. Once the client is
+// gone, the drain owns that connection and has its own, far longer, bound: a
+// watchdog that keeps firing there cancels the very generation the drain exists
+// to protect, which is the opposite of why the drain was built.
+func TestStreamProxyStreamIdleTimeoutStandsDownForDrain(t *testing.T) {
+	oldIdle, oldDrain := StreamIdleTimeout, UpstreamDrainTimeout
+	t.Cleanup(func() { StreamIdleTimeout, UpstreamDrainTimeout = oldIdle, oldDrain })
+	StreamIdleTimeout = 100 * time.Millisecond
+	UpstreamDrainTimeout = 5 * time.Second
+
+	completed := make(chan struct{})
+	var earlyAbort atomic.Bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		defer close(completed)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"1\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+		for range 3 {
+			select {
+			case <-req.Context().Done():
+				earlyAbort.Store(true)
+				return
+			case <-time.After(150 * time.Millisecond):
+			}
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer backend.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	_, err := StreamProxy(req.Context(), backend.URL, "", req,
+		&failWriter{w: httptest.NewRecorder(), onWrite: cancel}, "gpt-4", "gpt-4", nil, false, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	select {
+	case <-completed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the drain did not run to completion")
+	}
+	if earlyAbort.Load() {
+		t.Error("the stream idle watchdog fired during the post-disconnect drain and cut the generation")
 	}
 }
