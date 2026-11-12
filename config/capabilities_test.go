@@ -137,3 +137,43 @@ func TestCapabilitiesCacheAudioFromOutputModalities(t *testing.T) {
 		t.Errorf("omni = %v/%v, want kept (it can emit text too)", a, ok)
 	}
 }
+
+// llama.cpp declares each model's context window in its /v1/models entry, which
+// is what lets the router gate a request whose prompt cannot fit — for the
+// deployments that never wrote a `context_window` into the config.
+func TestCapabilitiesCacheContextWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{"id": "small", "context_length": 4096, "architecture": {"input_modalities": ["text"]}},
+				{"id": "no-modalities", "context_length": 131072},
+				{"id": "mystery"}
+			]
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewCapabilitiesCache()
+	server := &domain.Server{ID: "s1", Name: "s1", URL: srv.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}}
+
+	if got := c.Context(context.Background(), server, "small"); got != 4096 {
+		t.Errorf("small = %d, want 4096", got)
+	}
+	if got := c.Context(context.Background(), server, "no-modalities"); got != 131072 {
+		t.Errorf("no-modalities = %d, want 131072 (a listing with no modality fields still declares the window)", got)
+	}
+	if got := c.Context(context.Background(), server, "mystery"); got != 0 {
+		t.Errorf("mystery = %d, want 0 (the backend said nothing)", got)
+	}
+}
+
+// The health probe feeds the same cache from the listing it already fetched.
+func TestCapabilitiesCacheContextWindowFromObserve(t *testing.T) {
+	c := NewCapabilitiesCache()
+	c.Observe("s1", []byte(`{"data":[{"id":"chat","context_length":8192}]}`))
+
+	server := &domain.Server{ID: "s1", Name: "s1", URL: "http://127.0.0.1:1"}
+	if got := c.Context(context.Background(), server, "chat"); got != 8192 {
+		t.Errorf("chat = %d, want 8192", got)
+	}
+}

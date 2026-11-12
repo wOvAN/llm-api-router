@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"llm-api-router/config"
 	"llm-api-router/domain"
 )
 
@@ -118,5 +119,65 @@ func TestHandleContextWindowGateStaysInert(t *testing.T) {
 	}
 	if hits.Load() != 1 || fallbacks.Load() != 0 {
 		t.Errorf("hits = %d, fallbacks = %d, want 1 and 0", hits.Load(), fallbacks.Load())
+	}
+}
+
+// The same gate with no operator declaration: a backend that states its own
+// window in its /v1/models entry is enough to move an oversized request to the
+// sibling that states room. An operator declaration still outranks it.
+func TestHandleContextWindowGateUsesTheBackendsOwnDeclaration(t *testing.T) {
+	var small, big atomic.Int32
+	smallSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		small.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"the request context size exceeds the model's context size"}}`))
+	}))
+	defer smallSrv.Close()
+	bigSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		big.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"chat","choices":[{"finish_reason":"stop"}]}`))
+	}))
+	defer bigSrv.Close()
+
+	_, store, ms, ts := newTestRouter(t)
+	for _, s := range []*domain.Server{
+		{ID: "small", Name: "Small", URL: smallSrv.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}},
+		{ID: "big", Name: "Big", URL: bigSrv.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}},
+	} {
+		if err := store.AddServer(s); err != nil {
+			t.Fatalf("AddServer: %v", err)
+		}
+	}
+	if err := store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"chat"},
+		TargetModel:    "chat",
+		ServerID:       "small",
+		Fallbacks:      []domain.FallbackEntry{{ServerID: "big"}},
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	// What the health probe feeds the shared cache with.
+	caps := config.NewCapabilitiesCache()
+	caps.Observe("small", []byte(`{"data":[{"id":"chat","context_length":1024}]}`))
+	caps.Observe("big", []byte(`{"data":[{"id":"chat","context_length":200000}]}`))
+	r := New(store, ms, nil, nil, nil, ts, caps)
+
+	prompt := strings.Repeat("word ", 4000) // ~5k chars ≈ 1.25k tokens > 1024
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"chat","messages":[{"role":"user","content":"`+prompt+`"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if got := w.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", got, w.Body.String())
+	}
+	if got := small.Load(); got != 0 {
+		t.Errorf("the 1024-token backend was hit %d times, want 0 (the prompt is bigger)", got)
+	}
+	if got := big.Load(); got != 1 {
+		t.Errorf("the 200k backend hit %d times, want 1", got)
 	}
 }

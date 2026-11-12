@@ -38,6 +38,7 @@ type serverCapabilities struct {
 	fetched time.Time
 	vision  map[string]*bool // model id -> nil when the backend reports no modalities
 	audio   map[string]bool  // model id -> present when the model declares an audio `task`
+	context map[string]int   // model id -> the context window the backend declares (0 = silent)
 }
 
 // NewCapabilitiesCache creates an empty cache.
@@ -100,6 +101,27 @@ func (c *CapabilitiesCache) Audio(ctx context.Context, srv *domain.Server, model
 	return entry.audio[model], entry.audio[model]
 }
 
+// Context returns the context window srv declares for model, from its own
+// /v1/models entry (llama.cpp's `context_length`). 0 means the backend said
+// nothing, which is not a declaration of zero: the caller gates nothing.
+func (c *CapabilitiesCache) Context(ctx context.Context, srv *domain.Server, model string) int {
+	if c == nil || srv == nil || model == "" {
+		return 0
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[srv.ID]
+	if !ok || time.Since(entry.fetched) >= c.ttl {
+		c.mu.Unlock()
+		entry = probeServerCapabilities(ctx, srv)
+		c.mu.Lock()
+		entry.fetched = time.Now()
+		c.entries[srv.ID] = entry
+	}
+	return entry.context[model]
+}
+
 // Observe records a /v1/models listing the caller already fetched (the health
 // probe fetches one every interval) as the server's capabilities.
 func (c *CapabilitiesCache) Observe(serverID string, body []byte) {
@@ -114,7 +136,7 @@ func (c *CapabilitiesCache) Observe(serverID string, body []byte) {
 }
 
 func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapabilities {
-	out := serverCapabilities{vision: make(map[string]*bool), audio: make(map[string]bool)}
+	out := serverCapabilities{vision: make(map[string]*bool), audio: make(map[string]bool), context: make(map[string]int)}
 
 	// Detach from the request context: a client disconnect must not poison the
 	// capability cache with a negative entry for the next ten minutes.
@@ -162,13 +184,14 @@ func probeServerCapabilities(ctx context.Context, srv *domain.Server) serverCapa
 
 // parseCapabilities reads a /v1/models listing into per-model capability facts.
 func parseCapabilities(body []byte) serverCapabilities {
-	out := serverCapabilities{vision: make(map[string]*bool), audio: make(map[string]bool)}
+	out := serverCapabilities{vision: make(map[string]*bool), audio: make(map[string]bool), context: make(map[string]int)}
 
 	var payload struct {
 		Data []struct {
-			ID           string `json:"id"`
-			Task         string `json:"task"`
-			Architecture struct {
+			ID            string `json:"id"`
+			Task          string `json:"task"`
+			ContextLength int    `json:"context_length"`
+			Architecture  struct {
 				InputModalities  *[]string `json:"input_modalities"`
 				OutputModalities *[]string `json:"output_modalities"`
 			} `json:"architecture"`
@@ -183,6 +206,12 @@ func parseCapabilities(body []byte) serverCapabilities {
 	for _, m := range payload.Data {
 		if m.ID == "" {
 			continue
+		}
+		// The declared window is read for every entry, modality fields or not:
+		// an engine that says nothing about modalities can still say how much
+		// context its checkpoint was built with.
+		if m.ContextLength > 0 {
+			out.context[m.ID] = m.ContextLength
 		}
 		// A declared task is audio.cpp's vocabulary (tts/asr/s2s/diar/clon/...):
 		// such a model has no chat completion to serve. Text engines never send

@@ -567,11 +567,19 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 
-		// Skip attempts that declare a window too small for this request (see
-		// contextOverflows); the last attempt is tried anyway.
-		if i < len(attempts)-1 && contextOverflows(attempts[i].contextWindow, body) {
+		// Skip attempts whose context window can not fit this request (see
+		// contextOverflows); the last attempt is tried anyway. The operator's
+		// declaration outranks the backend's own: a member that declares no
+		// window falls back to what its /v1/models entry states, so a config
+		// that never mentions windows still gets the gate from a backend that
+		// states its checkpoint's size.
+		window := attempts[i].contextWindow
+		if window == 0 {
+			window = r.caps.Context(req.Context(), srv, attempts[i].targetModel)
+		}
+		if i < len(attempts)-1 && contextOverflows(window, body) {
 			log.Warnf("[%s] model=%q — skipping %s: declared context window %d < estimated prompt %d (attempt %d/%d)",
-				req.URL.Path, model, srv.Name, attempts[i].contextWindow, len(body)/4, i+1, len(attempts))
+				req.URL.Path, model, srv.Name, window, len(body)/4, i+1, len(attempts))
 			continue
 		}
 
@@ -1136,11 +1144,13 @@ type bufferedAnswer struct {
 }
 
 // contextOverflows reports whether a request's estimated prompt can not fit the
-// context window a backend declares. The estimate is the same chars/4 the jev
-// state uses, over the WHOLE body (bytes/4) — system prompt, every turn, tools,
-// the works, which is what the window has to hold. An undeclared window (0)
-// gates nothing: an absent declaration is not a declaration of zero, so a config
-// that never mentions windows routes exactly as it always did.
+// context window a backend can fit. The window is the operator's declaration,
+// else the backend's own /v1/models entry (see CapabilitiesCache.Context). The
+// estimate is the same chars/4 the jev state uses, over the WHOLE body (bytes/4)
+// — system prompt, every turn, tools, the works, which is what the window has to
+// hold. An undeclared window (0) gates nothing: an absent declaration is not a
+// declaration of zero, so a config that never mentions windows routes exactly as
+// it always did on a backend that says nothing either.
 func contextOverflows(window int, body []byte) bool {
 	return window > 0 && len(body)/4 > window
 }

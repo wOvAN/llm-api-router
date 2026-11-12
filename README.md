@@ -124,7 +124,7 @@ The config is stored in `config.json` (path configurable via `CONFIG_FILE`). You
 - Startup warns about config keys it does not read (a typo'd `colddown_time` is otherwise invisible) and about rules naming a server the config does not define; deleting such a server, or adding a rule naming one, is refused (`409`/`400` naming the rules/servers)
 - The same audit runs as a deploy-time validator: `./llm-api-router -check-config` prints every finding and exits `1` on a dangling server reference (an unread key stays a warning — the router boots past it). A missing `CONFIG_FILE` exits `1` rather than creating one
 - Fallback `target_model` empty → inherits the rule's primary `TargetModel`
-- `context_window` (on a rule, a fallback, or a jev candidate) declares the context size that member can fit; a request whose estimated prompt (`bytes/4`) exceeds it is routed past that member to one that declares room (`0`/absent = unguarded)
+- `context_window` (on a rule, a fallback, or a jev candidate) declares the context size that member can fit; a request whose estimated prompt (`bytes/4`) exceeds it is routed past that member to one that declares room; a member that declares none takes the window its own backend lists for that model in `/v1/models` (llama.cpp's `context_length`), and `0`/absent everywhere is unguarded
 
 ## API Usage
 
