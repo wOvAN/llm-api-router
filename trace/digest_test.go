@@ -63,6 +63,22 @@ func TestDigestAudioStream(t *testing.T) {
 	}
 }
 
+// audio.cpp's streaming ASR emits `transcript.text.partial` next to its deltas:
+// a WHOLE-TEXT SNAPSHOT, so appending it would duplicate the transcript. It
+// belongs in the event histogram and nowhere else.
+func TestDigestAudioStreamIgnoresPartialSnapshots(t *testing.T) {
+	raw := []byte("event: transcript.text.delta\ndata: {\"type\":\"transcript.text.delta\",\"delta\":\"hi\"}\n\n" +
+		"event: transcript.text.partial\ndata: {\"type\":\"transcript.text.partial\",\"text\":\"hi the\"}\n\n" +
+		"event: transcript.text.done\ndata: {\"type\":\"transcript.text.done\",\"text\":\"hi there\"}\n\n")
+	d := DigestResponse(raw, "text/event-stream")
+	if d.Text != "hi" {
+		t.Errorf("text = %q, want only the deltas (a snapshot is not an append)", d.Text)
+	}
+	if d.Events["transcript.text.partial"] != 1 {
+		t.Errorf("events = %v, want the partial frame counted", d.Events)
+	}
+}
+
 func TestDigestJSON(t *testing.T) {
 	d := DigestResponse([]byte(`{"choices":[{"message":{"content":"Hi there"},"finish_reason":"stop"}]}`), "application/json")
 	if d.Text != "Hi there" || d.FinishReason != "stop" {
