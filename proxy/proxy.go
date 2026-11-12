@@ -55,6 +55,34 @@ var upstreamClient = &http.Client{Transport: upstreamTransport}
 // transport per request would reopen a TCP+TLS connection to the proxy every time.
 var proxyTransports sync.Map // proxy URL -> *http.Transport
 
+// transportFor is TransportFor with a per-server response-header bound: a
+// server whose first request warms a cold checkpoint needs a longer bound than
+// the one already warm. Transports are cached per (proxy, bound) so connection
+// pooling survives the override, and 0 means the shared transport (the global
+// proxy.ResponseHeaderTimeout).
+func transportFor(proxyURL string, headerTimeout time.Duration) (http.RoundTripper, error) {
+	base, err := TransportFor(proxyURL)
+	if err != nil || headerTimeout <= 0 {
+		return base, err
+	}
+	tr, ok := base.(*http.Transport)
+	if !ok {
+		return base, nil
+	}
+	key := fmt.Sprintf("%s|%s", proxyURL, headerTimeout)
+	if cached, ok := headerTimeoutTransports.Load(key); ok {
+		return cached.(*http.Transport), nil
+	}
+	// Clone, never mutate: the shared transport serves every other server.
+	clone := tr.Clone()
+	clone.ResponseHeaderTimeout = headerTimeout
+	headerTimeoutTransports.Store(key, clone)
+	return clone, nil
+}
+
+// headerTimeoutTransports caches one transport per (proxy URL, header bound).
+var headerTimeoutTransports sync.Map
+
 // TransportFor returns the transport for requests that go through proxyURL
 // ("" = direct connection). The proxy URL may omit the scheme (http assumed)
 // and embed credentials (http://user:pass@host:port). Supported schemes:
@@ -312,7 +340,11 @@ type RouterHeaders struct {
 	// client-visible header, like Proxy.
 	Headers map[string]string
 	// Proxy is the server's proxy URL ("" = direct connection). Not a client-visible header.
-	Proxy string
+	// ResponseHeaderTimeout, when non-zero, is the server-configured bound on the
+	// upstream response-header wait (0 = the global proxy.ResponseHeaderTimeout).
+	// Not a client-visible header, like Proxy.
+	ResponseHeaderTimeout time.Duration
+	Proxy                 string
 	// UpstreamPath replaces the client's path when a conversion points the request
 	// at a different endpoint ("" = the client's path). Not a client-visible header.
 	UpstreamPath string
@@ -1567,8 +1599,8 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	// Execute the upstream request (shared client with connection pooling, or a
 	// per-proxy client when the server configures one for this protocol).
 	client := upstreamClient
-	if rh != nil && rh.Proxy != "" {
-		transport, transportErr := TransportFor(rh.Proxy)
+	if rh != nil && (rh.Proxy != "" || rh.ResponseHeaderTimeout > 0) {
+		transport, transportErr := transportFor(rh.Proxy, rh.ResponseHeaderTimeout)
 		if transportErr != nil {
 			return nil, transportErr
 		}
@@ -1577,7 +1609,9 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		// req.Host when it is set — and it is set here, inherited from the
 		// client's Host header by req.Clone. Left alone, the proxy would be
 		// asked for the client's host instead of the configured backend.
-		proxyReq.Host = ""
+		if rh.Proxy != "" {
+			proxyReq.Host = ""
+		}
 	}
 	upstreamResp, err := client.Do(proxyReq)
 	if err != nil {

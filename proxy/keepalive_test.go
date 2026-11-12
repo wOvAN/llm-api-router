@@ -297,3 +297,36 @@ func TestStreamProxyKeepAliveServerOverride(t *testing.T) {
 		t.Errorf("header 0 should beat the server override, got %q", w2.content())
 	}
 }
+
+// A backend that accepts the connection and then sits on the response headers is
+// bounded per server as well as globally: the operator whose first request warms
+// a 70B checkpoint needs a longer bound on THAT server than on the ones already
+// warm (ollama's per-profile timeouts, and its per-model load-time scaling).
+func TestStreamProxyPerServerResponseHeaderTimeout(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(300 * time.Millisecond):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case <-r.Context().Done():
+		}
+	}))
+	defer slow.Close()
+
+	newReq := func() *http.Request {
+		return httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	}
+
+	req := newReq()
+	if _, err := StreamProxy(req.Context(), slow.URL, "", req, &syncWriter{}, "m", "m",
+		&RouterHeaders{ResponseHeaderTimeout: 50 * time.Millisecond}, false, nil); err == nil {
+		t.Fatal("the per-server header bound did not fire")
+	}
+
+	// Zero = the global bound, so the same backend is relayed in full.
+	req = newReq()
+	if _, err := StreamProxy(req.Context(), slow.URL, "", req, &syncWriter{}, "m", "m",
+		&RouterHeaders{}, false, nil); err != nil {
+		t.Fatalf("StreamProxy with no per-server bound: %v", err)
+	}
+}

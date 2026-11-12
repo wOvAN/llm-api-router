@@ -58,6 +58,12 @@ type Server struct {
 	// server (seconds). 0 = use the global proxy.KeepAliveIdle. A per-request
 	// X-Router-KeepAlive header still overrides this.
 	KeepAliveIdle int `json:"keep_alive_idle,omitempty"`
+	// ResponseHeaderTimeout overrides, in seconds, how long to wait for this
+	// backend's response headers after the request is written (0 = the global
+	// proxy.ResponseHeaderTimeout). A backend that cold-starts a checkpoint
+	// answers the first request minutes later; a warm sibling answers at once,
+	// and the shared bound is the one the warm box needs.
+	ResponseHeaderTimeout int `json:"response_header_timeout,omitempty"`
 	// Headers are static headers stamped on every upstream request to this server
 	// (a gateway that requires a tenant id or a routing tag). The configured value
 	// overwrites the client's own header of the same name; the client's other

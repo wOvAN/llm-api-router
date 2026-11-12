@@ -750,16 +750,17 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			srvKeepAlive = time.Duration(n) * time.Second
 		}
 		rh := &proxy.RouterHeaders{
-			ServerID:       srv.ID,
-			ServerName:     srv.Name,
-			Attempts:       fmt.Sprintf("%d/%d", i+1, len(attempts)),
-			FallbackErrors: attemptErrors,
-			KeepAliveIdle:  srvKeepAlive,
-			Headers:        srv.Headers,
-			Proxy:          srv.ProxyURL(),
-			UpstreamPath:   plan.Path,
-			Convert:        meta.convert,
-			ConvertNotes:   meta.convertNotes,
+			ServerID:              srv.ID,
+			ServerName:            srv.Name,
+			Attempts:              fmt.Sprintf("%d/%d", i+1, len(attempts)),
+			FallbackErrors:        attemptErrors,
+			KeepAliveIdle:         srvKeepAlive,
+			ResponseHeaderTimeout: time.Duration(srv.ResponseHeaderTimeout) * time.Second,
+			Headers:               srv.Headers,
+			Proxy:                 srv.ProxyURL(),
+			UpstreamPath:          plan.Path,
+			Convert:               meta.convert,
+			ConvertNotes:          meta.convertNotes,
 		}
 		if meta.capture != nil {
 			rh.Trace = meta.capture
