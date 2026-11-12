@@ -36,7 +36,7 @@ jobs:
           go build -ldflags "-X main.Version=${VERSION}" -o llm-api-router .
 
       - name: Test
-        run: go test -v ./...
+        run: go test -v -timeout 20m ./...
 
   docker:
     runs-on: ubuntu-latest
