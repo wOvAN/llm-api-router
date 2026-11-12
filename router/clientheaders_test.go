@@ -15,6 +15,9 @@ import (
 func TestHandleClientRouterHeadersDoNotRideUpstream(t *testing.T) {
 	var seen http.Header
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		seen = req.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
@@ -72,7 +75,10 @@ func TestClientRetriesOverrideIsClamped(t *testing.T) {
 // honouring it lets any client sign its traffic as anyone else's, and the recent
 // request list is the operator's view of who is hammering the box.
 func TestHandleClientIPIgnoresForgedForwardedHeaders(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
 	}))

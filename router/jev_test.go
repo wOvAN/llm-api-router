@@ -30,6 +30,9 @@ func jevPool() []domain.JevCandidate {
 func jevDecision(t *testing.T, answer string, calls *int) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		*calls++
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(answer))
@@ -167,6 +170,9 @@ func TestJevAttemptsEmptyPool(t *testing.T) {
 func TestHandleJev(t *testing.T) {
 	var decisionBody map[string]any
 	decision := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &decisionBody)
 		_, _ = w.Write([]byte(`{"model":"laya","answers":{"model":{"type":"choice","choice":"sonnet","confidence":0.8}},` +
@@ -176,6 +182,9 @@ func TestHandleJev(t *testing.T) {
 
 	var hit string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		hit = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"sonnet","choices":[{"message":{"content":"ok"}}]}`))
@@ -365,6 +374,9 @@ func TestHandleJevAudioCandidateFiltered(t *testing.T) {
 
 	textHit := ""
 	text := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		textHit = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"sonnet","choices":[{"message":{"content":"ok"}}]}`))
@@ -428,6 +440,9 @@ func TestHandleJevSecurityBlock(t *testing.T) {
 	// which the audio pool filter runs before the decision) — only a proxied
 	// POST means the blocked request got through.
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		if r.Method == http.MethodPost {
 			hit = true
 		}
@@ -532,6 +547,9 @@ func TestJevAttemptsContextNoDowngrade(t *testing.T) {
 func TestJevAttemptsImages(t *testing.T) {
 	var gotImages []any
 	decision := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		var body map[string]any
 		_ = json.Unmarshal(b, &body)
@@ -963,7 +981,11 @@ func jevTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store) {
 
 func addJevServers(t *testing.T, store *config.Store, decisionURL string) {
 	t.Helper()
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
+	}))
 	t.Cleanup(backend.Close)
 	for _, id := range []string{"s0", "s1", "s2", "s3"} {
 		if err := store.AddServer(&domain.Server{ID: id, Name: id, URL: backend.URL,
@@ -998,6 +1020,9 @@ func boolInt(b bool) int {
 // pins JevCandidate.Convert being read by `jevAttempts`.
 func TestHandleJevCandidateConverts(t *testing.T) {
 	decision := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"answers":{"model":{"type":"choice","choice":"big","confidence":0.9}},` +
 			`"usage":{"input_tokens":5,"output_tokens":1}}`))
@@ -1005,6 +1030,9 @@ func TestHandleJevCandidateConverts(t *testing.T) {
 	defer decision.Close()
 	var gotPath string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		gotPath = r.URL.Path
 		_, _ = w.Write([]byte(`{"id":"c","model":"big","choices":[{"index":0,` +
 			`"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))

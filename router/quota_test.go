@@ -21,7 +21,10 @@ import (
 // context.Done() branch of the backoff select, which is an exit path too.
 func TestHandleClientDisconnectInBackoffReleasesQuotaReservation(t *testing.T) {
 	var hits atomic.Int32
-	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		hits.Add(1)
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {

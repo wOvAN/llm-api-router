@@ -38,6 +38,20 @@ func newTestRouter(t *testing.T) (*Router, *config.Store, *metrics.Store, *trace
 	return New(store, ms, nil, nil, nil, ts, nil), store, ms, ts
 }
 
+// answerProbe answers the router's capability probe (GET /v1/models) the way a
+// backend that serves no listing does, and reports that it did. The
+// context-window gate asks a backend that declares no window for its own
+// listing, so a test backend must not treat that GET as a generation it served:
+// a counting handler would count it, a blocking one would consume a release, and
+// an asserting one would fail on a body it was never meant to read.
+func answerProbe(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+		http.Error(w, `{"error":"no models endpoint"}`, http.StatusNotFound)
+		return true
+	}
+	return false
+}
+
 // addTestRoute wires one incoming model to one backend, with no retries: a
 // failing backend must fall through (or answer) without a 100ms-scale backoff.
 func addTestRoute(t *testing.T, store *config.Store, incoming, url string) {
@@ -383,6 +397,9 @@ func TestHandleMissingModel(t *testing.T) {
 func TestHandleSystemone(t *testing.T) {
 	var receivedBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		receivedBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
@@ -450,6 +467,9 @@ func TestHandleSystemone(t *testing.T) {
 func TestHandleAudioTranscriptionsMultipart(t *testing.T) {
 	var receivedBody, receivedType string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		receivedBody = string(b)
 		receivedType = r.Header.Get("Content-Type")
@@ -531,6 +551,9 @@ func TestHandleAudioTranscriptionsMultipart(t *testing.T) {
 // X-AudioCPP-* headers when there is no JSON body to parse.
 func TestHandleTTSBinaryPassthrough(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		if !strings.Contains(string(b), `"model":"voice-1"`) {
 			t.Errorf("upstream body = %s", b)
@@ -577,6 +600,9 @@ func TestHandleTTSBinaryPassthrough(t *testing.T) {
 func TestHandleAudioVoicesGet(t *testing.T) {
 	var receivedQuery string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		receivedQuery = r.URL.RawQuery
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"voices":["alba","cosette"]}`))
@@ -679,6 +705,9 @@ func TestHandleAllBackendsFail(t *testing.T) {
 func TestHandleInjectsStreamUsage(t *testing.T) {
 	var receivedBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		buf := make([]byte, 4096)
 		n, _ := r.Body.Read(buf)
 		receivedBody = string(buf[:n])
@@ -751,6 +780,9 @@ func TestHandleInjectsStreamUsage(t *testing.T) {
 func TestHandleResponsesAPI(t *testing.T) {
 	var gotPath, receivedBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		gotPath = r.URL.Path
 		buf, _ := io.ReadAll(r.Body)
 		receivedBody = string(buf)
@@ -829,6 +861,9 @@ func TestHandleResponsesAPI(t *testing.T) {
 func TestHandleResponsesAPIStreaming(t *testing.T) {
 	var receivedBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		buf, _ := io.ReadAll(r.Body)
 		receivedBody = string(buf)
 
@@ -935,6 +970,9 @@ func TestHandleAnthropicKeepAlive(t *testing.T) {
 	defer func() { proxy.KeepAliveIdle = old }()
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-3-opus\"}}\n\n"))
@@ -1090,6 +1128,9 @@ func (f *flakyWriter) Write(p []byte) (int, error) {
 // the generation ran and cost tokens, so it must not vanish from metrics.
 func TestHandleClientDisconnectRecordsMetrics(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
 		f := w.(http.Flusher)
@@ -1177,6 +1218,9 @@ func TestFallbackPreservesActualModel(t *testing.T) {
 
 	// Create fallback server that returns a known model name
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"fallback-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
 	}))
@@ -1232,6 +1276,9 @@ func TestFallbackPreservesActualModel(t *testing.T) {
 func TestPrimaryAttemptRewritesModel(t *testing.T) {
 	// When primary succeeds, response should contain the original client model
 	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
 	}))
@@ -1279,6 +1326,9 @@ func TestPrimaryAttemptRewritesModel(t *testing.T) {
 func TestNoRewriteWhenModelsMatch(t *testing.T) {
 	// When targetModel == originalModel, no rewriting occurs
 	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
 	}))
@@ -1330,6 +1380,9 @@ func TestFallbackLogsActualModel(t *testing.T) {
 
 	// Create fallback server that succeeds
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"haiku","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":10}}`)) //nolint:errcheck
 	}))
@@ -1393,6 +1446,9 @@ func TestMidStreamErrorNoFallback(t *testing.T) {
 	// record whatever metrics it has and return.
 
 	faultyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
 		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")) //nolint:errcheck
@@ -1410,6 +1466,9 @@ func TestMidStreamErrorNoFallback(t *testing.T) {
 	// Fallback server that should NOT be called
 	fallbackCalled := false
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		fallbackCalled = true
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"backup","choices":[]}`)) //nolint:errcheck
@@ -1468,6 +1527,9 @@ func TestRetriesSameServerBeforeFallback(t *testing.T) {
 	// should be retried per NumRetries and never hit the fallback.
 	var calls atomic.Int32
 	flakyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		if calls.Add(1) <= 2 {
 			hj, ok := w.(http.Hijacker)
 			if ok {
@@ -1487,6 +1549,9 @@ func TestRetriesSameServerBeforeFallback(t *testing.T) {
 
 	fallbackCalled := false
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		fallbackCalled = true
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
@@ -1542,6 +1607,9 @@ func TestRetriesExhaustedThenFallsBack(t *testing.T) {
 	var calls atomic.Int32
 
 	deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		calls.Add(1)
 		hj, ok := w.(http.Hijacker)
 		if ok {
@@ -1556,6 +1624,9 @@ func TestRetriesExhaustedThenFallsBack(t *testing.T) {
 	defer deadServer.Close()
 
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
 	}))
@@ -1607,6 +1678,9 @@ func TestRetriesHeaderOverridesRule(t *testing.T) {
 	var calls atomic.Int32
 
 	flakyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		if calls.Add(1) == 1 {
 			hj, ok := w.(http.Hijacker)
 			if ok {
@@ -1626,6 +1700,9 @@ func TestRetriesHeaderOverridesRule(t *testing.T) {
 
 	fallbackCalled := false
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		fallbackCalled = true
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
@@ -1682,6 +1759,9 @@ func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
 	// next request skips it without even asking it.
 	var primaryCalls atomic.Int32
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		primaryCalls.Add(1)
 		w.Header().Set("Retry-After", "20")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -1691,6 +1771,9 @@ func TestRateLimit429ImmediateCooldownSkipsServer(t *testing.T) {
 
 	var fallbackCalls atomic.Int32
 	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		fallbackCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
@@ -1769,6 +1852,9 @@ func TestQuotaTPMBlocksRoutesToFallback(t *testing.T) {
 	// must be routed to the fallback.
 	var primaryCalls atomic.Int32
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		primaryCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"gpt-4","usage":{"prompt_tokens":1000,"completion_tokens":0,"total_tokens":1000},"choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
@@ -1777,6 +1863,9 @@ func TestQuotaTPMBlocksRoutesToFallback(t *testing.T) {
 
 	var fallbackCalls atomic.Int32
 	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		fallbackCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
@@ -1851,6 +1940,9 @@ func TestRouterObservabilityHeaders(t *testing.T) {
 	// X-Router-Attempts=2/2, X-Router-Retries=0, X-Router-Fallback-Errors=[...].
 	var fallbackCalled bool
 	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		fallbackCalled = true
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
@@ -1916,6 +2008,9 @@ func TestRouterObservabilityHeadersRetriesRecovered(t *testing.T) {
 	// and X-Router-Attempts=1/1 (no fallback).
 	var calls atomic.Int32
 	flaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		if calls.Add(1) == 1 {
 			hj, ok := w.(http.Hijacker)
 			if ok {
@@ -1976,6 +2071,9 @@ func TestHandleRetriesStreamErrorBody(t *testing.T) {
 	// instead of forwarding the unparseable response to the client.
 	var calls atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		if calls.Add(1) == 1 {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(500)
@@ -2024,6 +2122,9 @@ func TestHandleFallbackOnStreamErrorBody(t *testing.T) {
 	// 5xx with SSE body from the primary must trigger fallback to the next
 	// server instead of being forwarded to the client.
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(500)
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"dead\"}}]}\n\n")) //nolint:errcheck
@@ -2031,6 +2132,9 @@ func TestHandleFallbackOnStreamErrorBody(t *testing.T) {
 	defer primary.Close()
 
 	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`)) //nolint:errcheck
 	}))
@@ -2089,6 +2193,9 @@ func TestHandleDefaultNumRetries(t *testing.T) {
 	// retrying a flaky backend up to the default instead of failing at once.
 	var calls atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		if calls.Add(1) <= 2 {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(500)
@@ -2133,7 +2240,10 @@ func TestHandleDefaultNumRetries(t *testing.T) {
 }
 
 func TestHandleTraceDisabledRecordsNothing(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}`))
 	}))
 	defer backend.Close()
@@ -2159,7 +2269,10 @@ func TestHandleTraceDisabledRecordsNothing(t *testing.T) {
 }
 
 func TestHandleTraceCapturesRequestAndResponse(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"He\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"y\"},\"finish_reason\":\"stop\"}]}\n\n"))
@@ -2206,7 +2319,10 @@ func TestHandleTraceCapturesRequestAndResponse(t *testing.T) {
 }
 
 func TestHandleTraceFiltersByModelAndServer(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer backend.Close()
@@ -2238,7 +2354,10 @@ func TestHandleTraceFiltersByModelAndServer(t *testing.T) {
 }
 
 func TestHandleTraceOneEntryPerRequestWithFallback(t *testing.T) {
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
 	}))
 	defer fallback.Close()
@@ -2261,7 +2380,10 @@ func TestHandleTraceOneEntryPerRequestWithFallback(t *testing.T) {
 }
 
 func TestHandleTraceRecordsErroredAttemptBody(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		http.Error(w, "bad request body from backend", http.StatusBadRequest)
 	}))
 	defer backend.Close()

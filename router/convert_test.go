@@ -41,6 +41,9 @@ func newRouterWithSettings(t *testing.T, configJSON string) (*Router, *config.St
 func TestHandleNoProtocolsIsPassthrough(t *testing.T) {
 	var gotPath, gotBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		gotPath, gotBody = r.URL.Path, string(b)
 		_, _ = w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant"}}]}`))
@@ -79,6 +82,9 @@ func TestHandleNoProtocolsIsPassthrough(t *testing.T) {
 func TestHandleProtocolMismatchRefusesWithOur400(t *testing.T) {
 	var hits int
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		hits++
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
@@ -121,12 +127,18 @@ func TestHandleProtocolMismatchRefusesWithOur400(t *testing.T) {
 func TestHandleProtocolMismatchConvertsFallback(t *testing.T) {
 	var primaryHits int
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		primaryHits++
 		http.Error(w, "nope", http.StatusNotFound)
 	}))
 	defer primary.Close()
 	var fbPath string
 	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		fbPath = r.URL.Path
 		_, _ = w.Write([]byte(`{"id":"c","model":"claude","choices":[{"index":0,` +
 			`"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
@@ -179,7 +191,12 @@ func TestHandleProtocolMismatchConvertsFallback(t *testing.T) {
 // request that was never sent must not be metered as if it had been.
 func TestHandleRefusalLeavesHealthClean(t *testing.T) {
 	var hits int
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
+		hits++
+	}))
 	defer backend.Close()
 
 	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
@@ -235,10 +252,18 @@ func TestHandleRefusalLeavesHealthClean(t *testing.T) {
 // the refusal tail reports no conversion, in the headers and in the metric alike,
 // exactly like the single-attempt refusal.
 func TestHandleRefusalTailReportsNoConversion(t *testing.T) {
-	converted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	converted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
+	}))
 	convertedURL := converted.URL
 	converted.Close() // hijacked + closed: instant transport error after the eager headers
-	refuser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	refuser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
+	}))
 	refuserURL := refuser.URL
 	refuser.Close() // refused: never reached, so it must also see nothing
 
@@ -283,6 +308,9 @@ func TestHandleConvertOff(t *testing.T) {
 	var hits int
 	var gotPath, gotHeader string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		hits++
 		gotPath = r.URL.Path
 		gotHeader = r.Header.Get("X-Router-Convert")
@@ -332,12 +360,19 @@ func TestHandleConvertReportsServingAttempt(t *testing.T) {
 	var hits int
 	var gotPath string
 	chat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		hits++
 		gotPath = r.URL.Path
 		_, _ = w.Write([]byte(`{"id":"c1","model":"claude","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 	}))
 	defer chat.Close()
-	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
+	}))
 	deadURL := dead.URL
 	dead.Close() // hijacked + closed: instant transport error, no dial timeout
 
@@ -385,10 +420,17 @@ func TestHandleConvertReportsServingAttempt(t *testing.T) {
 // attempts, so a conversion reported by a failed attempt must not ride on a
 // passthrough later one.
 func TestHandleConvertHeadersDoNotLeakAcrossAttempts(t *testing.T) {
-	converted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	converted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
+	}))
 	convertedURL := converted.URL
 	converted.Close() // refused after the eager headers were written
 	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		_, _ = w.Write([]byte(`{"id":"c1","model":"claude","choices":[]}`))
 	}))
 	defer plain.Close()
@@ -428,6 +470,9 @@ func TestHandleConvertHeadersDoNotLeakAcrossAttempts(t *testing.T) {
 func TestHandleAnthropicStreamGetsNoStreamOptions(t *testing.T) {
 	var gotBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		_, _ = w.Write([]byte(`{"id":"m1","type":"message","role":"assistant","content":[],"model":"claude"}`))
@@ -458,6 +503,9 @@ func TestHandleAnthropicStreamGetsNoStreamOptions(t *testing.T) {
 func TestHandleChatStreamStillInjectsUsage(t *testing.T) {
 	var gotBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		_, _ = w.Write([]byte(`{"id":"c1","model":"m","choices":[]}`))
@@ -482,6 +530,9 @@ func TestHandleChatStreamStillInjectsUsage(t *testing.T) {
 func TestHandleMessagesServedByChatBackend(t *testing.T) {
 	var gotPath, gotBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		gotPath, gotBody = r.URL.Path, string(b)
 		w.Header().Set("Content-Type", "application/json")
@@ -565,12 +616,18 @@ func TestHandleConvertRequestRefusal(t *testing.T) {
 
 	t.Run("falls through to the next attempt", func(t *testing.T) {
 		var chatHits, plainHits int
-		chat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		chat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			chatHits++
 		}))
 		chatURL := chat.URL
 		chat.Close() // hijacked + closed: the refusal must be decided before the dial
-		plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			plainHits++
 			_, _ = w.Write([]byte(`{"type":"message","role":"assistant","content":[],"model":"claude"}`))
 		}))
@@ -612,7 +669,10 @@ func TestHandleConvertRequestRefusal(t *testing.T) {
 
 	t.Run("the last refusal is our 400", func(t *testing.T) {
 		var hits int
-		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			hits++
 		}))
 		defer backend.Close()
@@ -656,6 +716,9 @@ func TestHandleConvertRequestRefusal(t *testing.T) {
 func TestHandleConvertReportsDroppedKeys(t *testing.T) {
 	var gotBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		_, _ = w.Write([]byte(`{"id":"c1","model":"claude","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
@@ -700,6 +763,9 @@ func TestHandleConvertReportsDroppedKeys(t *testing.T) {
 func TestHandleConvertCountsOnlyUndecodedKeys(t *testing.T) {
 	var gotBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		_, _ = w.Write([]byte(`{"id":"c1","model":"claude","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
@@ -756,7 +822,10 @@ func TestHandleConvertReportsResponseNotes(t *testing.T) {
 		`{"index":1,"message":{"role":"assistant","content":"x"},"finish_reason":"stop"}]}`
 
 	t.Run("json", func(t *testing.T) {
-		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(jsonAnswer))
 		}))
@@ -785,7 +854,10 @@ func TestHandleConvertReportsResponseNotes(t *testing.T) {
 	})
 
 	t.Run("stream", func(t *testing.T) {
-		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			f := w.(http.Flusher)
 			for _, frame := range []string{
@@ -873,6 +945,9 @@ func TestCapNotesBoundsTheTail(t *testing.T) {
 func TestHandleResponsesServedByChatBackend(t *testing.T) {
 	var gotPath, gotBody string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		gotPath, gotBody = r.URL.Path, string(b)
 		_, _ = w.Write([]byte(`{"id":"c1","model":"c","object":"chat.completion",` +

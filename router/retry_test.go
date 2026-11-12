@@ -53,6 +53,9 @@ func chatOK(w http.ResponseWriter) {
 // server marked unhealthy, next attempt tried.
 func TestHandleConnectionRefusedFailsOverAtOnce(t *testing.T) {
 	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		chatOK(w)
 	}))
 	defer live.Close()
@@ -100,6 +103,9 @@ func TestHandleConnectionRefusedFailsOverAtOnce(t *testing.T) {
 // logs and the router's agree.
 func TestHandleRequestIDHeaderAndMetric(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		chatOK(w)
 	}))
 	defer backend.Close()

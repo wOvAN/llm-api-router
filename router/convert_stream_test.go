@@ -22,7 +22,10 @@ import (
 // Anthropic-shaped error frame (tw.passthrough() runs before sendMidStreamError):
 // the client must not also receive the native control frames the emitter absorbs.
 func TestHandleConvertStreamMidStreamBreakStaysInDialect(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"claude\",\"choices\":" +
@@ -70,7 +73,10 @@ func TestHandleConvertStreamMidStreamBreakStaysInDialect(t *testing.T) {
 // read that chunk and emit nothing: an OpenAI usage frame in an Anthropic stream
 // is unparseable, and message_delta is where its numbers belong.
 func TestHandleConvertStreamUsageChunkStaysInsideTheEmitter(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"claude\",\"choices\":" +
@@ -135,7 +141,10 @@ func TestHandleConvertStreamUsageChunkStaysInsideTheEmitter(t *testing.T) {
 // Pinned on all four counts: our status, our content-type, the quote itself, and
 // the absence of any half-built Anthropic envelope.
 func TestHandleConvertStreamFormErrorBodyIsOurFailure(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"claude\",\"choices\":" +
@@ -186,7 +195,10 @@ func TestHandleConvertStreamFormErrorBodyIsOurFailure(t *testing.T) {
 // real shape on the converted path: every event must reach the client as it is
 // produced, not as one native dump at stream end.
 func TestHandleConvertStreamAcceptsCRLFFraming(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		// One event per write+flush: the relay hands the emitter a frame per read,
@@ -231,7 +243,10 @@ func TestHandleConvertStreamAcceptsCRLFFraming(t *testing.T) {
 // the frame the emitter must not swallow: an Anthropic client left with no error
 // event reads a truncated answer as a complete one.
 func TestHandleConvertStreamForwardsAnUpstreamErrorChunk(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"claude\",\"choices\":" +
@@ -274,10 +289,17 @@ func TestHandleConvertStreamForwardsAnUpstreamErrorChunk(t *testing.T) {
 // strip on the second: a client that never asked for the usage chunk must not
 // receive it because an earlier attempt spoke a different dialect.
 func TestHandleConvertStripGateFollowsServingAttempt(t *testing.T) {
-	converted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	converted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
+	}))
 	convertedURL := converted.URL
 	converted.Close() // hijacked + closed: instant transport error, nothing written
-	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":" +
@@ -327,7 +349,10 @@ func TestHandleConvertStripGateFollowsServingAttempt(t *testing.T) {
 // opaque string. The spoke does this on the JSON path; pinned where the client
 // reads it, because the unit test cannot show it survived the writer chain.
 func TestHandleConvertForwardedErrorBodyIsTranslated(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_exceeded","message":"slow down"}}`))
@@ -384,7 +409,10 @@ func clientEvents(s string) []string {
 // (opencode #7692). The frames are deliberately split across writes so a partial
 // frame can not be what proves the shape.
 func TestHandleConvertStreamEndsOnDoneWithNoFinishReason(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"claude\",\"choices\":" +
@@ -436,7 +464,10 @@ func TestHandleConvertStreamEndsOnDoneWithNoFinishReason(t *testing.T) {
 // the body cleanly after its last delta — is the same promise: the message the
 // client was left with must be a closed one, not an open block and a dead socket.
 func TestHandleConvertStreamEndsWithoutDone(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"claude\",\"choices\":" +
 			"[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n"))
@@ -472,7 +503,10 @@ func TestHandleConvertStreamEndsWithoutDone(t *testing.T) {
 // the native side of the emitter. Pinned where the client reads it — the emitter's
 // own unit test cannot show that a frame survived the writers above it.
 func TestHandleConvertStreamThinkingAndParallelToolCalls(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		for _, frame := range []string{
@@ -540,7 +574,10 @@ func TestHandleConvertStreamThinkingAndParallelToolCalls(t *testing.T) {
 // stay silent behind it: the proxy returns as soon as the frame is written, so a
 // normal close after the error is a stream that contradicts itself.
 func TestHandleConvertStreamLoopDetectionStaysInDialect(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		chunk := "data: {\"id\":\"c1\",\"model\":\"claude\",\"choices\":" +
@@ -594,7 +631,10 @@ func TestHandleConvertStreamKeepAliveStaysInDialect(t *testing.T) {
 	proxy.KeepAliveIdle = 30 * time.Millisecond
 	defer func() { proxy.KeepAliveIdle = old }()
 
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"claude\",\"choices\":" +

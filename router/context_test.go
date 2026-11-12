@@ -3,6 +3,7 @@ package router
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,13 +19,19 @@ import (
 // tried anyway). A rule that declares no window gates nothing.
 func TestHandleSkipsAttemptTooSmallForContext(t *testing.T) {
 	var small, big atomic.Int32
-	smallSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	smallSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		small.Add(1)
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":{"message":"the request context size exceeds the model's context size"}}`))
 	}))
 	defer smallSrv.Close()
-	bigSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	bigSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		big.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"long-ctx","choices":[{"finish_reason":"stop"}]}`))
@@ -78,13 +85,19 @@ func TestHandleSkipsAttemptTooSmallForContext(t *testing.T) {
 // declaration of zero).
 func TestHandleContextWindowGateStaysInert(t *testing.T) {
 	var hits, fallbacks atomic.Int32
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
 	}))
 	defer primary.Close()
-	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		fallbacks.Add(1)
 	}))
 	defer backup.Close()
@@ -127,13 +140,19 @@ func TestHandleContextWindowGateStaysInert(t *testing.T) {
 // sibling that states room. An operator declaration still outranks it.
 func TestHandleContextWindowGateUsesTheBackendsOwnDeclaration(t *testing.T) {
 	var small, big atomic.Int32
-	smallSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	smallSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		small.Add(1)
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":{"message":"the request context size exceeds the model's context size"}}`))
 	}))
 	defer smallSrv.Close()
-	bigSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	bigSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		big.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"chat","choices":[{"finish_reason":"stop"}]}`))
@@ -176,6 +195,66 @@ func TestHandleContextWindowGateUsesTheBackendsOwnDeclaration(t *testing.T) {
 	}
 	if got := small.Load(); got != 0 {
 		t.Errorf("the 1024-token backend was hit %d times, want 0 (the prompt is bigger)", got)
+	}
+	if got := big.Load(); got != 1 {
+		t.Errorf("the 200k backend hit %d times, want 1", got)
+	}
+}
+
+// The health tracker pings the servers it thinks are DOWN, so in the default
+// deployment a server that is up has never been asked for its listing: the
+// request path is the only thing that learns a backend's declared window. This
+// is that probe, end to end, with a config that declares nothing.
+func TestHandleContextWindowGateProbesTheBackendItself(t *testing.T) {
+	var small, big atomic.Int32
+	listing := func(counter *atomic.Int32, window int) http.HandlerFunc {
+		return func(w http.ResponseWriter, req *http.Request) {
+			if req.Method == http.MethodGet {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":[{"id":"chat","context_length":` + strconv.Itoa(window) + `}]}`))
+				return
+			}
+			counter.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"model":"chat","choices":[{"finish_reason":"stop"}]}`))
+		}
+	}
+	smallSrv := httptest.NewServer(listing(&small, 1024))
+	defer smallSrv.Close()
+	bigSrv := httptest.NewServer(listing(&big, 200000))
+	defer bigSrv.Close()
+
+	_, store, ms, ts := newTestRouter(t)
+	for _, s := range []*domain.Server{
+		{ID: "small", Name: "Small", URL: smallSrv.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}},
+		{ID: "big", Name: "Big", URL: bigSrv.URL, APITypes: []domain.APIType{domain.APITypeOpenAI}},
+	} {
+		if err := store.AddServer(s); err != nil {
+			t.Fatalf("AddServer: %v", err)
+		}
+	}
+	if err := store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"chat"},
+		TargetModel:    "chat",
+		ServerID:       "small",
+		Fallbacks:      []domain.FallbackEntry{{ServerID: "big"}},
+		Enabled:        true,
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	r := New(store, ms, nil, nil, nil, ts, config.NewCapabilitiesCache())
+
+	prompt := strings.Repeat("word ", 4000) // ~5k chars ≈ 1.25k tokens > 1024
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"chat","messages":[{"role":"user","content":"`+prompt+`"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if got := w.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", got, w.Body.String())
+	}
+	if got := small.Load(); got != 0 {
+		t.Errorf("the 1024-token backend was hit %d times, want 0 (the probe is what knows)", got)
 	}
 	if got := big.Load(); got != 1 {
 		t.Errorf("the 200k backend hit %d times, want 1", got)

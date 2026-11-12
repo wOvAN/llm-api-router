@@ -18,6 +18,9 @@ import (
 func TestHandleWildcardRuleForwardsClientModel(t *testing.T) {
 	var received string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
 		body := make([]byte, 4096)
 		n, _ := r.Body.Read(body)
 		received = string(body[:n])
@@ -61,7 +64,11 @@ func TestHandleWildcardRuleForwardsClientModel(t *testing.T) {
 // servers that can serve it, so a client with a model picker can see a model is
 // down without sending a request to find out.
 func TestListModelsSkipsPatternsAndReportsHealth(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
+	}))
 	defer backend.Close()
 
 	r, store, _, _ := newTestRouter(t)

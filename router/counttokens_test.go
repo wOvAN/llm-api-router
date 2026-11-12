@@ -17,7 +17,10 @@ import (
 // context-window gate.
 func TestHandleCountTokensAnsweredLocally(t *testing.T) {
 	var hits atomic.Int32
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		hits.Add(1)
 	}))
 	defer backend.Close()

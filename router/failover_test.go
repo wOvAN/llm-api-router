@@ -23,7 +23,10 @@ import (
 // "back off" does not change its mind while we sleep between tries.
 func TestHandleUpstream429FailsOverAtOnce(t *testing.T) {
 	var primaryCalls, fallbackCalls atomic.Int32
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		primaryCalls.Add(1)
 		w.Header().Set("Retry-After", "20")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -31,7 +34,10 @@ func TestHandleUpstream429FailsOverAtOnce(t *testing.T) {
 	}))
 	defer primary.Close()
 
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		fallbackCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"backup-model","choices":[{"finish_reason":"stop"}]}`))
@@ -93,7 +99,10 @@ func TestHandleUpstream429FailsOverAtOnce(t *testing.T) {
 // prompt and got "context length exceeded" from every candidate needs to read
 // that reason, and 0/10 of the routers it talks to speak our 502.
 func TestHandleAllBackendsFailServeLastBackendAnswer(t *testing.T) {
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "5")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -101,7 +110,10 @@ func TestHandleAllBackendsFailServeLastBackendAnswer(t *testing.T) {
 	}))
 	defer primary.Close()
 
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(`{"error":{"type":"overloaded","message":"boom-three"}}`))
@@ -158,7 +170,10 @@ func TestHandleAllBackendsFailServeLastBackendAnswer(t *testing.T) {
 // reads X-Router-Server off a failed request has to get the backend this router
 // actually served it from, which is also what the metric records.
 func TestHandleBufferedAnswerDoesNotCarryTheInnerHopsRouterHeaders(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Router-Server", "inner")
 		w.Header().Set("X-Router-Attempts", "7/9")
@@ -199,7 +214,10 @@ func TestHandleBufferedAnswerDoesNotCarryTheInnerHopsRouterHeaders(t *testing.T)
 // spend a full generation on a request that deserves the answer it got.
 func TestHandleUpstream4xxStaysVerbatim(t *testing.T) {
 	var primaryCalls, fallbackCalls atomic.Int32
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		primaryCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -207,7 +225,10 @@ func TestHandleUpstream4xxStaysVerbatim(t *testing.T) {
 	}))
 	defer primary.Close()
 
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		fallbackCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
@@ -257,7 +278,10 @@ func TestHandleUpstream4xxStaysVerbatim(t *testing.T) {
 // never answered at all.
 func TestHandleBuffered5xxKeepsExplicitRetryBudget(t *testing.T) {
 	var calls, fallbackCalls atomic.Int32
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		if calls.Add(1) <= 2 {
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":{"message":"warming up"}}`))
@@ -268,7 +292,10 @@ func TestHandleBuffered5xxKeepsExplicitRetryBudget(t *testing.T) {
 	}))
 	defer primary.Close()
 
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		fallbackCalls.Add(1)
 	}))
 	defer fallback.Close()
@@ -320,7 +347,10 @@ func TestHandleMaxFallbacksCapsTheChain(t *testing.T) {
 	for _, id := range ids {
 		name, counter := id, new(atomic.Int32)
 		hits[name] = counter
-		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			counter.Add(1)
 			conn, _, err := w.(http.Hijacker).Hijack()
 			if err == nil {

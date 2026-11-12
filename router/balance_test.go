@@ -20,7 +20,10 @@ import (
 func TestHandleRoundRobinBalancesAcrossReplicas(t *testing.T) {
 	var a, b atomic.Int32
 	handler := func(counter *atomic.Int32) http.HandlerFunc {
-		return func(w http.ResponseWriter, _ *http.Request) {
+		return func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			counter.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
@@ -81,7 +84,10 @@ func TestHandleRoundRobinBalancesAcrossReplicas(t *testing.T) {
 func TestHandleRoundRobinHonoursWeights(t *testing.T) {
 	var a, b atomic.Int32
 	handler := func(counter *atomic.Int32) http.HandlerFunc {
-		return func(w http.ResponseWriter, _ *http.Request) {
+		return func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			counter.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
@@ -129,7 +135,10 @@ func TestHandleRoundRobinHonoursWeights(t *testing.T) {
 func TestHandleBalanceOffKeepsFailoverOrder(t *testing.T) {
 	var a, b atomic.Int32
 	handler := func(counter *atomic.Int32) http.HandlerFunc {
-		return func(w http.ResponseWriter, _ *http.Request) {
+		return func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			counter.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
@@ -175,7 +184,10 @@ func TestHandleBalanceOffKeepsFailoverOrder(t *testing.T) {
 // operator edits rules on purpose. The sweep keeps what the active profile can
 // build right now.
 func TestHandleBalanceRotationSweepsDeadPools(t *testing.T) {
-	handler := func(w http.ResponseWriter, _ *http.Request) {
+	handler := func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
 	}
@@ -287,7 +299,10 @@ func TestBalanceLeastConnectionsHonoursWeights(t *testing.T) {
 func TestHandleInflightCountsAnAttempt(t *testing.T) {
 	var r *Router
 	during := make(chan int32, 1)
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		during <- r.inflightCount("a")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
@@ -333,13 +348,19 @@ func TestHandleInflightCountsAnAttempt(t *testing.T) {
 // member that has room instead.
 func TestHandleSkipsServerAtParallelCap(t *testing.T) {
 	release := make(chan struct{})
-	busy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	busy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		<-release
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
 	}))
 	defer busy.Close()
-	free := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	free := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
 	}))

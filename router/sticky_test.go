@@ -19,7 +19,10 @@ import (
 func TestHandleRoundRobinPinsConversationToMember(t *testing.T) {
 	var a, b atomic.Int32
 	handler := func(counter *atomic.Int32) http.HandlerFunc {
-		return func(w http.ResponseWriter, _ *http.Request) {
+		return func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			counter.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
@@ -78,7 +81,10 @@ func TestHandleRoundRobinPinsConversationToMember(t *testing.T) {
 func TestHandleRoundRobinPinsByPromptCacheKey(t *testing.T) {
 	var a, b atomic.Int32
 	handler := func(counter *atomic.Int32) http.HandlerFunc {
-		return func(w http.ResponseWriter, _ *http.Request) {
+		return func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
 			counter.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
