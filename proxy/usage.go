@@ -14,13 +14,15 @@ import (
 // usagePaths lists JSON paths where usage can appear in SSE events.
 var usagePaths = []string{"usage", "response.usage", "message.usage"}
 
-// llamaTimingsPaths and vllmMetricsPaths list where the native backend timing
-// objects can appear in an SSE event: top level for chat/completions, and
-// nested for the Responses API, where llama.cpp attaches `timings` to the
-// event's `data` object and vLLM carries `metrics` inside `response`.
+// llamaTimingsPaths, vllmMetricsPaths and tensorFoldPaths list where the native
+// backend timing objects can appear in an SSE event: top level for
+// chat/completions, and nested for the Responses API, where llama.cpp attaches
+// `timings` to the event's `data` object and vLLM carries `metrics` inside
+// `response`.
 var (
 	llamaTimingsPaths = []string{"timings", "response.timings", "data.timings"}
 	vllmMetricsPaths  = []string{"metrics", "response.metrics", "data.metrics"}
+	tensorFoldPaths   = []string{"tensorfold", "response.tensorfold", "data.tensorfold"}
 )
 
 // extractUsageFromResponse parses token usage and timings from the response body.
@@ -75,6 +77,7 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 		uc          usageCounts
 		timings     map[string]any
 		vllmMetrics map[string]any
+		tensorfold  map[string]any
 		audioTiming map[string]any
 		hasAny      bool
 	)
@@ -135,6 +138,15 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 			audioTiming = t
 			hasAny = true
 		}
+		// TensorFold streams its object on the finish_reason chunk, with usage
+		// arriving in a chunk after it, so each container keeps its own last
+		// value and the split costs nothing.
+		for _, path := range tensorFoldPaths {
+			if tf := getField(obj, path); tf != nil {
+				tensorfold = tf
+				hasAny = true
+			}
+		}
 		return false
 	})
 
@@ -143,8 +155,13 @@ func extractUsageFromStream(body []byte) ProxyMetrics {
 	}
 
 	// SGLang never emits meta_info in stream chunks (return_meta_info requires
-	// stream=false), so the stream path has no native timing source.
-	return buildMetricsFromData(uc, 0, timings, vllmMetrics, nil, audioTiming)
+	// stream=false), so the stream path has no SGLang timing source.
+	return buildMetricsFromData(uc, 0, nativeTimings{
+		llama:      timings,
+		vllm:       vllmMetrics,
+		tensorfold: tensorfold,
+		audio:      audioTiming,
+	})
 }
 
 // extractUsageFromJSON parses a non-streaming JSON response.
@@ -170,15 +187,23 @@ func extractUsageFromJSON(body []byte) ProxyMetrics {
 	sglangMeta := sglangMetaInfo(obj)
 	// audio.cpp answers audio requests with a `timing` object and no usage at all.
 	audioTiming, _ := obj["timing"].(map[string]any)
+	tensorfold, _ := obj["tensorfold"].(map[string]any)
 
-	if usage == nil && timings == nil && vllmMetrics == nil && sglangMeta == nil && audioTiming == nil {
+	native := nativeTimings{
+		llama:      timings,
+		vllm:       vllmMetrics,
+		sglang:     sglangMeta,
+		tensorfold: tensorfold,
+		audio:      audioTiming,
+	}
+	if usage == nil && native.empty() {
 		return ProxyMetrics{CachedTokens: -1}
 	}
 
 	uc := extractUsageTokens(usage)
 	total := intToFloat64(usage["total_tokens"])
 
-	return buildMetricsFromData(uc, int64(total), timings, vllmMetrics, sglangMeta, audioTiming)
+	return buildMetricsFromData(uc, int64(total), native)
 }
 
 // getField traverses a dotted JSON path in a map.
@@ -305,14 +330,27 @@ func firstPositiveF(fallback float64, vals ...float64) float64 {
 	return fallback
 }
 
+// nativeTimings collects the optional per-backend timing objects found in one
+// response. Each engine spells its own container, and a backend emits at most
+// one of them, so the order in buildMetricsFromData is a tiebreak, not a sum.
+type nativeTimings struct {
+	llama      map[string]any // llama.cpp `timings` (also radiance, halogen, hipfire, kyojin)
+	vllm       map[string]any // vLLM `metrics` (--enable-per-request-metrics)
+	sglang     map[string]any // SGLang `choices[0].meta_info` (return_meta_info)
+	tensorfold map[string]any // TensorFold `tensorfold`
+	audio      map[string]any // audio.cpp `timing`
+}
+
+func (n nativeTimings) empty() bool {
+	return n.llama == nil && n.vllm == nil && n.sglang == nil && n.tensorfold == nil && n.audio == nil
+}
+
 // buildMetricsFromData composes ProxyMetrics from token counts and optional
-// backend-native timing objects: llama.cpp's top-level `timings`, vLLM's
-// top-level `metrics` (requires --enable-per-request-metrics), and SGLang's
-// `choices[0].meta_info` (requires return_meta_info + --enable-metrics). A
-// backend emits at most one of the three, so the timings block wins when both
-// are present. Rates embedded in the usage object (TabbyAPI, oMLX) seed the
-// throughput fields and lose to all three.
-func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetrics, sglangMeta, audioTiming map[string]any) ProxyMetrics {
+// backend-native timing objects (see nativeTimings). Rates embedded in the usage
+// object (TabbyAPI, oMLX) seed the throughput fields and lose to every native
+// object.
+func buildMetricsFromData(uc usageCounts, totalTokens int64, native nativeTimings) ProxyMetrics {
+	timings, vllmMetrics, sglangMeta, audioTiming := native.llama, native.vllm, native.sglang, native.audio
 	pm := ProxyMetrics{
 		PromptTokens:        uc.input,
 		CompletionTokens:    uc.output,
@@ -354,8 +392,8 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetric
 	}
 
 	// SGLang `meta_info`: first_token_latency is TTFT/prefill, decode_throughput
-	// is the backend's decode tok/s, queue_time is the scheduler queue wait — all
-	// in seconds, so scale to ms where the field is ms-based.
+	// is the backend's decode tok/s — all in seconds, so scale to ms where the
+	// field is ms-based.
 	if sglangMeta != nil {
 		if s := floatToFloat64(sglangMeta["first_token_latency"]); s > 0 {
 			pm.PromptMs = s * 1000
@@ -363,8 +401,14 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetric
 		if tps := floatToFloat64(sglangMeta["decode_throughput"]); tps > 0 {
 			pm.TokensPerSec = tps
 		}
+		// The scheduler queue wait was `queue_time` until SGLang replaced it
+		// with a TTFT phase breakdown: the wait is then storage_prefetch_wait
+		// plus other_queue, and other_queue is only emitted when a prefetch
+		// timer was measured, so a partial breakdown stays unknown.
 		if s := floatToFloat64(sglangMeta["queue_time"]); s > 0 {
 			pm.QueueMs = s * 1000
+		} else if q := floatToFloat64(sglangMeta["other_queue"]); q > 0 {
+			pm.QueueMs = (q + floatToFloat64(sglangMeta["storage_prefetch_wait"])) * 1000
 		}
 		// SGLang reports cached tokens in meta_info (not the standard usage
 		// object); only fill it when the usage-derived value is absent.
@@ -377,6 +421,29 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetric
 		}
 		if n := intToFloat64(sglangMeta["spec_num_correct_drafts"]); n > 0 {
 			pm.DraftTokensAccepted = n
+		}
+	}
+
+	// TensorFold `tensorfold`: phase durations in seconds, its own decode rate,
+	// and the cached prompt count. `prefill_seconds` is the older spelling of
+	// `prefill_s`; a server that states no rate leaves the throughput to the
+	// durations above, which the router turns into tok/s.
+	if tf := native.tensorfold; tf != nil {
+		s := floatToFloat64(tf["prefill_s"])
+		if s <= 0 {
+			s = floatToFloat64(tf["prefill_seconds"])
+		}
+		if s > 0 {
+			pm.PromptMs = s * 1000
+		}
+		if s := floatToFloat64(tf["decode_s"]); s > 0 {
+			pm.PredictedMs = s * 1000
+		}
+		if tps := floatToFloat64(tf["tokens_per_second"]); tps > 0 {
+			pm.TokensPerSec = tps
+		}
+		if cv := intToFloat64(tf["cached"]); cv >= 0 && pm.CachedTokens < 0 {
+			pm.CachedTokens = cv
 		}
 	}
 
@@ -409,6 +476,26 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, timings, vllmMetric
 		// Speculative decoding stats, present only when a draft model is used.
 		pm.DraftTokens = intToFloat64(timings["draft_n"])
 		pm.DraftTokensAccepted = intToFloat64(timings["draft_n_accepted"])
+		// Kyojin spells the same counters as accepted + rejected inside this
+		// same container, and needs both halves: an acceptance rate is never
+		// derived from half the data.
+		if pm.DraftTokens == 0 {
+			if a, ok := timings["accepted_draft_tokens"]; ok {
+				if r, ok := timings["rejected_draft_tokens"]; ok {
+					pm.DraftTokensAccepted = intToFloat64(a)
+					pm.DraftTokens = pm.DraftTokensAccepted + intToFloat64(r)
+				}
+			}
+		}
+		// Hipfire states its phase rates in this same container, and
+		// decode_tok_s excludes prefill (its tok_s rate includes it, so that one
+		// is not a decode fallback).
+		if v := floatToFloat64(timings["prefill_tok_s"]); v > 0 {
+			pm.PromptPerSec = v
+		}
+		if v := floatToFloat64(timings["decode_tok_s"]); v > 0 {
+			pm.TokensPerSec = v
+		}
 	}
 
 	// audio.cpp `timing`: the length of the audio produced/recognized, and the

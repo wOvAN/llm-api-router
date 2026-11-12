@@ -275,6 +275,87 @@ func TestExtractUsageFromJSON(t *testing.T) {
 		}
 	})
 
+	// SGLang replaced `queue_time` with a TTFT phase breakdown (2026-10-28): the
+	// queue wait is now storage_prefetch_wait + other_queue, in seconds, and
+	// other_queue is only emitted when a prefetch timer was measured.
+	t.Run("SGLang split queue phases", func(t *testing.T) {
+		body := []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8},"choices":[{"meta_info":{"first_token_latency":0.12,"decode_throughput":33.5,"prefill_latency":0.11,"storage_prefetch_wait":0.0025,"other_queue":0.005,"before_queue":0.001,"after_prefill":0.002}}]}`)
+		pm := extractUsageFromJSON(body)
+		if pm.QueueMs != 7.5 {
+			t.Errorf("QueueMs = %f, want 7.5 (0.0025s + 0.005s)", pm.QueueMs)
+		}
+	})
+
+	t.Run("SGLang prefill phase without a queue phase", func(t *testing.T) {
+		body := []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8},"choices":[{"meta_info":{"first_token_latency":0.12,"prefill_latency":0.11}}]}`)
+		pm := extractUsageFromJSON(body)
+		if pm.QueueMs != 0 {
+			t.Errorf("QueueMs = %f, want 0 (no queue phase emitted)", pm.QueueMs)
+		}
+	})
+
+	t.Run("hipfire timings rates", func(t *testing.T) {
+		// Hipfire spells its rates inside the same `timings` container, and
+		// decode_tok_s excludes prefill.
+		body := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30},"timings":{"prefill_tok_s":210.0,"decode_tok_s":38.5,"latency_ms":900.0}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptPerSec != 210.0 {
+			t.Errorf("PromptPerSec = %f, want 210.0", pm.PromptPerSec)
+		}
+		if pm.TokensPerSec != 38.5 {
+			t.Errorf("TokensPerSec = %f, want 38.5", pm.TokensPerSec)
+		}
+	})
+
+	t.Run("kyojin timings draft counts", func(t *testing.T) {
+		// Kyojin spells speculative decoding as accepted + rejected, inside the
+		// same `timings` container: drafted = accepted + rejected.
+		body := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30},"timings":{"prompt_n":5,"predicted_n":15,"prompt_ms":100.0,"predicted_ms":500.0,"accepted_draft_tokens":7,"rejected_draft_tokens":3}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.DraftTokens != 10 || pm.DraftTokensAccepted != 7 {
+			t.Errorf("draft = %d/%d, want 10/7", pm.DraftTokens, pm.DraftTokensAccepted)
+		}
+	})
+
+	t.Run("kyojin draft counters need both halves", func(t *testing.T) {
+		// An acceptance rate must never be derived from half the data.
+		body := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30},"timings":{"prompt_ms":100.0,"accepted_draft_tokens":7}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.DraftTokens != 0 || pm.DraftTokensAccepted != 0 {
+			t.Errorf("draft = %d/%d, want 0/0", pm.DraftTokens, pm.DraftTokensAccepted)
+		}
+	})
+
+	t.Run("tensorfold object", func(t *testing.T) {
+		body := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30},"tensorfold":{"prefill_s":0.12,"decode_s":0.5,"tokens_per_second":40.0,"cached":6}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptMs != 120.0 {
+			t.Errorf("PromptMs = %f, want 120.0 (prefill_s 0.12s)", pm.PromptMs)
+		}
+		if pm.PredictedMs != 500.0 {
+			t.Errorf("PredictedMs = %f, want 500.0 (decode_s 0.5s)", pm.PredictedMs)
+		}
+		if pm.TokensPerSec != 40.0 {
+			t.Errorf("TokensPerSec = %f, want 40.0", pm.TokensPerSec)
+		}
+		if pm.CachedTokens != 6 {
+			t.Errorf("CachedTokens = %d, want 6", pm.CachedTokens)
+		}
+	})
+
+	t.Run("tensorfold prefill_seconds spelling", func(t *testing.T) {
+		// Older servers name the prefill phase prefill_seconds, and report no
+		// rate: the decode duration is all the backend states.
+		body := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30},"tensorfold":{"prefill_seconds":0.2,"decode_s":1.0}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.PromptMs != 200.0 || pm.PredictedMs != 1000.0 {
+			t.Errorf("phase times = (%f,%f), want (200,1000)", pm.PromptMs, pm.PredictedMs)
+		}
+		if pm.TokensPerSec != 0 {
+			t.Errorf("TokensPerSec = %f, want 0 (the backend stated none)", pm.TokensPerSec)
+		}
+	})
+
 	t.Run("vLLM metrics with null fields", func(t *testing.T) {
 		body := []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"metrics":{"time_to_first_token_ms":null,"generation_time_ms":null,"queue_time_ms":null,"mean_itl_ms":null,"tokens_per_second":null}}`)
 		pm := extractUsageFromJSON(body)
@@ -462,6 +543,21 @@ func TestExtractUsageFromStream(t *testing.T) {
 		}
 	})
 
+	t.Run("tensorfold on the finish chunk, usage in a later chunk", func(t *testing.T) {
+		body := []byte(
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"tensorfold\":{\"prefill_s\":0.1,\"decode_s\":0.2,\"tokens_per_second\":41.0,\"cached\":3}}\n" +
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":8,\"total_tokens\":12}}\n" +
+				"data: [DONE]\n",
+		)
+		pm := extractUsageFromStream(body)
+		if pm.PromptTokens != 4 || pm.CompletionTokens != 8 {
+			t.Errorf("tokens = (%d,%d), want (4,8)", pm.PromptTokens, pm.CompletionTokens)
+		}
+		if pm.PromptMs != 100.0 || pm.PredictedMs != 200.0 || pm.TokensPerSec != 41.0 || pm.CachedTokens != 3 {
+			t.Errorf("native timings = (%f,%f,%f,%d)", pm.PromptMs, pm.PredictedMs, pm.TokensPerSec, pm.CachedTokens)
+		}
+	})
+
 	t.Run("no usage data in stream", func(t *testing.T) {
 		body := []byte("data: {\"content\":\"hello\"}\n")
 		pm := extractUsageFromStream(body)
@@ -609,14 +705,14 @@ func TestExtractUsageTokens(t *testing.T) {
 
 func TestBuildMetricsFromData(t *testing.T) {
 	t.Run("without timings", func(t *testing.T) {
-		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: 5}, 30, nil, nil, nil, nil)
+		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: 5}, 30, nativeTimings{})
 		if pm.PromptTokens != 10 || pm.CompletionTokens != 20 || pm.TotalTokens != 30 || pm.CachedTokens != 5 {
 			t.Errorf("got tokens (%d,%d,%d,%d)", pm.PromptTokens, pm.CompletionTokens, pm.TotalTokens, pm.CachedTokens)
 		}
 	})
 
 	t.Run("with timings overrides", func(t *testing.T) {
-		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: -1}, 30, map[string]any{
+		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: -1}, 30, nativeTimings{llama: map[string]any{
 			"prompt_n":             float64(5),
 			"predicted_n":          float64(15),
 			"prompt_ms":            float64(100),
@@ -626,7 +722,7 @@ func TestBuildMetricsFromData(t *testing.T) {
 			"cache_n":              float64(3),
 			"draft_n":              float64(10),
 			"draft_n_accepted":     float64(7),
-		}, nil, nil, nil)
+		}})
 		if pm.PromptTokens != 5 {
 			t.Errorf("PromptTokens = %d, want 5", pm.PromptTokens)
 		}
@@ -645,13 +741,13 @@ func TestBuildMetricsFromData(t *testing.T) {
 	})
 
 	t.Run("with vLLM metrics", func(t *testing.T) {
-		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: -1}, 30, nil, map[string]any{
+		pm := buildMetricsFromData(usageCounts{input: 10, output: 20, cached: -1}, 30, nativeTimings{vllm: map[string]any{
 			"time_to_first_token_ms": float64(100.5),
 			"generation_time_ms":     float64(500.25),
 			"queue_time_ms":          float64(7.5),
 			"mean_itl_ms":            float64(25.0),
 			"tokens_per_second":      float64(39.0),
-		}, nil, nil)
+		}})
 		if pm.PromptTokens != 10 || pm.CompletionTokens != 20 {
 			t.Errorf("tokens = (%d,%d), want (10,20)", pm.PromptTokens, pm.CompletionTokens)
 		}
