@@ -365,8 +365,11 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, native nativeTiming
 	}
 
 	// vLLM `metrics`: time_to_first_token_ms is prefill (queue wait excluded),
-	// generation_time_ms is the decode interval (first to last output token),
-	// tokens_per_second is the backend's output throughput.
+	// generation_time_ms is the decode interval (first to last output token).
+	// The decode RATE is 1000/mean_itl_ms: vLLM's own tokens_per_second counts
+	// the prefill interval too (generated tokens over scheduled → last token),
+	// so it is an overall throughput, not a decode rate, and it only stands in
+	// when mean_itl_ms is absent (it needs more than one output token).
 	if vllmMetrics != nil {
 		if ms := floatToFloat64(vllmMetrics["time_to_first_token_ms"]); ms > 0 {
 			pm.PromptMs = ms
@@ -374,7 +377,9 @@ func buildMetricsFromData(uc usageCounts, totalTokens int64, native nativeTiming
 		if ms := floatToFloat64(vllmMetrics["generation_time_ms"]); ms > 0 {
 			pm.PredictedMs = ms
 		}
-		if tps := floatToFloat64(vllmMetrics["tokens_per_second"]); tps > 0 {
+		if ms := floatToFloat64(vllmMetrics["mean_itl_ms"]); ms > 0 {
+			pm.TokensPerSec = 1000 / ms
+		} else if tps := floatToFloat64(vllmMetrics["tokens_per_second"]); tps > 0 {
 			pm.TokensPerSec = tps
 		}
 		pm.QueueMs = floatToFloat64(vllmMetrics["queue_time_ms"])

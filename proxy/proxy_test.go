@@ -187,6 +187,9 @@ func TestExtractUsageFromJSON(t *testing.T) {
 	})
 
 	t.Run("vLLM metrics object", func(t *testing.T) {
+		// vLLM's tokens_per_second is generated tokens over the WHOLE inference
+		// interval (scheduled → last token), so it counts prefill: the pure
+		// decode rate is mean_itl_ms, and it wins.
 		body := []byte(`{"model":"m","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30},"metrics":{"time_to_first_token_ms":100.5,"generation_time_ms":500.25,"queue_time_ms":7.5,"mean_itl_ms":25.0,"tokens_per_second":39.0}}`)
 		pm := extractUsageFromJSON(body)
 		if pm.PromptTokens != 10 || pm.CompletionTokens != 20 || pm.TotalTokens != 30 {
@@ -198,11 +201,21 @@ func TestExtractUsageFromJSON(t *testing.T) {
 		if pm.PredictedMs != 500.25 {
 			t.Errorf("PredictedMs = %f, want 500.25", pm.PredictedMs)
 		}
-		if pm.TokensPerSec != 39.0 {
-			t.Errorf("TokensPerSec = %f, want 39.0", pm.TokensPerSec)
+		if pm.TokensPerSec != 40.0 {
+			t.Errorf("TokensPerSec = %f, want 40.0 (1000/mean_itl_ms 25)", pm.TokensPerSec)
 		}
 		if pm.QueueMs != 7.5 {
 			t.Errorf("QueueMs = %f, want 7.5", pm.QueueMs)
+		}
+	})
+
+	t.Run("vLLM metrics without mean_itl falls back to tokens_per_second", func(t *testing.T) {
+		// mean_itl_ms needs more than one output token, so a single-token
+		// answer states only the overall rate.
+		body := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11},"metrics":{"time_to_first_token_ms":100.5,"tokens_per_second":39.0}}`)
+		pm := extractUsageFromJSON(body)
+		if pm.TokensPerSec != 39.0 {
+			t.Errorf("TokensPerSec = %f, want 39.0", pm.TokensPerSec)
 		}
 	})
 
@@ -506,7 +519,9 @@ func TestExtractUsageFromStream(t *testing.T) {
 		if pm.PromptTokens != 5 || pm.CompletionTokens != 10 {
 			t.Errorf("tokens = (%d,%d), want (5,10)", pm.PromptTokens, pm.CompletionTokens)
 		}
-		if pm.PromptMs != 12.0 || pm.PredictedMs != 100.0 || pm.TokensPerSec != 9.5 || pm.QueueMs != 2.5 {
+		// mean_itl_ms (10ms) is the decode rate; tokens_per_second (9.5) counts
+		// prefill, so it loses.
+		if pm.PromptMs != 12.0 || pm.PredictedMs != 100.0 || pm.TokensPerSec != 100.0 || pm.QueueMs != 2.5 {
 			t.Errorf("native timings = (%f,%f,%f,%f)", pm.PromptMs, pm.PredictedMs, pm.TokensPerSec, pm.QueueMs)
 		}
 		if pm.ReasoningTokens != 3 {
@@ -757,8 +772,8 @@ func TestBuildMetricsFromData(t *testing.T) {
 		if pm.PredictedMs != 500.25 {
 			t.Errorf("PredictedMs = %f, want 500.25", pm.PredictedMs)
 		}
-		if pm.TokensPerSec != 39.0 {
-			t.Errorf("TokensPerSec = %f, want 39.0", pm.TokensPerSec)
+		if pm.TokensPerSec != 40.0 {
+			t.Errorf("TokensPerSec = %f, want 40.0 (1000/mean_itl_ms 25)", pm.TokensPerSec)
 		}
 		if pm.QueueMs != 7.5 {
 			t.Errorf("QueueMs = %f, want 7.5", pm.QueueMs)
