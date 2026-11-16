@@ -447,15 +447,55 @@ func TestHandleServedAnswerBoundsTheRetryHint(t *testing.T) {
 			}
 		})
 	}
+
+	// The hint belongs to the answer that carried it. A run whose first member
+	// 429'd with a 50-minute hint and whose last answer is a plain 500 with no
+	// hint of its own must not inherit one: the 500 asked for no delay, and a
+	// hint on it turns the client's sub-second 5xx backoff into a 10s sleep on
+	// every attempt of its own ladder.
+	t.Run("a hint does not ride onto a later answer", func(t *testing.T) {
+		throttled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
+			w.Header().Set("Retry-After", "3000")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_exceeded","message":"slow down"}}`))
+		}))
+		defer throttled.Close()
+		broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if answerProbe(w, req) {
+				return
+			}
+			http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
+		}))
+		defer broken.Close()
+
+		r, store, _, _ := newTestRouter(t)
+		addTestRouteFallback(t, store, "gpt-4", throttled.URL, broken.URL)
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+
+		res := w.Result()
+		if res.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want the last backend's 500", res.StatusCode)
+		}
+		if got := res.Header.Get("Retry-After"); got != "" {
+			t.Errorf("Retry-After = %q, want the 500's own answer: no hint", got)
+		}
+	})
 }
 
 // A client-side retry policy reads x-should-retry before it reads anything else
-// (opencode, pi). On a response the ROUTER authored — a model it does not route,
-// a body it will not read, a pool where nothing answered, a request it refused
-// to convert — there is no backend left to convince, so replaying the same
-// request at the same router buys the same answer. LiteLLM sets this header on
-// its own refusals for the same reason (its GuardrailInterventionRequires
-// retry-off surface), and olla has no client-facing retry vocabulary at all.
+// (opencode, pi). On a response the ROUTER authored as a POLICY answer - a model
+// it does not route, a body it will not read, a request it refused to convert -
+// there is no backend left to convince, so replaying the same request at the
+// same router buys the same bytes. olla has no client-facing retry vocabulary at
+// all, and LiteLLM is the client in its own ladder, so it states the verdict as
+// a predicate: 408/409/429/5xx and nothing else in the 4xx band.
 func TestHandleRouterRefusalsSayDoNotRetry(t *testing.T) {
 	t.Run("an unrouted model", func(t *testing.T) {
 		r, _, _, _ := newTestRouter(t)
@@ -486,20 +526,30 @@ func TestHandleRouterRefusalsSayDoNotRetry(t *testing.T) {
 			t.Errorf("X-Should-Retry = %q, want false", got)
 		}
 	})
+}
 
-	t.Run("a pool where nothing answered", func(t *testing.T) {
-		r, store, _, _ := newTestRouter(t)
-		addTestRoute(t, store, "gpt-4", "http://localhost:1")
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-			strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
-		w := httptest.NewRecorder()
-		r.Handle(w, req)
-		res := w.Result()
-		if res.StatusCode != http.StatusBadGateway {
-			t.Fatalf("status = %d, want 502", res.StatusCode)
-		}
-		if got := res.Header.Get("X-Should-Retry"); got != "false" {
-			t.Errorf("X-Should-Retry = %q, want false", got)
-		}
-	})
+// A 502 quoting a transport failure is the opposite class of answer: the router
+// authored the bytes, but what they say is "nothing answered", which is the one
+// answer a replay is known to fix (a backend mid-restart closes every pooled
+// connection in turn, and the next attempt lands after it is back). LiteLLM
+// authors a 500/502 for exactly this outcome and never marks it
+// non-retryable, so its clients' own predicate (5xx: retry) takes it; the header
+// here states the same verdict on the name the harnesses read first.
+func TestHandleTransportFailuresSayDoRetry(t *testing.T) {
+	r, store, _, _ := newTestRouter(t)
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	dead.Close() // refused connection: the fast-fail path, no dial timeout
+	addTestRoute(t, store, "gpt-4", dead.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+	res := w.Result()
+	if res.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", res.StatusCode)
+	}
+	if got := res.Header.Get("X-Should-Retry"); got != "true" {
+		t.Errorf("X-Should-Retry = %q, want true", got)
+	}
 }

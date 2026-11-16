@@ -565,9 +565,6 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	// client). If no attempt serves, this is what the client gets — the
 	// backend's own answer, not a proxy-invented status.
 	var lastAnswer *bufferedAnswer
-	// The longest Retry-After any backend of this run asked for (see
-	// bufferedAnswer.retryAfterMs).
-	var throttleHintMs int64
 	// Errors from failed attempts, surfaced to the client via
 	// X-Router-Fallback-Errors (preceding attempts only).
 	var attemptErrors []string
@@ -908,12 +905,13 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			retriesLeft := sameServerRetries(err, numRetries)
 			if isBuffered {
 				retriesLeft = bufferedAnswerRetries(buffered.StatusCode, numRetries, explicitRetries)
-				if pm != nil && pm.RetryAfterMs > throttleHintMs {
-					throttleHintMs = pm.RetryAfterMs
+				var hintMs int64
+				if pm != nil {
+					hintMs = pm.RetryAfterMs
 				}
 				lastAnswer = &bufferedAnswer{resp: buffered, serverID: srv.ID,
 					targetModel: targetModel, wasFallback: wasFallback, translator: meta.translator,
-					retryAfterMs: throttleHintMs}
+					retryAfterMs: hintMs}
 			}
 			if retry < retriesLeft {
 				log.Warnf("[%s] model=%q — retrying %s (%d/%d): %v",
@@ -999,7 +997,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	r.record(req, requestStart, model, attempts[0].targetModel, attempts[0].server.ID, proxy.ProxyMetrics{}, http.StatusBadGateway, errorBody, len(attempts) > 1, apiType, jev, meta)
 
 	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)
-	refuse(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
+	refuseRetryable(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
 }
 
 // serveLastAnswer delivers the last buffered backend answer (429/5xx, no byte of
@@ -1040,8 +1038,15 @@ func (r *Router) serveLastAnswer(w http.ResponseWriter, req *http.Request, reque
 		w.Header().Set("X-Router-Server-Name", srv.Name)
 	}
 	w.Header().Set("X-Router-Status", strconv.Itoa(resp.StatusCode))
+	// The proxy never ran for this answer, so the correlation id it stamps on
+	// every proxied response is stamped here: this is the response a client quotes
+	// an id from, and both standard names, for the reason metricsWriter gives.
+	w.Header().Set("X-Router-Request-Id", meta.requestID)
+	w.Header().Set("X-Request-Id", meta.requestID)
+	w.Header().Set("Request-Id", meta.requestID)
 	if answer.retryAfterMs > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(clientRetryAfterSeconds(answer.retryAfterMs)))
+		secs := proxy.ClientRetryAfterSeconds(time.Duration(answer.retryAfterMs) * time.Millisecond)
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
 	}
 	w.WriteHeader(resp.StatusCode)
 	if _, err := w.Write(body); err != nil {
@@ -1064,6 +1069,18 @@ func (r *Router) serveLastAnswer(w http.ResponseWriter, req *http.Request, reque
 // router is the server, so it answers its own refusals with the verdict.
 func refuse(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("X-Should-Retry", "false")
+	http.Error(w, msg, code)
+}
+
+// refuseRetryable answers a request the router authored whose answer is a
+// transient transport condition rather than a policy: "all backends failed"
+// quotes connection errors, which is the one outcome a replay is known to fix
+// (a backend mid-restart closes every pooled connection in turn, and the next
+// attempt lands once it is back). LiteLLM authors a 500 for the same outcome and
+// never marks it non-retryable, so its clients' own predicate retries it; the
+// header says the same thing on the name the harnesses read first.
+func refuseRetryable(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("X-Should-Retry", "true")
 	http.Error(w, msg, code)
 }
 
@@ -1213,27 +1230,11 @@ type bufferedAnswer struct {
 	targetModel string
 	wasFallback bool
 	translator  proxy.StreamTranslator
-	// retryAfterMs is the longest Retry-After any backend of this run asked for.
-	// The verbatim header is not the client's answer: one backend's 50-minute
-	// throttle hint, relayed as-is, is a client-silent kill switch on that
-	// client's own retry ladder (pi refuses a retry when the server-requested
-	// delay outlasts its max-retry-delay, 60s by default; deepseek-harness drops
-	// the retry past its 10s cap), and a hint on a 5xx body is a delay nobody
-	// asked for. So the router authors the header from the pool's hints, bounded
-	// by a number a client policy actually obeys (clientRetryAfterSeconds).
+	// retryAfterMs is the Retry-After THIS answer carried, bounded on the way out
+	// by proxy.ClientRetryAfterSeconds. The verbatim header is not the client's
+	// answer: one backend's 50-minute throttle hint, relayed as-is, is a
+	// client-silent kill switch on that client's own retry ladder.
 	retryAfterMs int64
-}
-
-// clientRetryAfterSeconds is the pool's throttle hint in the seconds the
-// `Retry-After` header carries, bounded to [1, 10]: below it a client that
-// retries at its own backoff beats the backend's cadence by a hair, above it
-// the client-side retry policies above stop obeying the hint at all.
-func clientRetryAfterSeconds(ms int64) int {
-	s := int((ms + 999) / 1000)
-	if s < 1 {
-		return 1
-	}
-	return min(s, 10)
 }
 
 // contextOverflows reports whether a request's estimated prompt can not fit the

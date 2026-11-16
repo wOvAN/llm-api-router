@@ -481,6 +481,23 @@ func ParseRetryAfter(v string) time.Duration {
 	return 0
 }
 
+// ClientRetryAfterSeconds is a Retry-After hint the ROUTER authors, in the
+// seconds the header carries, bounded to [1, 10]. A backend's own hint is its own
+// business; a hint written by this process lands in front of clients whose retry
+// ladder stops obeying it long before 50 minutes (pi refuses a retry outright
+// when the server-requested delay outlasts its max-retry-delay, 60s by default,
+// and deepseek-harness drops the retry past its 10s cap), so an honest big hint
+// authored here is a client-silent kill switch on the client's own retries.
+// Below the bound a client retrying at its own backoff beats the cadence by a
+// hair, so the floor is 1.
+func ClientRetryAfterSeconds(d time.Duration) int {
+	s := int((d.Milliseconds() + 999) / 1000)
+	if s < 1 {
+		return 1
+	}
+	return min(s, 10)
+}
+
 // metricsWriter wraps an http.ResponseWriter to track TTFB and response size.
 type metricsWriter struct {
 	http.ResponseWriter
@@ -531,7 +548,13 @@ func (m *metricsWriter) WriteHeader(code int) {
 		m.Header().Set("X-Router-Status", strconv.Itoa(code))
 	}
 	if m.requestID != "" {
+		// Both names, because they are two headers, not two spellings: an
+		// Anthropic backend stamps `request-id` and its SDK reads that one first
+		// (res.Header.Get("request-id")), so mirroring only `x-request-id` leaves
+		// the client quoting the provider's number, which no operator can look
+		// up in this router's logs.
 		m.Header().Set("X-Request-Id", m.requestID)
+		m.Header().Set("Request-Id", m.requestID)
 	}
 	m.ResponseWriter.WriteHeader(code)
 }

@@ -73,6 +73,32 @@ func TestInboundLimiterMiddlewareHeaders(t *testing.T) {
 	}
 }
 
+// A router-authored 429 is the one denial the box writes itself, and its hint
+// rides into the client's own retry ladder: pi throws when a server-requested
+// delay outlasts its max-retry-delay (60s default) and deepseek-harness drops
+// the retry past its 10s cap, so a slow bucket's honest "come back in 50s" is a
+// client-silent kill switch on the client's retries. The hint the client acts on
+// is bounded; the informational X-RateLimit-Reset stays the truth.
+func TestInboundLimiterBoundsTheRetryHint(t *testing.T) {
+	l := NewInboundLimiter(domain.InboundSettings{RPS: 0.02, Burst: 1, PerIP: true})
+	h := l.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("served"))
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+	denied := httptest.NewRecorder()
+	h.ServeHTTP(denied, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+	if denied.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", denied.Code)
+	}
+	if got := denied.Header().Get("Retry-After"); got != "10" {
+		t.Errorf("Retry-After = %q, want the bound (a 50s bucket refill)", got)
+	}
+	if got := denied.Header().Get("X-RateLimit-Reset"); got == "10" || got == "" {
+		t.Errorf("X-RateLimit-Reset = %q, want the real refill window", got)
+	}
+}
+
 // A limiter that was never configured must not exist: every request passing
 // through a nil check is the historical behavior, untouched.
 func TestInboundLimiterOffByDefault(t *testing.T) {

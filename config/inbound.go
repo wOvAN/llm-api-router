@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"llm-api-router/domain"
+	"llm-api-router/proxy"
 )
 
 // inboundSweepAt bounds the limiter's key map; past it, idle buckets are dropped.
@@ -124,7 +125,10 @@ func (l *InboundLimiter) Middleware(next http.Handler) http.Handler {
 			w.Header().Set("X-RateLimit-Limit", strconv.FormatFloat(l.burst, 'f', -1, 64))
 			w.Header().Set("X-RateLimit-Remaining", "0")
 			w.Header().Set("X-RateLimit-Reset", strconv.Itoa(seconds))
-			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+			// The hint a retry ladder obeys is bounded like every other answer this
+			// process writes (see proxy.ClientRetryAfterSeconds); the informational
+			// X-RateLimit-Reset above stays the truth.
+			w.Header().Set("Retry-After", strconv.Itoa(proxy.ClientRetryAfterSeconds(retry)))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"router rate limit reached"}}`))

@@ -2575,6 +2575,7 @@ func TestHandleRequestIDMirrorsTheStandardHeader(t *testing.T) {
 			return
 		}
 		w.Header().Set("X-Request-Id", "backend-99")
+		w.Header().Set("Request-Id", "backend-99")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
 	}))
@@ -2590,6 +2591,46 @@ func TestHandleRequestIDMirrorsTheStandardHeader(t *testing.T) {
 	r.Handle(w, req)
 
 	res := w.Result()
+	if got := res.Header.Values("X-Request-Id"); len(got) != 1 || got[0] != "client-7" {
+		t.Errorf("X-Request-Id = %v, want exactly one value: client-7", got)
+	}
+	// The Anthropic family stamps `request-id`, a different header, and its SDK
+	// reads THAT name first (`res.Header.Get("request-id")`), so mirroring only
+	// `x-request-id` leaves the client quoting a number no operator can resolve.
+	if got := res.Header.Values("Request-Id"); len(got) != 1 || got[0] != "client-7" {
+		t.Errorf("Request-Id = %v, want exactly one value: client-7", got)
+	}
+	if got := res.Header.Get("X-Router-Request-Id"); got != "client-7" {
+		t.Errorf("X-Router-Request-Id = %q, want client-7", got)
+	}
+}
+
+// The answer served when every attempt failed is the response a client quotes an
+// id from, and it is written by the router directly (the proxy never ran), so it
+// carries the correlation id like any proxied response.
+func TestHandleServedAnswerCarriesTheRequestID(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
+		w.Header().Set("X-Request-Id", "backend-99")
+		http.Error(w, `{"error":"context length exceeded"}`, http.StatusInternalServerError)
+	}))
+	defer backend.Close()
+
+	r, store, _, _ := newTestRouter(t)
+	addTestRoute(t, store, "gpt-4", backend.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("X-Request-ID", "client-7")
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	res := w.Result()
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want the backend's 500", res.StatusCode)
+	}
 	if got := res.Header.Values("X-Request-Id"); len(got) != 1 || got[0] != "client-7" {
 		t.Errorf("X-Request-Id = %v, want exactly one value: client-7", got)
 	}
