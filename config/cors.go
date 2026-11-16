@@ -10,12 +10,16 @@ import (
 
 // routerHeaderNames are the response headers a browser client needs permission
 // to read: which backend served the request, what a conversion cost, the id to
-// quote in a bug report.
+// quote in a bug report, and when a denial wants it back. None of the six
+// CORS-safelisted names is `Retry-After` or an `X-RateLimit-*`, so a cross-origin
+// denial otherwise arrives with a hint visible in devtools and not in the
+// client's own code.
 var routerHeaderNames = []string{
 	"X-Router-Server", "X-Router-Server-Name", "X-Router-Status", "X-Router-Request-Id",
 	"X-Router-Attempts", "X-Router-Retries", "X-Router-Fallback-Errors",
 	"X-Router-Jev-Choice", "X-Router-Jev-Confidence", "X-Router-Jev-Ms", "X-Router-Jev-Reason",
 	"X-Router-Convert", "X-Router-Convert-Notes", "X-Router-Trace-Id", "X-Router-Count-Tokens",
+	"Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
 }
 
 // CORS answers cross-origin requests for browser clients (OpenWebUI, a custom

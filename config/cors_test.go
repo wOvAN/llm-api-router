@@ -33,6 +33,14 @@ func TestCORSMiddleware(t *testing.T) {
 			t.Errorf("expose-headers = %q, want %s readable by a browser client", exposed, name)
 		}
 	}
+	// None of the six CORS-safelisted names is among the headers a denial
+	// answers with, so a cross-origin denial arrives with a hint the client can
+	// see in devtools and not in its own code.
+	for _, name := range []string{"Retry-After", "X-RateLimit-Limit", "X-RateLimit-Reset"} {
+		if !strings.Contains(exposed, name) {
+			t.Errorf("expose-headers = %q, want %s readable by a browser client", exposed, name)
+		}
+	}
 
 	// An origin nobody allowed gets the answer with no CORS grant.
 	other := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
