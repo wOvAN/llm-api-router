@@ -73,6 +73,11 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   <div class="tab" onclick="switchTab('rules')">Routing Rules</div>
   <div class="tab" onclick="switchTab('metrics')">Metrics</div>
   <div class="tab" id="trace-tab" onclick="switchTab('trace')">Trace</div>
+  <select id="lang-select" onchange="setLang(this.value)" title="Interface language"
+          style="margin-left:auto;align-self:center;padding:6px 10px;background:#161b22;border:1px solid #30363d;color:#8b949e;border-radius:6px;font-size:0.8rem;cursor:pointer;">
+    <option value="en">English</option>
+    <option value="ru">Русский</option>
+  </select>
 </div>
 
 <!-- Servers Panel -->
@@ -114,7 +119,7 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   <div class="btn-row">
     <span id="metrics-timer" style="font-size:0.8rem;color:#484f58;margin-right:auto;">auto-refresh 3s</span>
     <span id="active-requests" style="font-size:0.9rem;font-weight:600;margin-right:15px;color:#58a6ff;">Active: 0</span>
-    <span id="inbound-denied" style="font-size:0.9rem;font-weight:600;margin-right:15px;color:#d29922;display:none;" title="Отклонено входящим лимитером (settings.inbound): эти запросы не дошли до бэкендов">Denied: 0</span>
+    <span id="inbound-denied" style="font-size:0.9rem;font-weight:600;margin-right:15px;color:#d29922;display:none;" title="Rejected by the inbound limiter (settings.inbound): these requests never reached a backend">Denied: 0</span>
     <button onclick="loadMetrics()">↻ Refresh</button>
     <button onclick="resetMetrics()" class="danger">Reset</button>
   </div>
@@ -177,11 +182,11 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     <input type="hidden" id="server-edit-id">
     <label><span>ID</span><input id="server-id" type="text" placeholder="e.g. primary-openai"></label>
     <label><span>Name</span><input id="server-name" type="text" placeholder="e.g. Primary OpenAI"></label>
-    <label><span>API Types (поддерживаемые протоколы)</span>
+    <label><span>API Types (the protocols the backend serves)</span>
       <label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;"><input type="checkbox" id="server-api-type-openai" checked style="width:auto;"> OpenAI</label>
       <label style="display:inline-flex;align-items:center;gap:4px;"><input type="checkbox" id="server-api-type-anthropic" checked style="width:auto;"> Anthropic</label>
     </label>
-    <label><span>Endpoints нативно (пусто = не объявлено: запросы идут как есть, passthrough, без конвертации)</span>
+    <label><span>Native endpoints (empty = undeclared: requests pass through byte for byte, no conversion)</span>
       <label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;"><input type="checkbox" id="server-proto-chat" style="width:auto;"> /v1/chat/completions</label>
       <label style="display:inline-flex;align-items:center;gap:4px;"><input type="checkbox" id="server-proto-messages" style="width:auto;"> /v1/messages</label>
       <div style="margin-top:4px;"><label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;"><input type="checkbox" id="server-proto-responses" style="width:auto;"> /v1/responses</label>
@@ -189,25 +194,25 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
     </label>
     <label><span>API Key</span><input id="server-api-key" type="password" class="api-key-input" placeholder="sk-..."></label>
 
-    <div class="group-title">Общие (базовые для всех протоколов)</div>
+    <div class="group-title">General (shared by every protocol)</div>
     <div class="field-row">
       <label><span>URL</span><input id="server-url" type="text" placeholder="e.g. api.openai.com/v1"></label>
-      <label><span>Proxy (напр. http://127.0.0.1:3128)</span><input id="server-proxy" type="text" placeholder="пусто = без прокси"></label>
+      <label><span>Proxy (e.g. http://127.0.0.1:3128)</span><input id="server-proxy" type="text" placeholder="empty = direct"></label>
     </div>
-    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="server-proxy-enabled" style="width:auto;"> Proxy enabled (по умолчанию выключено = прямое соединение, URL прокси игнорируются)</label>
+    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="server-proxy-enabled" style="width:auto;"> Proxy enabled (off by default = a direct connection, the proxy URLs are ignored)</label>
 
     <div class="group-title">OpenAI</div>
-    <label><span>URL (если отличается от базового)</span><input id="server-openai-url" type="text" placeholder="пусто = базовый"></label>
+    <label><span>URL (if it differs from the base)</span><input id="server-openai-url" type="text" placeholder="empty = the base URL"></label>
 
     <div class="group-title">Anthropic</div>
-    <label><span>URL (если отличается от базового)</span><input id="server-anthropic-url" type="text" placeholder="пусто = базовый"></label>
+    <label><span>URL (if it differs from the base)</span><input id="server-anthropic-url" type="text" placeholder="empty = the base URL"></label>
 
-    <div class="group-title">Лимиты</div>
+    <div class="group-title">Limits</div>
     <div class="field-row three">
-      <label><span>Cooldown Time (сек, 0 = глобальный 5 мин)</span><input id="server-cooldown" type="number" min="0" step="1" value="0"></label>
-      <label><span>TPM Limit (токенов/мин, 0 = без лимита)</span><input id="server-tpm" type="number" min="0" step="1" value="0"></label>
-      <label><span>RPM Limit (запросов/мин, 0 = без лимита)</span><input id="server-rpm" type="number" min="0" step="1" value="0"></label>
-      <label><span>Max Parallel (одновременных генераций, 0 = без лимита)</span><input id="server-parallel" type="number" min="0" step="1" value="0"></label>
+      <label><span>Cooldown Time (seconds, 0 = the global 5min)</span><input id="server-cooldown" type="number" min="0" step="1" value="0"></label>
+      <label><span>TPM Limit (tokens/min, 0 = unlimited)</span><input id="server-tpm" type="number" min="0" step="1" value="0"></label>
+      <label><span>RPM Limit (requests/min, 0 = unlimited)</span><input id="server-rpm" type="number" min="0" step="1" value="0"></label>
+      <label><span>Max Parallel (concurrent generations, 0 = unlimited)</span><input id="server-parallel" type="number" min="0" step="1" value="0"></label>
     </div>
     <div id="server-test-result" style="margin-bottom:12px;font-size:0.8rem;display:none;"></div>
     <div class="btn-row">
@@ -223,52 +228,52 @@ th.sortable.desc::after { content: ' ▼'; color: #58a6ff; }
   <div class="modal">
     <h3 id="rule-modal-title">Add Routing Rule</h3>
     <input type="hidden" id="rule-edit-idx">
-    <label><span>Incoming Models (через запятую; <code>*</code> — маска семейства: <code>qwen3-*</code>)</span><input id="rule-incoming" type="text" placeholder="e.g. opus,sonnet,claude-opus,qwen3-*"></label>
+    <label><span>Incoming Models (comma-separated; <code>*</code> masks a family: <code>qwen3-*</code>)</span><input id="rule-incoming" type="text" placeholder="e.g. opus,sonnet,claude-opus,qwen3-*"></label>
     <label><span>Router</span><select id="rule-router" onchange="toggleJevFields()">
       <option value="">Static (primary + fallbacks)</option>
-      <option value="jev">Jev (decision-модель выбирает модель за запрос)</option>
+      <option value="jev">Jev (a decision model picks the model per request)</option>
     </select></label>
     <label id="label-rule-server"><span>Primary Server</span><select id="rule-server" onchange="fetchServerModels()"></select></label>
-    <label><span>Context Window (токенов, 0 = неизвестно)</span><input id="rule-context-window" type="number" min="0" step="1" value="0"></label>
-    <label id="label-rule-target"><span>Target Model <button type="button" onclick="fetchServerModels()" title="Обновить список моделей с сервера" style="padding:0 6px;">↻</button></span>
+    <label><span>Context Window (tokens, 0 = unknown)</span><input id="rule-context-window" type="number" min="0" step="1" value="0"></label>
+    <label id="label-rule-target"><span>Target Model <button type="button" onclick="fetchServerModels()" title="Fetch the model list from the server" style="padding:0 6px;">↻</button></span>
       <div id="rule-target-wrap" style="margin-top:4px;">
-        <select id="rule-target-sel" style="width:100%;"><option value="">(выберите модель)</option></select>
-        <input id="rule-target-inp" type="text" placeholder="или введите вручную..." style="width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;">
+        <select id="rule-target-sel" style="width:100%;"><option value="">(select a model)</option></select>
+        <input id="rule-target-inp" type="text" placeholder="or type it manually..." style="width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;">
       </div>
     </label>
     <div id="jev-fields" style="display:none;">
-      <label><span>Jev Decision Server (llama.cpp с decision-моделью)</span><select id="jev-server" onchange="fetchJevModels()"></select></label>
-      <label><span>Decision Model (пусто = бэкенд решает) <button type="button" onclick="fetchJevModels()" title="Обновить список моделей с сервера" style="padding:0 6px;">↻</button></span>
+      <label><span>Jev Decision Server (llama.cpp running a decision model)</span><select id="jev-server" onchange="fetchJevModels()"></select></label>
+      <label><span>Decision Model (empty = the backend decides) <button type="button" onclick="fetchJevModels()" title="Fetch the model list from the server" style="padding:0 6px;">↻</button></span>
         <div style="margin-top:4px;">
-          <select id="jev-model-sel" style="width:100%;" onchange="jevModelSelChange()"><option value="">(бэкенд решает)</option></select>
-          <input id="jev-model-inp" type="text" placeholder="или введите вручную..." style="width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;">
+          <select id="jev-model-sel" style="width:100%;" onchange="jevModelSelChange()"><option value="">(the backend decides)</option></select>
+          <input id="jev-model-inp" type="text" placeholder="or type it manually..." style="width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;">
         </div>
       </label>
       <div style="display:flex;gap:8px;">
         <label style="flex:1"><span>Min Confidence (0 = 0.3)</span><input id="jev-min-conf" type="number" min="0" max="1" step="0.05" value="0"></label>
-        <label style="flex:1"><span>Default Tier</span><input id="jev-default-tier" type="number" min="0" step="1" value="0" title="Tier кандидата по умолчанию: при низком confidence не ниже его"></label>
+        <label style="flex:1"><span>Default Tier</span><input id="jev-default-tier" type="number" min="0" step="1" value="0" title="The default candidate tier: a low-confidence answer never goes below it"></label>
       </div>
       <div style="display:flex;gap:8px;">
-        <label style="flex:1"><span>Cache TTL (сек, 0 = выкл)</span><input id="jev-cache-ttl" type="number" min="0" step="1" value="0" title="Кэш решений для одинаковых запросов"></label>
-        <label style="flex:1;display:flex;align-items:center;gap:8px;"><input type="checkbox" id="jev-security" style="width:auto;"><span>Security gate (400 при harmful ≥ 0.95)</span></label>
-        <label style="flex:1;display:flex;align-items:center;gap:8px;"><input type="checkbox" id="jev-images" style="width:auto;"><span>Images в решение (vision decision, дорого)</span></label>
+        <label style="flex:1"><span>Cache TTL (seconds, 0 = off)</span><input id="jev-cache-ttl" type="number" min="0" step="1" value="0" title="Cached decisions for identical requests"></label>
+        <label style="flex:1;display:flex;align-items:center;gap:8px;"><input type="checkbox" id="jev-security" style="width:auto;"><span>Security gate (400 when harmful ≥ 0.95)</span></label>
+        <label style="flex:1;display:flex;align-items:center;gap:8px;"><input type="checkbox" id="jev-images" style="width:auto;"><span>Images in the decision (vision decision, expensive)</span></label>
       </div>
       <div style="display:flex;gap:8px;">
-        <label style="flex:1"><span>Timeout (мс, 0 = 1500)</span><input id="jev-timeout" type="number" min="0" step="100" value="0" title="Бюджет решения; локальные decision-модели закладывайте с запасом (3000-5000)"></label>
-        <label style="flex:1"><span>State Max Chars (0 = 8000)</span><input id="jev-state-chars" type="number" min="0" step="500" value="0" title="Максимум текста запроса в решении"></label>
+        <label style="flex:1"><span>Timeout (ms, 0 = 1500)</span><input id="jev-timeout" type="number" min="0" step="100" value="0" title="The decision budget; allow headroom for local decision models (3000-5000)"></label>
+        <label style="flex:1"><span>State Max Chars (0 = 8000)</span><input id="jev-state-chars" type="number" min="0" step="500" value="0" title="How much request text the decision sees"></label>
       </div>
-      <label><span>Jev Question (пусто = дефолтный промпт)</span><textarea id="jev-question" rows="2" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;padding:4px 8px;"></textarea></label>
+      <label><span>Jev Question (empty = the default prompt)</span><textarea id="jev-question" rows="2" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;padding:4px 8px;"></textarea></label>
       <label>
-        <span>Jev Candidates (пул: tier 0 = слабее/дешевле)</span>
+        <span>Jev Candidates (the pool: tier 0 = weakest/cheapest)</span>
         <div id="jev-candidates"></div>
         <button type="button" onclick="addJevRow()" style="margin-top:4px;">+ Add Candidate</button>
-        <button type="button" onclick="applyJevPreset()" style="margin-top:4px;" title="Заполнить пул проверенным шаблоном haiku/sonnet/opus (tier 0/1/2, Default Tier = 1); сервер и target model выберите сами">Preset: haiku/sonnet/opus</button>
+        <button type="button" onclick="applyJevPreset()" style="margin-top:4px;" title="Fill the pool with the tested haiku/sonnet/opus template (tier 0/1/2, Default Tier = 1); pick the servers and target models yourself">Preset: haiku/sonnet/opus</button>
       </label>
     </div>
     <label id="label-rule-balance"><span>Balance</span><select id="rule-balance" onchange="toggleBalanceFields()">
-      <option value="">Failover (primary отвечает, fallbacks — подстраховка)</option>
-      <option value="round-robin">Round-robin (пул равных бэкендов делит трафик)</option>
-      <option value="least-connections">Least connections (запрос идёт на наименее загруженного бэкенда, weight = ёмкость)</option>
+      <option value="">Failover (the primary answers, the fallbacks back it up)</option>
+      <option value="round-robin">Round-robin (a pool of equal backends shares the traffic)</option>
+      <option value="least-connections">Least connections (a request goes to the least loaded backend, weight = capacity)</option>
     </select></label>
     <label id="label-rule-fallbacks">
       <span>Fallbacks</span>
@@ -733,12 +738,12 @@ async function loadRules() {
     const models = (r.incoming_models || []).map(m => {
       const mask = m.includes('*') || m.includes('?');
       const style = mask ? 'background:#2d1b4e;color:#d2a8ff;border:1px dashed #8b5cf6' : 'background:#1a1a3a;color:#58a6ff';
-      return `<span class="tag" style="${style}" title="${mask ? 'маска: клиентское имя уходит на бэкенд как есть' : ''}">${esc(m)}</span>`;
+      return `<span class="tag" style="${style}" title="${mask ? "the mask: the client's name goes to the backend as-is" : ''}">${esc(m)}</span>`;
     }).join(' ');
     // A balancing rule's "fallbacks" are traffic targets, not a rescue chain —
     // the row says so, because a tag is the only place it can.
     const pool = r.balance
-      ? ` <span class="tag" style="background:#17321f;color:#3fb950" title="${r.balance === 'least-connections' ? 'Балансирует: пул делит трафик по загрузке на слот (weight = ёмкость)' : 'Балансирует: пул делит трафик по кругу (weight = доля)'}">${esc(r.balance)}</span>` : '';
+      ? ` <span class="tag" style="background:#17321f;color:#3fb950" title="${r.balance === 'least-connections' ? "Balances: the pool shares the traffic by load per slot (weight = capacity)" : "Balances: the pool shares the traffic in turn (weight = share)"}">${esc(r.balance)}</span>` : '';
     const jev = r.router === 'jev' && r.jev ? r.jev : null;
     const targetCell = jev
       ? (jev.candidates || []).map(c => {
@@ -791,7 +796,7 @@ async function fillModelSelect(serverId, sel, inp, placeholder) {
     const models = raw.map(m => typeof m === 'string' ? {id: m, loaded: false} : m);
     const loaded = models.filter(m => m.loaded).sort((a,b) => a.id.localeCompare(b.id));
     const others = models.filter(m => !m.loaded).sort((a,b) => a.id.localeCompare(b.id));
-    sel.innerHTML = `<option value="">${placeholder}</option><option value="__type__">✏️ введите вручную</option>`
+    sel.innerHTML = `<option value="">${placeholder}</option><option value="__type__">✏️ type it manually</option>`
       + loaded.map(m => `<option value="${esc(m.id)}" title="Loaded" style="color:#3fb950">● ${esc(m.id)}</option>`).join('')
       + others.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
     // Restore the previous selection if it's still in the refreshed list.
@@ -808,13 +813,13 @@ async function fillModelSelect(serverId, sel, inp, placeholder) {
 async function fetchServerModels() {
   await fillModelSelect(document.getElementById('rule-server').value,
     document.getElementById('rule-target-sel'), document.getElementById('rule-target-inp'),
-    '(выберите модель)');
+    '(select a model)');
 }
 
 async function fetchJevModels() {
   await fillModelSelect(document.getElementById('jev-server').value,
     document.getElementById('jev-model-sel'), document.getElementById('jev-model-inp'),
-    '(бэкенд решает)');
+    '(the backend decides)');
 }
 
 function jevModelSelChange() {
@@ -894,7 +899,7 @@ function resetJevFields() {
   document.getElementById('jev-server').value = '';
   const jmSel = document.getElementById('jev-model-sel');
   const jmInp = document.getElementById('jev-model-inp');
-  jmSel.innerHTML = '<option value="">(бэкенд решает)</option>';
+  jmSel.innerHTML = '<option value="">(the backend decides)</option>';
   jmSel.style.display = 'block';
   jmInp.value = '';
   jmInp.style.display = 'none';
@@ -1113,10 +1118,10 @@ async function addFallbackRow(serverId, targetModel = '', priority = 0, enabled 
   modelWrap.style.cssText = 'flex:2 1 200px;min-width:160px;';
   const modelSel = document.createElement('select');
   modelSel.style.cssText = 'width:100%;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.85rem;';
-  modelSel.innerHTML = '<option value="">(выберите модель)</option>';
+  modelSel.innerHTML = '<option value="">(select a model)</option>';
   const modelInp = document.createElement('input');
   modelInp.type = 'text';
-  modelInp.placeholder = 'или введите вручную...';
+  modelInp.placeholder = 'or type it manually...';
   modelInp.value = targetModel;
   modelInp.style.cssText = 'width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;';
   modelWrap.appendChild(modelSel);
@@ -1144,7 +1149,7 @@ async function addFallbackRow(serverId, targetModel = '', priority = 0, enabled 
   }
   const refreshBtn = document.createElement('button');
   refreshBtn.textContent = '↻';
-  refreshBtn.title = 'Обновить список моделей';
+  refreshBtn.title = 'Fetch the model list';
   refreshBtn.style.cssText = 'margin-top:2px;';
   refreshBtn.onclick = async () => {
     const cur = modelInp.style.display !== 'none' ? modelInp.value.trim()
@@ -1176,7 +1181,7 @@ async function addFallbackRow(serverId, targetModel = '', priority = 0, enabled 
     modelSel.style.display = 'block';
     modelInp.style.display = 'none';
     modelInp.value = '';
-    await fillModelSelect(sel.value, modelSel, modelInp, '(выберите модель)');
+    await fillModelSelect(sel.value, modelSel, modelInp, '(select a model)');
   };
   const priorityInp = document.createElement('input');
   priorityInp.type = 'number';
@@ -1190,7 +1195,7 @@ async function addFallbackRow(serverId, targetModel = '', priority = 0, enabled 
   weightInp.className = 'fb-weight';
   weightInp.min = '1';
   weightInp.value = weight || 1;
-  weightInp.title = 'Weight: доля трафика этого бэкенда, когда правило балансирует (round-robin); 1 = равная';
+  weightInp.title = 'Weight: this backend\'s share of the traffic when the rule balances (round-robin); 1 = an equal share';
   weightInp.style.cssText = 'flex:0 0 60px;margin-top:2px;padding:4px 6px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.85rem;';
   const enabledChk = document.createElement('input');
   enabledChk.type = 'checkbox';
@@ -1286,7 +1291,7 @@ function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabl
   const modelInp = document.createElement('input');
   modelInp.type = 'text';
   modelInp.className = 'jev-model';
-  modelInp.placeholder = 'target model (пусто = server id)';
+  modelInp.placeholder = 'target model (empty = the server id)';
   modelInp.value = targetModel;
   modelInp.style.cssText = 'width:100%;margin-top:3px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;font-size:0.8rem;display:none;';
   modelWrap.appendChild(modelSel);
@@ -1313,7 +1318,7 @@ function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabl
   }
   const refreshBtn = document.createElement('button');
   refreshBtn.textContent = '↻';
-  refreshBtn.title = 'Обновить список моделей';
+  refreshBtn.title = 'Fetch the model list';
   refreshBtn.style.cssText = 'margin-top:2px;';
   // Fetch models when the candidate server changes; keep a target model that is
   // not in the fetched list in the manual input.
@@ -1328,7 +1333,7 @@ function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabl
   const descInp = document.createElement('input');
   descInp.type = 'text';
   descInp.className = 'jev-desc';
-  descInp.placeholder = 'описание для decision-модели';
+  descInp.placeholder = 'what the decision model is told about this candidate';
   descInp.value = description;
   descInp.style.cssText = 'flex:2 1 180px;min-width:140px;' + inpStyle;
   const tierInp = document.createElement('input');
@@ -1337,7 +1342,7 @@ function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabl
   tierInp.min = '0';
   tierInp.step = '1';
   tierInp.value = tier || 0;
-  tierInp.title = 'Tier: 0 = слабее всех; low confidence не опускает ниже Default Tier';
+  tierInp.title = 'Tier: 0 = the weakest; a low-confidence answer never goes below the Default Tier';
   tierInp.style.cssText = 'flex:0 0 60px;' + inpStyle;
   const cwInp = document.createElement('input');
   cwInp.type = 'number';
@@ -1345,11 +1350,11 @@ function addJevRow(serverId, targetModel = '', description = '', tier = 0, enabl
   cwInp.min = '0';
   cwInp.step = '1';
   cwInp.value = contextWindow || 0;
-  cwInp.title = 'Context window (для min по пулу в /v1/models; 0 = неизвестно)';
+  cwInp.title = 'Context window (the pool minimum reported in /v1/models; 0 = unknown)';
   cwInp.style.cssText = 'flex:0 0 90px;' + inpStyle;
   const visionSel = document.createElement('select');
   visionSel.className = 'jev-vision';
-  visionSel.title = 'Vision: auto = неизвестно, vision = видит картинки, blind = слепа (вне пула image-запросов)';
+  visionSel.title = 'Vision: auto = unknown, vision = sees images, blind = never a candidate for an image request';
   visionSel.style.cssText = 'flex:0 0 90px;' + inpStyle;
   visionSel.innerHTML = '<option value="">auto</option><option value="true">vision</option><option value="false">blind</option>';
   visionSel.value = vision;
@@ -1758,7 +1763,7 @@ function traceState() {
   const state = document.getElementById('trace-state');
   const tab = document.getElementById('trace-tab');
   if (!on) {
-    if (state) state.textContent = 'off — nothing is captured';
+    if (state) state.textContent = 'off - nothing is captured';
     if (tab) tab.textContent = 'Trace';
     return;
   }
@@ -1921,6 +1926,251 @@ async function clearTrace() {
   await fetch(API + '/trace/reset', { method: 'POST' });
   await loadTrace();
 }
+
+// --- Interface language ---
+//
+// The GUI is written in English, because that is the language of the API it
+// renders: every model name, endpoint path, class label and status it displays
+// is English too. Russian is therefore a runtime overlay applied to the rendered
+// tree, which is the laziest thing that covers the thirty-odd innerHTML sites
+// without rewriting any of them: the observer translates a text node as it
+// lands, so no render function has to know a language exists. English originals
+// are kept per node, so switching back restores exactly.
+const LANG_KEY = 'llm-admin-lang';
+const LANGS = { en: 'English', ru: 'Русский' };
+let lang = localStorage.getItem(LANG_KEY) || 'en';
+
+// The whole dictionary: exact keys for the literals of the shell, and the
+// fragments the dynamic strings are concatenated from for those.
+const RU = {
+  "Interface language": "Язык интерфейса",
+  "Servers": "Серверы", "Routing Rules": "Правила маршрутизации", "Metrics": "Метрики",
+  "Trace": "Трассировка", "LLM API Router - Admin": "LLM API Router - Админка",
+  "+ Add Server": "+ Добавить сервер", "Add Server": "Добавить сервер", "↻ Refresh": "↻ Обновить",
+  "auto-refresh 5s": "авто-обновление 5с", "auto-refresh 3s": "авто-обновление 3с",
+  "Name": "Имя", "API Type": "Тип API", "Health": "Здоровье", "API Key": "API-ключ",
+  "Actions": "Действия", "Edit": "Изменить", "Delete": "Удалить", "Delete server": "Удалить сервер",
+  "Profile:": "Профиль:", "★ Activate": "★ Активировать",
+  "Route traffic through the selected profile": "Маршрутизировать трафик через выбранный профиль",
+  "Rename": "Переименовать", "+ New Profile": "+ Новый профиль", "Delete Profile": "Удалить профиль",
+  "+ Add Rule": "+ Добавить правило", "Enabled": "Включено", "Incoming Models": "Входящие модели",
+  "Target Model": "Целевая модель", "Server": "Сервер", "Fallbacks": "Фоллбэки",
+  "Active: 0": "Активных: 0", "Active:": "Активных:", "Active: ": "Активных: ",
+  "Denied: 0": "Отклонено: 0", "Denied:": "Отклонено:", "Denied: ": "Отклонено: ",
+  "Rejected by the inbound limiter (settings.inbound): these requests never reached a backend":
+    "Отклонено входящим лимитером (settings.inbound): эти запросы не дошли до бэкендов",
+  "Reset": "Сброс", "Summary by Server": "Сводка по серверам", "Requests": "Запросы",
+  "Errors": "Ошибки", "Avg Latency": "Ср. задержка", "Min/Max": "Мин/Макс",
+  "from the latency histogram buckets: median / 95th / 99th percentile":
+    "из корзин гистограммы задержки: медиана / 95-й / 99-й процентиль",
+  "Prefill tok/s": "Префилл ток/с", "Decode tok/s": "Декод ток/с",
+  "Cached": "Кэш", "Cache hit": "Попадание в кэш", "Reasoning": "Рассуждения",
+  "Cache New": "Кэш-запись", "Bytes": "Байты", "Summary by Model": "Сводка по моделям",
+  "Model": "Модель", "Summary by Target Model / Server": "Сводка по целевым моделям / серверам",
+  "Target Model / Server": "Целевая модель / сервер", "Summary by Request Class": "Сводка по классам запросов",
+  "Class": "Класс", "Recent Requests": "Последние запросы", "Time": "Время", "Target": "Цель",
+  "Status": "Статус", "Latency": "Задержка", "Prefill": "Префилл", "Decode": "Декод",
+  "Size": "Размер", "Fallback": "Фоллбэк", "Client": "Клиент", "Models": "Модели",
+  "Seconds": "Секунды", "Capture": "Захват", "Stop": "Стоп", "Clear": "Очистить",
+  "Events": "События", "Features": "Признаки", "Trunc": "Обрезка",
+  "Bodies live in memory only (512KB per request/response, last 100 entries) and die with the process. Base64 images and audio uploads are stored as size+hash stubs; prompt text is stored verbatim. Click a row for the request, the reassembled response and the raw frames.":
+    "Тела живут только в памяти (512KB на запрос/ответ, последние 100 записей) и умирают вместе с процессом. Base64-картинки и аудио-загрузки сохраняются заглушками size+hash, текст промпта сохраняется как есть. Кликните строку, чтобы увидеть запрос, собранный ответ и сырые кадры.",
+  "API Types (the protocols the backend serves)": "Типы API (протоколы, которые бэкенд обслуживает)",
+  "Native endpoints (empty = undeclared: requests pass through byte for byte, no conversion)":
+    "Родные эндпоинты (пусто = не объявлено: запросы идут как есть, без конвертации)",
+  "General (shared by every protocol)": "Общие (базовые для всех протоколов)",
+  "Proxy (e.g. http://127.0.0.1:3128)": "Прокси (напр. http://127.0.0.1:3128)",
+  "Proxy enabled (off by default = a direct connection, the proxy URLs are ignored)":
+    "Прокси включён (по умолчанию выключен = прямое соединение, URL прокси игнорируются)",
+  "URL (if it differs from the base)": "URL (если отличается от базового)", "Limits": "Лимиты",
+  "Cooldown Time (seconds, 0 = the global 5min)": "Пауза после сбоев (сек, 0 = глобальные 5 мин)",
+  "TPM Limit (tokens/min, 0 = unlimited)": "Лимит TPM (токенов/мин, 0 = без лимита)",
+  "RPM Limit (requests/min, 0 = unlimited)": "Лимит RPM (запросов/мин, 0 = без лимита)",
+  "Max Parallel (concurrent generations, 0 = unlimited)": "Максимум параллельных (одновременных генераций, 0 = без лимита)",
+  "Cancel": "Отмена", "⚡ Test": "⚡ Тест", "Save": "Сохранить", "Add Routing Rule": "Добавить правило",
+  "Incoming Models (comma-separated;": "Входящие модели (через запятую;", "masks a family:": "маска семейства:",
+  "Router": "Роутер", "Static (primary + fallbacks)": "Статика (основной + фоллбэки)",
+  "Jev (a decision model picks the model per request)": "Jev (модель решения выбирает модель для каждого запроса)",
+  "Primary Server": "Основной сервер",
+  "Context Window (tokens, 0 = unknown)": "Контекстное окно (токенов, 0 = неизвестно)",
+  "(select a model)": "(выберите модель)",
+  "Jev Decision Server (llama.cpp running a decision model)": "Сервер решений Jev (llama.cpp с decision-моделью)",
+  "Decision Model (empty = the backend decides)": "Модель решения (пусто = бэкенд решает)",
+  "(the backend decides)": "(бэкенд решает)", "Min Confidence (0 = 0.3)": "Мин. уверенность (0 = 0.3)",
+  "Default Tier": "Базовый ярус", "Cache TTL (seconds, 0 = off)": "Кэш решений (сек, 0 = выкл)",
+  "Cached decisions for identical requests": "Кэш решений для одинаковых запросов",
+  "Security gate (400 when harmful ≥ 0.95)": "Фильтр безопасности (400 при harmful ≥ 0.95)",
+  "Images in the decision (vision decision, expensive)": "Картинки в решении (vision-решение, дорого)",
+  "Timeout (ms, 0 = 1500)": "Таймаут (мс, 0 = 1500)",
+  "State Max Chars (0 = 8000)": "Максимум символов состояния (0 = 8000)",
+  "How much request text the decision sees": "Сколько текста запроса видит решение",
+  "Jev Question (empty = the default prompt)": "Вопрос Jev (пусто = дефолтный промпт)",
+  "Jev Candidates (the pool: tier 0 = weakest/cheapest)": "Кандидаты Jev (пул: ярус 0 = слабее/дешевле)",
+  "+ Add Candidate": "+ Добавить кандидата", "Preset: haiku/sonnet/opus": "Шаблон: haiku/sonnet/opus",
+  "Fill the pool with the tested haiku/sonnet/opus template (tier 0/1/2, Default Tier = 1); pick the servers and target models yourself":
+    "Заполнить пул проверенным шаблоном haiku/sonnet/opus (ярус 0/1/2, базовый ярус = 1); серверы и целевые модели выберите сами",
+  "The default candidate tier: a low-confidence answer never goes below it":
+    "Ярус кандидата по умолчанию: ответ с низким confidence не опускает ниже него",
+  "The decision budget; allow headroom for local decision models (3000-5000)":
+    "Бюджет решения; локальным decision-моделям нужен запас (3000-5000)",
+  "Balance": "Балансировка",
+  "Failover (the primary answers, the fallbacks back it up)": "Фоллбэк (отвечает основной, запасные подстраховывают)",
+  "Round-robin (a pool of equal backends shares the traffic)": "Round-robin (пул равных бэкендов делит трафик)",
+  "Least connections (a request goes to the least loaded backend, weight = capacity)":
+    "Меньше всех запросов (запрос идёт на наименее загруженный бэкенд, weight = ёмкость)",
+  "+ Add Fallback": "+ Добавить фоллбэк", "empty = all": "пусто = все",
+  "empty = direct": "пусто = напрямую", "empty = the base URL": "пусто = базовый URL",
+  "0 = until switched off": "0 = пока не выключат", "Fetch the model list from the server": "Получить список моделей с сервера",
+  "Fetch the model list": "Получить список моделей", "or type it manually...": "или введите вручную...",
+  "Loading…": "Загрузка…", "Loaded": "Загружено", "(active)": "(активный)",
+  "(empty pool)": "(пустой пул)", "(empty)": "(пусто)", "(none)": "(нет)", "(server id)": "(id сервера)",
+  "(no server)": "(нет сервера)", "(loading...)": "(загрузка...)", "(failed)": "(ошибка)",
+  "(error)": "(ошибка)", "(backend default)": "(модель по умолчанию)",
+  "✏️ type it manually": "✏️ введите вручную", "● healthy": "● жив", "● down": "● мёртв",
+  "⏳ cooling ": "⏳ остывает ", "keeps conversation state": "хранит состояние диалога",
+  "No servers configured": "Серверы не настроены", "No routing rules configured": "Правила маршрутизации не настроены",
+  "No metrics yet": "Метрик пока нет", "No requests yet": "Запросов пока нет",
+  "Nothing traced yet": "Трассировки пока нет", "yes": "да",
+  "Edit Server": "Изменить сервер", "Edit Rule #": "Изменить правило #",
+  "Enable rule": "Включить правило", "Disable rule": "Выключить правило",
+  "Delete rule #": "Удалить правило #", "Delete profile ": "Удалить профиль ",
+  "the mask: the client's name goes to the backend as-is": "маска: имя клиента уходит на бэкенд как есть",
+  "decision model: ": "модель решения: ", "tier ": "ярус ", "backend ": "бэкенд ",
+  "Priority: lower number tried first, 0 = after all numbered": "Приоритет: меньший номер пробуется первым, 0 = после всех пронумерованных",
+  "Enabled (uncheck to disable this fallback)": "Включён (снимите, чтобы выключить фоллбэк)",
+  "Enabled (uncheck to remove from the pool)": "Включён (снимите, чтобы убрать из пула)",
+  "Weight: this backend's share of the traffic when the rule balances (round-robin); 1 = an equal share":
+    "Вес: доля этого бэкенда в трафике, когда правило балансирует (round-robin); 1 = равная доля",
+  "target model (empty = the server id)": "целевая модель (пусто = id сервера)",
+  "what the decision model is told about this candidate": "что модель решения знает об этом кандидате",
+  "Tier: 0 = the weakest; a low-confidence answer never goes below the Default Tier":
+    "Ярус: 0 = самый слабый; ответ с низким confidence не опускает ниже базового яруса",
+  "Context window (the pool minimum reported in /v1/models; 0 = unknown)":
+    "Контекстное окно (минимум по пулу в /v1/models; 0 = неизвестно)",
+  "Vision: auto = unknown, vision = sees images, blind = never a candidate for an image request":
+    "Vision: авто = неизвестно, vision = видит картинки, blind = вне пула image-запросов",
+  "Fallbacks / pool members": "Фоллбэки / участники пула",
+  "Admin token (ADMIN_TOKEN on the router):": "Токен админки (ADMIN_TOKEN на роутере):",
+  "Testing...": "Тест…", "Reset all metrics?": "Сбросить все метрики?",
+  "Save failed:": "Не удалось сохранить:", "Delete failed:": "Не удалось удалить:",
+  "Reset failed:": "Не удалось сбросить:", "Failed to activate profile:": "Не удалось активировать профиль:",
+  "Failed to create profile:": "Не удалось создать профиль:", "Failed to delete profile:": "Не удалось удалить профиль:",
+  "Failed to rename profile:": "Не удалось переименовать профиль:", "Failed to update rule:": "Не удалось обновить правило:",
+  "New profile name:": "Имя нового профиля:", "Profile name:": "Имя профиля:",
+  "Copy rules from the active profile?": "Скопировать правила из активного профиля?",
+  "cache miss": "промах кэша", "usage not reported": "usage не сообщается", "not reported": "нет данных",
+  "ms prefill": "мс префилл", "ms decode": "мс декод", "ms queue": "мс очередь",
+  "draft accepted": "черновиков принято", "Native: ": "Нативно: ", "request id: ": "id запроса: ",
+  "Copy error text": "Скопировать текст ошибки", "s audio": "с аудио",
+  "off - nothing is captured": "выключено - ничего не пишется", "until stopped": "до остановки",
+  "capturing, ": "захват, ", "s left": "с осталось", " · everything": " · все",
+  " · weight ": " · вес ", " models: ": " модели: ", " servers: ": " серверы: ",
+  "Request": "Запрос", "Request(truncated)": "Запрос(обрезано)", "Response": "Ответ",
+  "Response(truncated)": "Ответ(обрезано)", "Raw frames (": "Сырые кадры (", " bytes stored)": " байт сохранено)",
+  " · finish ": " · финиш ", "Copy ": "Скопировать ", " to the clipboard": " в буфер обмена",
+  "the request": "запрос", "the reassembled response": "собранный ответ", "the raw frames": "сырые кадры",
+  "Trace entry not found (overwritten by the ring?)": "Запись трассировки не найдена (перезаписана кольцом?)",
+  "failed to load trace entry:": "не удалось загрузить запись трассировки:",
+  "Trace start failed:": "Запуск трассировки не удался:", "Clear traced requests?": "Очистить трассированные запросы?",
+};
+
+// An exact hit is a literal of the shell. A node built by concatenation
+// ('Failed to save: ' + err) is translated by replacing the fragments it is
+// made of, longest key first, so "Target Model" wins over "Model". Single-word
+// keys never take part in that pass: model names and class labels are single
+// words too, and machine text must not be edited by a UI dictionary.
+const RU_KEYS = Object.keys(RU).sort((a, b) => b.length - a.length);
+const PHRASES = RU_KEYS.filter((k) => k.includes(' ') || k.includes('('));
+
+function tr(text) {
+  if (lang === 'en') return text;
+  if (RU[text]) return RU[text];
+  // The fragment pass is for interface text, and interface text is short: a 4KB
+  // backend error body is not a UI string, and rewriting a word of it because
+  // the word is also a label is editing machine text with a UI dictionary.
+  if (text.length > 120) return text;
+  let out = text;
+  for (const k of PHRASES) if (out.includes(k)) out = out.split(k).join(RU[k]);
+  return out;
+}
+
+// Dialogs are built from English fragments at the call site and never enter the
+// DOM, so they take the same overlay. One wrapper, no call site to change.
+for (const kind of ['alert', 'confirm', 'prompt']) {
+  const native = window[kind].bind(window);
+  window[kind] = (msg, ...rest) => native(tr(String(msg === undefined ? '' : msg)), ...rest);
+}
+
+const LANG_ATTRS = ['title', 'placeholder'];
+// Machine text, not interface text: a captured request body, a raw SSE frame.
+const LANG_SKIP = { CODE: 1, PRE: 1, SCRIPT: 1, STYLE: 1, TEXTAREA: 1 };
+const textOriginals = new WeakMap();
+const attrOriginals = new WeakMap();
+
+function translateText(node) {
+  const src = textOriginals.has(node) ? textOriginals.get(node) : node.nodeValue;
+  const core = src.trim();
+  // replace() hits the first occurrence, which is the trimmed core at its
+  // offset, so the indentation around it survives.
+  const out = core ? src.replace(core, tr(core)) : src;
+  if (out !== node.nodeValue) {
+    textOriginals.set(node, src);
+    node.nodeValue = out;
+  }
+}
+
+function translateAttrs(el) {
+  for (const attr of LANG_ATTRS) {
+    if (!el.hasAttribute(attr)) continue;
+    const saved = attrOriginals.get(el) || {};
+    const src = attr in saved ? saved[attr] : el.getAttribute(attr);
+    const out = tr(src);
+    if (out !== el.getAttribute(attr)) {
+      saved[attr] = src;
+      attrOriginals.set(el, saved);
+      el.setAttribute(attr, out);
+    }
+  }
+}
+
+function translateTree(el) {
+  if (el.nodeType === 3) return translateText(el);
+  if (el.nodeType === 2 || LANG_SKIP[el.tagName]) return;
+  if (el.nodeType === 1) translateAttrs(el);
+  for (const n of el.childNodes) translateTree(n);
+}
+
+const PAGE_TITLE = document.title;
+
+function setLang(next) {
+  lang = LANGS[next] ? next : 'en';
+  localStorage.setItem(LANG_KEY, lang);
+  document.documentElement.lang = lang;
+  document.getElementById('lang-select').value = lang;
+  document.title = lang === 'ru' ? tr(PAGE_TITLE) : PAGE_TITLE;
+  translating = true;
+  translateTree(document.body);
+  translating = false;
+}
+
+let translating = false;
+new MutationObserver((records) => {
+  if (translating) return;
+  translating = true;
+  try {
+    for (const rec of records) {
+      if (rec.type === 'characterData') translateText(rec.target);
+      else if (rec.type === 'attributes') translateAttrs(rec.target);
+      else rec.addedNodes.forEach(translateTree);
+    }
+  } finally {
+    translating = false;
+  }
+}).observe(document.body, {
+  childList: true, subtree: true, characterData: true, attributeFilter: LANG_ATTRS,
+});
+
+setLang(lang);
 </script>
 </body>
 </html>

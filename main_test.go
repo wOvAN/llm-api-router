@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -61,7 +62,7 @@ func TestGUIServerFormEditsProtocols(t *testing.T) {
 	// Empty means "undeclared = passthrough"; a control whose empty state is a
 	// behavior change has to say so, or an operator clears it by accident.
 	if i := strings.Index(src, "server-proto-chat"); i < 0 ||
-		!strings.Contains(src[max(0, i-400):i], "passthrough") {
+		!strings.Contains(src[max(0, i-400):i], "pass through") {
 		t.Error("the endpoints control does not state that an empty declaration means passthrough")
 	}
 
@@ -313,7 +314,7 @@ func TestGUIEditsBalanceAndWeight(t *testing.T) {
 	if !strings.Contains(src, `w.style.opacity = pool ? '1' : '0.35'`) {
 		t.Error("the weight input is still dimmed for least-connections")
 	}
-	if !strings.Contains(src, "по загрузке на слот (weight") {
+	if !strings.Contains(src, "load per slot (weight = capacity)") {
 		t.Error("the least-connections tag does not state that weight counts there")
 	}
 }
@@ -588,4 +589,90 @@ func TestGUIServerFormEditsParallelCap(t *testing.T) {
 	if fill := funcBody(t, src, "function editServer("); !strings.Contains(fill, "server-parallel") {
 		t.Error("editServer does not restore the declared cap into the form")
 	}
+}
+
+// TestGUILanguageSwitcher pins the i18n surface: a dropdown offering both
+// languages, a persistence key that defaults to English, and a Russian entry for
+// every literal of the static shell. The overlay design makes the last one the
+// failure mode worth a test: a literal missing from the dictionary is a
+// half-translated page, invisible in English and invisible in a code review.
+func TestGUILanguageSwitcher(t *testing.T) {
+	src := guiSource(t)
+
+	for _, id := range []string{`id="lang-select"`, `value="en"`, `value="ru"`} {
+		if !strings.Contains(src, id) {
+			t.Errorf("the GUI has no %s", id)
+		}
+	}
+	for _, want := range []string{"const LANG_KEY = 'llm-admin-lang';", "localStorage.getItem(LANG_KEY) || 'en'"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("the language setting is missing %s", want)
+		}
+	}
+
+	start, end := strings.Index(src, "<body>"), strings.Index(src, "<script>")
+	dictStart := strings.Index(src, "const RU = {")
+	if start < 0 || end < 0 || dictStart < 0 {
+		t.Fatal("the GUI has no body/script/RU dictionary")
+	}
+	shell := src[start:end]
+
+	dict := src[dictStart:]
+	dict = dict[:strings.Index(dict, "\n};")]
+	ru := map[string]string{}
+	for _, m := range regexp.MustCompile(`"([^"]+)"\s*:\s*"([^"]*)"`).FindAllStringSubmatch(dict, -1) {
+		ru[m[1]] = m[2]
+	}
+	if len(ru) < 100 {
+		t.Fatalf("the RU dictionary has %d entries; the GUI has more literals than that", len(ru))
+	}
+
+	literals := append(textNodes(shell), attrValues(shell)...)
+	for _, lit := range literals {
+		if noTranslation[lit] {
+			continue
+		}
+		if v, ok := ru[lit]; !ok {
+			t.Errorf("no Russian for %q", lit)
+		} else if !strings.ContainsAny(v, "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ") {
+			t.Errorf("the Russian entry for %q is %q: no Cyrillic", lit, v)
+		}
+	}
+}
+
+// noTranslation lists the shell literals that stay as they are: symbols, the
+// endpoint paths a declaration is named by, product and protocol names, unit
+// abbreviations, and the example values of placeholders (a placeholder naming
+// a value to type is that value's spelling, not prose).
+var noTranslation = map[string]bool{
+	"#": true, ")": true, "*": true, "↻": true, "OK": true,
+	"/v1/chat/completions": true, "/v1/completions": true, "/v1/messages": true, "/v1/responses": true,
+	"qwen3-*": true, "sk-...": true, "LLM API Router": true,
+	"OpenAI": true, "Anthropic": true, "Jev": true, "ID": true, "URL": true, "API": true,
+	"P50/P95/P99": true, "P Tok": true, "C Tok": true, "P tok": true, "D tok": true,
+	"P tok/s": true, "D tok/s": true, "TTFB": true,
+	"English": true, "Русский": true,
+	"e.g. primary-openai": true, "e.g. Primary OpenAI": true, "e.g. api.openai.com/v1": true,
+	"e.g. opus,sonnet,claude-opus,qwen3-*": true,
+}
+
+func textNodes(shell string) []string {
+	stripped := regexp.MustCompile(`(?s)<(script|style).*?</(script|style)>`).ReplaceAllString(shell, "")
+	out := []string{}
+	for _, n := range regexp.MustCompile(`>[^<]+<`).FindAllString(stripped, -1) {
+		if v := strings.Join(strings.Fields(n[1:len(n)-1]), " "); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func attrValues(shell string) []string {
+	out := []string{}
+	for _, m := range regexp.MustCompile(`(?:title|placeholder)="([^"]*)"`).FindAllStringSubmatch(shell, -1) {
+		if v := strings.Join(strings.Fields(m[1]), " "); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
