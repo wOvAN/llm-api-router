@@ -630,6 +630,83 @@ func TestHandleStreamedTranscriptionsMetersTheUpload(t *testing.T) {
 		t.Errorf("audio timing = %dms, want 1000 (the uploaded clip)", recent[0].AudioDurationMs)
 	}
 }
+func TestHandleOversizedBodyIsTooLarge(t *testing.T) {
+	// A body over the cap is a SIZE rejection, not a malformed request: a client
+	// branches on 413 (drop context, compact the conversation), and a 400 tells
+	// it the request was invalid. The cap is a var so the test can be small.
+	saved := maxRequestBody
+	maxRequestBody = 1024
+	defer func() { maxRequestBody = saved }()
+
+	r, _, ms, _ := newTestRouter(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader(bytes.Repeat([]byte("a"), 2048)))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if res := w.Result(); res.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("got status %d, want 413: %s", res.StatusCode, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "large") {
+		t.Errorf("body = %q, want the size named", w.Body.String())
+	}
+	// The client's size problem is not a backend's outage: nothing is metered.
+	if recent := ms.Recent(); len(recent) != 0 {
+		t.Errorf("recorded %d requests, want none", len(recent))
+	}
+}
+
+// A request that got a 500 from A and a 200 from B was a clean success in B's
+// row and absent from A's: the per-server failure rate the GUI renders was
+// structurally blind to exactly the servers that are failing, because the metric
+// describes the attempt that SERVED. The attempt is what a server deserves.
+func TestHandleFailedAttemptCountsAgainstItsServer(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
+		http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`))
+	}))
+	defer good.Close()
+
+	r, store, ms, _ := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{ID: "a", Name: "A", URL: bad.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}})
+	_ = store.AddServer(&domain.Server{ID: "b", Name: "B", URL: good.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI}})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"m"},
+		TargetModel:    "m",
+		ServerID:       "a",
+		Fallbacks:      []domain.FallbackEntry{{ServerID: "b"}},
+		Enabled:        true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+	if res := w.Result(); res.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200: %s", res.StatusCode, w.Body.String())
+	}
+
+	sum := ms.Summaries()
+	if got := sum["server:a"]; got.TotalRequests != 1 || got.ErrorCount != 1 {
+		t.Errorf("server a = %+v, want 1 request, 1 error", sum["server:a"])
+	}
+	if got := sum["server:b"]; got.TotalRequests != 1 || got.SuccessCount != 1 {
+		t.Errorf("server b = %+v, want 1 request, 1 success", sum["server:b"])
+	}
+}
 
 func TestHandleTTSBinaryPassthrough(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

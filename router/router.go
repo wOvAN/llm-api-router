@@ -332,11 +332,20 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Cap the request body to protect against memory exhaustion. LLM prompts can
-	// be large (long-context requests), so 64MB is generous.
-	req.Body = http.MaxBytesReader(w, req.Body, 64<<20)
+	// be large (long-context requests), so 64MB is generous. A body over the cap
+	// is a SIZE rejection, not a malformed request: a client branches on 413
+	// (drop context, compact the conversation, tell the user), and a 400 teaches
+	// it that the request was invalid, which is a dead end (olla answers the
+	// same distinction with 413; LiteLLM's proxy has no body cap to answer with).
+	req.Body = http.MaxBytesReader(w, req.Body, maxRequestBody)
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		log.Errorf("[%s] failed to read request body: %v", req.URL.Path, err)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -935,6 +944,16 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			}
 			releaseQuota(used)
 			attemptErrors = append(attemptErrors, err.Error())
+			// The attempt is charged to the server that made it, not only to the
+			// one that served: a pool where one member is dying is invisible in
+			// the per-server stats otherwise (metrics.RecordAttempt).
+			if r.metrics != nil {
+				status := http.StatusBadGateway
+				if isBuffered {
+					status = buffered.StatusCode
+				}
+				r.metrics.RecordAttempt(srv.ID, status)
+			}
 			log.Errorf("[%s] fallback from %s: %v", req.URL.Path, srv.Name, err)
 			break
 		}
@@ -1126,6 +1145,11 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 // a dying backend (crashed llama.cpp worker, restart) usually recovers within
 // seconds, so retry before marking the server unhealthy and falling back.
 // Override per request via X-Router-Retries ("0" disables retries).
+// maxRequestBody caps a request body: long-context prompts are large, so 64MB
+// is generous. A var, not a const, so a test can exercise the refusal without
+// allocating the cap.
+var maxRequestBody int64 = 64 << 20
+
 const defaultNumRetries = 10
 
 // maxClientRetries caps what a client may ask for via X-Router-Retries. The

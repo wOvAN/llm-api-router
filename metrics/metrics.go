@@ -169,6 +169,25 @@ func (s *Store) Recent() []domain.RequestMetric {
 	return out
 }
 
+// RecordAttempt charges a server for an attempt that did not serve the request.
+// The metric a request leaves behind describes the attempt that SERVED, so a
+// request that got a 500 from A and a 200 from B was a clean success in B's row
+// and absent from A's: the per-server failure rate was structurally blind to
+// exactly the servers that are failing. Counts and status classes only - a
+// failed attempt's latency is not measured per attempt, and an invented one is
+// worse than none.
+func (s *Store) RecordAttempt(serverID string, statusCode int) {
+	if serverID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateSummary("server:"+serverID, domain.RequestMetric{
+		ServerID:   serverID,
+		StatusCode: statusCode,
+	})
+}
+
 // Summaries returns all aggregated summaries.
 func (s *Store) Summaries() map[string]domain.Summary {
 	s.mu.RLock()

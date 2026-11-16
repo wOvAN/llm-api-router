@@ -19,6 +19,12 @@ import (
 // Latency and TTFB are also exported as histograms: avg/min/max hide the tail,
 // and paging on a streaming backend is about p95 time-to-first-token, which
 // needs buckets to interpolate over.
+//
+// The `server=` rows count ATTEMPTS, not requests: a request that failed on one
+// member and was served by the next is charged to both, because the question a
+// per-server series answers is "is this backend serving me", and a failover is
+// evidence that it was not. The unlabelled and `model=`/`class=` rows stay one
+// count per request.
 func (s *Store) PrometheusMetrics() string {
 	summaries := s.Summaries()
 
