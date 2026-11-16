@@ -140,6 +140,39 @@ func TestGUIShowsConversion(t *testing.T) {
 	}
 }
 
+// The Metrics tab stacked four 17-column summary tables on top of each other, so
+// answering "which replica is dying" meant scrolling past three tables nobody
+// asked about. One selector shows one group (and all four stay one click away),
+// and the choice is persisted like the language choice, because an operator who
+// lives on one group should not re-pick it every reload.
+func TestGUISummaryViewSwitcher(t *testing.T) {
+	src := guiSource(t)
+	if !strings.Contains(src, `id="summary-select"`) {
+		t.Error("the Metrics tab has no summary view selector")
+	}
+	// Every group's heading AND its table must be taggable: hiding the heading
+	// alone leaves a title over an empty box, hiding the table alone leaves a
+	// bare heading.
+	for _, group := range []string{"server", "model", "target", "class"} {
+		if n := strings.Count(src, `data-summary="`+group+`"`); n != 2 {
+			t.Errorf("summary group %q is tagged on %d elements, want 2 (heading and table)", group, n)
+		}
+	}
+	if !strings.Contains(src, "localStorage.setItem(SUMMARY_KEY") ||
+		!strings.Contains(src, "localStorage.getItem(SUMMARY_KEY") {
+		t.Error("the chosen summary view is not persisted")
+	}
+	// The poll re-renders every 3s; a view that is not re-applied after a render
+	// flickers the hidden groups back in.
+	i := strings.Index(src, "function setSummaryView")
+	if i < 0 {
+		t.Fatal("the GUI has no setSummaryView")
+	}
+	if !strings.Contains(src[i:i+700], "data-summary") {
+		t.Error("setSummaryView does not toggle the tagged elements")
+	}
+}
+
 // Recent Requests rows are correlated with the client's own logs by request id,
 // and the row is built by concatenation — an unescaped value lands in a title
 // attribute verbatim.
