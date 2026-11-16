@@ -64,6 +64,35 @@ type stickyPin struct {
 	expires  time.Time
 }
 
+// capMap enforces a bound on a TTL map. Sweeping expired entries is the cheap
+// half, and on a busy box it is also the useless half: at the cap every entry
+// is LIVE, because the traffic that created it keeps refreshing its TTL, so the
+// sweep frees nothing and the map grows one entry per conversation for the life
+// of the process. So the cap is then paid for by evicting the entry whose
+// expiry lands first, which is the least-recently-refreshed one: a hit slides
+// the expiry, so expiry order is LRU order. (LiteLLM's and olla's equivalent
+// stores have an explicit max-sessions LRU; a stdlib router buys the same
+// ceiling from the expiry it already keeps.)
+func capMap[V any](m map[string]V, limit int, expires func(V) time.Time, now time.Time) {
+	for k, v := range m {
+		if now.After(expires(v)) {
+			delete(m, k)
+		}
+	}
+	for len(m) >= limit {
+		oldest, expiry := "", time.Time{}
+		for k, v := range m {
+			if e := expires(v); oldest == "" || e.Before(expiry) {
+				oldest, expiry = k, e
+			}
+		}
+		if oldest == "" {
+			return
+		}
+		delete(m, oldest)
+	}
+}
+
 // stickyGet returns the backend pinned to a conversation, "" when none. Reading
 // a pin refreshes its expiry (a live conversation is a sliding window).
 func (r *Router) stickyGet(key string) string {
@@ -93,12 +122,7 @@ func (r *Router) stickyPut(key, serverID string) {
 	r.pinMu.Lock()
 	defer r.pinMu.Unlock()
 	if len(r.pins) >= stickySweepAt {
-		now := time.Now()
-		for k, p := range r.pins {
-			if now.After(p.expires) {
-				delete(r.pins, k)
-			}
-		}
+		capMap(r.pins, stickySweepAt, func(p stickyPin) time.Time { return p.expires }, time.Now())
 	}
 	r.pins[key] = stickyPin{serverID: serverID, expires: time.Now().Add(stickyTTL)}
 }

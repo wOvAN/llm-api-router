@@ -3,6 +3,7 @@ package router
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -175,4 +176,29 @@ func TestConversationKeyCascade(t *testing.T) {
 func keyedHeaderless(t *testing.T, body []byte) string {
 	t.Helper()
 	return conversationKey(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), body)
+}
+
+// The sweep at the cap drops EXPIRED pins, which on a busy box is nothing: 30
+// minutes of agent traffic at more than 4096 live conversations is a map that
+// grows one entry per conversation for the life of the process. The cap must
+// bound the map, not the sweep.
+func TestPinStoreIsCapped(t *testing.T) {
+	r, _, _, _ := newTestRouter(t)
+	for i := range stickySweepAt + 100 {
+		r.stickyPut(hashKey("h", strconv.Itoa(i)), "s1")
+	}
+	if len(r.pins) > stickySweepAt {
+		t.Errorf("pins = %d entries, want at most %d", len(r.pins), stickySweepAt)
+	}
+	// A pinned conversation that keeps talking keeps its pin: the eviction
+	// targets the LEAST-recently-refreshed entry, not the newest one.
+	key := hashKey("h", "live")
+	r.stickyPut(key, "s1")
+	for i := range 3 * stickySweepAt {
+		r.stickyPut(hashKey("h", "other"+strconv.Itoa(i)), "s2")
+		r.stickyGet(key) // the conversation is still going
+	}
+	if got := r.stickyGet(key); got != "s1" {
+		t.Errorf("live conversation pin = %q, want it kept (s1)", got)
+	}
 }

@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"llm-api-router/config"
@@ -1131,5 +1133,23 @@ func TestHandleJevCandidateRefusalFallsToNextTier(t *testing.T) {
 	}
 	if strongHits != 1 {
 		t.Fatalf("the next tier must serve the request, strongHits=%d", strongHits)
+	}
+}
+
+// The decision cache and the tier pin sweep at their cap, and a busy box has
+// every entry live there too: an hour of agent traffic past 4096 keys is a map
+// that never stops growing.
+func TestJevStoresAreCapped(t *testing.T) {
+	r, _, _, _ := newTestRouter(t)
+	for i := range jevCacheSweepAt + 50 {
+		key := hashKey("c", strconv.Itoa(i))
+		r.jevCachePut(key, jevOutcome{Choice: "m"}, time.Hour)
+		r.jevStickyPut(key, "m")
+	}
+	if len(r.jevCache) > jevCacheSweepAt {
+		t.Errorf("jevCache = %d entries, want at most %d", len(r.jevCache), jevCacheSweepAt)
+	}
+	if len(r.jevSticky) > jevCacheSweepAt {
+		t.Errorf("jevSticky = %d entries, want at most %d", len(r.jevSticky), jevCacheSweepAt)
 	}
 }

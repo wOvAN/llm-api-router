@@ -495,12 +495,7 @@ func (r *Router) jevCachePut(key string, out jevOutcome, ttl time.Duration) {
 	r.jevMu.Lock()
 	defer r.jevMu.Unlock()
 	if len(r.jevCache) >= jevCacheSweepAt {
-		now := time.Now()
-		for k, e := range r.jevCache {
-			if now.After(e.expires) {
-				delete(r.jevCache, k)
-			}
-		}
+		capMap(r.jevCache, jevCacheSweepAt, func(e jevCacheEntry) time.Time { return e.expires }, time.Now())
 	}
 	r.jevCache[key] = jevCacheEntry{outcome: out, expires: time.Now().Add(ttl)}
 }
@@ -538,12 +533,7 @@ func (r *Router) jevStickyPut(key, choice string) {
 	r.jevMu.Lock()
 	defer r.jevMu.Unlock()
 	if len(r.jevSticky) >= jevCacheSweepAt {
-		now := time.Now()
-		for k, e := range r.jevSticky {
-			if now.After(e.expires) {
-				delete(r.jevSticky, k)
-			}
-		}
+		capMap(r.jevSticky, jevCacheSweepAt, func(e jevStickyEntry) time.Time { return e.expires }, time.Now())
 	}
 	r.jevSticky[key] = jevStickyEntry{choice: choice, expires: time.Now().Add(jevStickyTTL)}
 }
