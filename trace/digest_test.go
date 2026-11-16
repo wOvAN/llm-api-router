@@ -79,6 +79,24 @@ func TestDigestAudioStreamIgnoresPartialSnapshots(t *testing.T) {
 	}
 }
 
+// A batch has no deltas: /v1/batches/transcriptions is always SSE and answers
+// with one WHOLE transcript per file, so the transcripts are the content the
+// digest exists to show. They join with a space, the join the answer and the
+// reasoning channels already use.
+func TestDigestAudioBatchStream(t *testing.T) {
+	raw := []byte("data: {\"type\":\"batch.transcription.result\",\"index\":0,\"filename\":\"a.wav\",\"text\":\"privet\"}\n\n" +
+		"data: {\"type\":\"batch.transcription.result\",\"index\":1,\"filename\":\"b.wav\",\"text\":\"poka\"}\n\n" +
+		"data: {\"type\":\"batch.transcription.done\",\"result_count\":2,\"timing\":{\"wall_ms\":900,\"audio_duration_ms\":6400,\"rtf\":0.14}}\n\n" +
+		"data: [DONE]\n\n")
+	d := DigestResponse(raw, "text/event-stream")
+	if d.Text != "privet poka" {
+		t.Errorf("text = %q, want both transcripts", d.Text)
+	}
+	if d.Events["batch.transcription.result"] != 2 || d.Events["batch.transcription.done"] != 1 {
+		t.Errorf("events = %v, want both batch frames counted", d.Events)
+	}
+}
+
 func TestDigestJSON(t *testing.T) {
 	d := DigestResponse([]byte(`{"choices":[{"message":{"content":"Hi there"},"finish_reason":"stop"}]}`), "application/json")
 	if d.Text != "Hi there" || d.FinishReason != "stop" {

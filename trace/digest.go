@@ -69,6 +69,16 @@ func digestStream(raw []byte) Digest {
 			}
 		case "speech.audio.delta":
 			d.AudioDeltas++
+		case "batch.transcription.result":
+			// One WHOLE transcript per uploaded file, and a batch stream has no
+			// deltas at all, so this is the content. Files join with the same
+			// separator the answer and reasoning channels use.
+			if s, _ := obj["text"].(string); s != "" {
+				if body.Len() > 0 {
+					body.WriteString(" ")
+				}
+				body.WriteString(s)
+			}
 		case "content_block_delta":
 			if delta, _ := obj["delta"].(map[string]any); delta != nil {
 				writeStrings(&body, delta["text"])

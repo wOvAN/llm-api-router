@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,9 +62,12 @@ func New(store *config.Store, m *metrics.Store, health *config.HealthTracker, ra
 // classification (always, 0 tokens) and the trace capture (only inside the
 // window). It rides into record so the metric and the trace entry agree.
 type reqMeta struct {
-	requestID    string
-	class        string
-	features     []string
+	requestID string
+	class     string
+	features  []string
+	// upload is the request body of an audio upload, kept so record can state
+	// the length of the clip when the backend states none (see record).
+	upload       []byte
 	capture      *trace.Capture
 	retries      int
 	upstreamPath string
@@ -356,6 +360,13 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	}
 	w.Header().Set("X-Router-Request-Id", meta.requestID)
 	meta.class, meta.features = trace.Classify(req.URL.Path, req.Header.Get("Content-Type"), body)
+	if slices.Contains(meta.features, "audio-upload") {
+		// The uploaded clip is the only source for the length of a STREAMED
+		// recognition (see record), so keep the bytes for it. The reference is
+		// dropped when the metric is built, and a metric is built on every path
+		// that returns, so a megabyte upload is not held past the request.
+		meta.upload = body
+	}
 
 	// Anthropic clients ask what a prompt costs before sending it (Claude Code
 	// fires bursts of these to decide when to compact). The answer needs no
@@ -1052,6 +1063,18 @@ func (r *Router) record(req *http.Request, requestStart time.Time, model, target
 		ClientIP:              clientIP(req),
 	}
 	m.Class, m.Features = meta.class, meta.features
+	if m.AudioDurationMs == 0 && len(meta.upload) > 0 {
+		// audio.cpp serializes wall_ms/audio_duration_ms/rtf - and the
+		// X-AudioCPP-* headers - on its NON-streaming audio paths only: the
+		// terminal event of a streamed recognition carries a timing object with
+		// a single ttft_ms key, and a diarized stream carries the turns. The
+		// uploaded clip is then the one remaining source of how much audio was
+		// recognized, and it is in hand.
+		if ms, ok := proxy.WAVDurationMs(meta.upload); ok {
+			m.AudioDurationMs = ms
+		}
+	}
+	meta.upload = nil
 	// What the response translation dropped joins what the request translation
 	// dropped; the metric (and the tooltip it feeds) carries both, bounded.
 	if meta.translator != nil {

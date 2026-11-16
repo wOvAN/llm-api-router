@@ -75,3 +75,59 @@ func RewriteModelInMultipart(body []byte, newModel string) ([]byte, error) {
 	out = append(out, body[end:]...)
 	return out, nil
 }
+
+// WAVDurationMs returns the length, in milliseconds, of the first WAV audio in
+// a request body - a raw WAV upload, or the audio part of a multipart form,
+// which is what an STT upload is. It reads the RIFF chunk chain (fmt 's
+// byte-rate over the data chunk's byte count), so a compressed upload is
+// measured by its stored bytes like the backend measures it by its samples.
+//
+// This is the only source for the length of a STREAMED recognition: audio.cpp
+// builds the wall_ms/audio_duration_ms/rtf timing object - and the
+// X-AudioCPP-* headers - on the non-streaming paths only; a streamed answer's
+// terminal event carries a timing object with a single ttft_ms key, and a
+// diarized stream carries the turns. The upload is in hand, so the number that
+// the backend chose not to serialize is the one the router can state.
+func WAVDurationMs(body []byte) (int64, bool) {
+	for at := 0; ; {
+		j := bytes.Index(body[at:], []byte("RIFF"))
+		if j < 0 {
+			return 0, false
+		}
+		i := at + j
+		// Every reject advances past the magic: a form field that happens to
+		// carry the four bytes RIFF (an AIFF or a FLAC upload does) must not
+		// send the scan back to the same offset, which is a core pegged per
+		// request.
+		at = i + 4
+		if i+12 > len(body) || string(body[i+8:i+12]) != "WAVE" {
+			continue
+		}
+		var byteRate uint32
+		var dataBytes uint64
+		for p := i + 12; p+8 <= len(body); {
+			size := le32(body[p+4:])
+			bodyStart := p + 8
+			switch string(body[p : p+4]) {
+			case "fmt ":
+				if bodyStart+16 <= len(body) {
+					byteRate = le32(body[bodyStart+8:])
+				}
+			case "data":
+				dataBytes = uint64(size)
+			}
+			if dataBytes > 0 && byteRate > 0 {
+				return int64(dataBytes * 1000 / uint64(byteRate)), true
+			}
+			// Chunks are word-aligned: an odd size pads with a fill byte.
+			p = bodyStart + int(size) + int(size&1)
+		}
+	}
+}
+
+func le32(b []byte) uint32 {
+	if len(b) < 4 {
+		return 0
+	}
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}

@@ -549,6 +549,88 @@ func TestHandleAudioTranscriptionsMultipart(t *testing.T) {
 // llama.cpp's TTS route lives outside /v1 and answers with raw bytes: the audio
 // must reach the client intact, and audio.cpp reports its metering in
 // X-AudioCPP-* headers when there is no JSON body to parse.
+func TestHandleStreamedTranscriptionsMetersTheUpload(t *testing.T) {
+	// audio.cpp states the audio length only on its NON-streaming paths: the
+	// terminal event of a streamed recognition carries a timing object with a
+	// single ttft_ms key. The upload is the one remaining source, so a streamed
+	// STT request must not record a zero-length generation.
+	var receivedType string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerProbe(w, r) {
+			return
+		}
+		receivedType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"transcript.text.delta\",\"delta\":\"privet\"}\n\n" +
+			"data: {\"type\":\"transcript.text.done\",\"text\":\"privet\",\"timing\":{\"ttft_ms\":12}}\n\n" +
+			"data: [DONE]\n\n"))
+	}))
+	defer backend.Close()
+
+	r, store, ms, _ := newTestRouter(t)
+	_ = store.AddServer(&domain.Server{
+		ID: "s1", Name: "audio", URL: backend.URL,
+		APITypes: []domain.APIType{domain.APITypeOpenAI},
+	})
+	_ = store.AddRule(&domain.RoutingRule{
+		IncomingModels: []string{"whisper"},
+		TargetModel:    "whisper-large",
+		ServerID:       "s1",
+		Enabled:        true,
+	})
+
+	// 16 kHz mono 16-bit, 16000 samples = 1s of audio.
+	wav := []byte("RIFF")
+	le32 := func(v uint32) []byte {
+		return []byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)}
+	}
+	wav = append(wav, le32(36+32000)...)
+	wav = append(wav, []byte("WAVEfmt ")...)
+	wav = append(wav, le32(16)...)
+	wav = append(wav, 1, 0, 1, 0) // PCM, mono
+	wav = append(wav, le32(16000)...)
+	wav = append(wav, le32(32000)...) // byte rate
+	wav = append(wav, 2, 0, 16, 0)
+	wav = append(wav, []byte("data")...)
+	wav = append(wav, le32(32000)...)
+	wav = append(wav, bytes.Repeat([]byte{0x01}, 32000)...)
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("model", "whisper"); err != nil {
+		t.Fatalf("WriteField: %v", err)
+	}
+	part, err := mw.CreateFormFile("file", "take.wav")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write(wav); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	if res := w.Result(); res.StatusCode != http.StatusOK {
+		t.Fatalf("got status %d, want 200: %s", res.StatusCode, w.Body.String())
+	}
+	if !strings.HasPrefix(receivedType, "multipart/") {
+		t.Errorf("upstream content type = %q, want multipart", receivedType)
+	}
+	recent := ms.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("expected 1 recorded request, got %d", len(recent))
+	}
+	if recent[0].AudioDurationMs != 1000 {
+		t.Errorf("audio timing = %dms, want 1000 (the uploaded clip)", recent[0].AudioDurationMs)
+	}
+}
+
 func TestHandleTTSBinaryPassthrough(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if answerProbe(w, r) {
