@@ -202,3 +202,34 @@ func TestPinStoreIsCapped(t *testing.T) {
 		t.Errorf("live conversation pin = %q, want it kept (s1)", got)
 	}
 }
+
+// The header list is a moving target: every agent harness invents its own session
+// header, and a conversation whose header we do not read rotates across the pool
+// and re-prefills its whole history on every turn (the pin exists precisely to
+// stop that). These are the names the harnesses on the other side of this proxy
+// actually send.
+func TestConversationKeyReadsHarnessHeaders(t *testing.T) {
+	// A body with no key of its own: the fingerprint of "hi" is what a headerless
+	// request falls back to, so a header that is READ must move the key off it.
+	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	bodyless := []byte(`{"model":"gpt-4","messages":[]}`)
+	for _, h := range []string{"X-Session-Affinity", "X-Client-Request-Id", "X-Deepseek-Harness-Session-Id"} {
+		key := func(v string) string {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			req.Header.Set(h, v)
+			return conversationKey(req, bodyless)
+		}
+		if key("conv-1") == "" {
+			t.Errorf("conversationKey with %s is empty: the pin store ignores that harness's conversations", h)
+		}
+		if key("conv-1") == key("conv-2") {
+			t.Errorf("%s is ignored: two sessions share one pin", h)
+		}
+		if key("conv-1") == conversationKey(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), bodyless) {
+			t.Errorf("%s is ignored: the pin fell back to the body's own key", h)
+		}
+	}
+	if conversationKey(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), body) == "" {
+		t.Error("a body with a user turn must still yield a fingerprint")
+	}
+}

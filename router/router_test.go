@@ -2563,3 +2563,37 @@ func TestHandleTraceRecordsErroredAttemptBody(t *testing.T) {
 		t.Errorf("status = %d, want 400", e.StatusCode)
 	}
 }
+
+// X-Router-Request-Id is our namespace; X-Request-Id is the name clients
+// actually read off a response (the harnesses on the other side of this proxy
+// surface request-id / x-request-id in their error reports, and an Anthropic
+// backend stamps its own). The router's correlation id is the one the operator
+// can look up, so it outranks the backend's value rather than riding beside it.
+func TestHandleRequestIDMirrorsTheStandardHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
+		w.Header().Set("X-Request-Id", "backend-99")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
+	}))
+	defer backend.Close()
+
+	r, store, _, _ := newTestRouter(t)
+	addTestRoute(t, store, "gpt-4", backend.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("X-Request-ID", "client-7")
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	res := w.Result()
+	if got := res.Header.Values("X-Request-Id"); len(got) != 1 || got[0] != "client-7" {
+		t.Errorf("X-Request-Id = %v, want exactly one value: client-7", got)
+	}
+	if got := res.Header.Get("X-Router-Request-Id"); got != "client-7" {
+		t.Errorf("X-Router-Request-Id = %q, want client-7", got)
+	}
+}

@@ -327,7 +327,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	// routing below.
 	if req.Method != http.MethodPost &&
 		(req.Method != http.MethodGet || !strings.HasPrefix(req.URL.Path, "/v1/audio/")) {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		refuse(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -343,10 +343,10 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		log.Errorf("[%s] failed to read request body: %v", req.URL.Path, err)
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			refuse(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		refuse(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
 	defer func() {
@@ -420,7 +420,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			model = "systemone"
 		} else {
 			log.Errorf("[%s] invalid request body: %v", req.URL.Path, err)
-			http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+			refuse(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 			return
 		}
 	}
@@ -444,14 +444,14 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			msg += "; this router routes: " + strings.Join(names, ", ")
 		}
 		log.Errorf("[%s] %s", req.URL.Path, msg)
-		http.Error(w, msg, http.StatusNotFound)
+		refuse(w, msg, http.StatusNotFound)
 		return
 	}
 
 	primaryServer, ok := r.store.GetServer(rule.ServerID)
 	if !ok && !rule.IsJev() {
 		log.Errorf("[%s] server %q not found for model %q", req.URL.Path, rule.ServerID, model)
-		http.Error(w, fmt.Sprintf("server %q not found", rule.ServerID), http.StatusInternalServerError)
+		refuse(w, fmt.Sprintf("server %q not found", rule.ServerID), http.StatusInternalServerError)
 		return
 	}
 
@@ -520,12 +520,12 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		// near-certain harm intent. Nothing was forwarded upstream.
 		r.record(req, requestStart, model, "", "", proxy.ProxyMetrics{}, http.StatusBadRequest, "blocked by jev security gate", false, apiType, jev, meta)
 		log.Warnf("[%s] model=%q — jev security gate blocked the request", req.URL.Path, model)
-		http.Error(w, "request blocked by security gate", http.StatusBadRequest)
+		refuse(w, "request blocked by security gate", http.StatusBadRequest)
 		return
 	}
 	if len(attempts) == 0 {
 		log.Errorf("[%s] model=%q — rule has no usable backend (jev pool empty or servers missing)", req.URL.Path, model)
-		http.Error(w, "routing rule has no usable backend", http.StatusInternalServerError)
+		refuse(w, "routing rule has no usable backend", http.StatusInternalServerError)
 		return
 	}
 	// On-demand trace: the window is consulted once, here, so a request that
@@ -565,6 +565,9 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	// client). If no attempt serves, this is what the client gets — the
 	// backend's own answer, not a proxy-invented status.
 	var lastAnswer *bufferedAnswer
+	// The longest Retry-After any backend of this run asked for (see
+	// bufferedAnswer.retryAfterMs).
+	var throttleHintMs int64
 	// Errors from failed attempts, surfaced to the client via
 	// X-Router-Fallback-Errors (preceding attempts only).
 	var attemptErrors []string
@@ -654,7 +657,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		rewrittenBody, err := rewriteAttemptBody(req, body, targetModel)
 		if err != nil {
 			log.Errorf("[%s] failed to rewrite model %q -> %q: %v", req.URL.Path, model, targetModel, err)
-			http.Error(w, fmt.Sprintf("failed to rewrite model: %v", err), http.StatusInternalServerError)
+			refuse(w, fmt.Sprintf("failed to rewrite model: %v", err), http.StatusInternalServerError)
 			return
 		}
 
@@ -772,6 +775,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 		rh := &proxy.RouterHeaders{
 			ServerID:              srv.ID,
 			ServerName:            srv.Name,
+			RequestID:             meta.requestID,
 			Attempts:              fmt.Sprintf("%d/%d", i+1, len(attempts)),
 			FallbackErrors:        attemptErrors,
 			KeepAliveIdle:         srvKeepAlive,
@@ -904,8 +908,12 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			retriesLeft := sameServerRetries(err, numRetries)
 			if isBuffered {
 				retriesLeft = bufferedAnswerRetries(buffered.StatusCode, numRetries, explicitRetries)
+				if pm != nil && pm.RetryAfterMs > throttleHintMs {
+					throttleHintMs = pm.RetryAfterMs
+				}
 				lastAnswer = &bufferedAnswer{resp: buffered, serverID: srv.ID,
-					targetModel: targetModel, wasFallback: wasFallback, translator: meta.translator}
+					targetModel: targetModel, wasFallback: wasFallback, translator: meta.translator,
+					retryAfterMs: throttleHintMs}
 			}
 			if retry < retriesLeft {
 				log.Warnf("[%s] model=%q — retrying %s (%d/%d): %v",
@@ -973,7 +981,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 			proxy.ProxyMetrics{}, http.StatusBadRequest, refusal.Error(),
 			len(attempts) > 1, apiType, jev, meta)
 		log.Warnf("[%s] model=%q — refused: %v", req.URL.Path, model, refusal)
-		http.Error(w, refusal.Error(), http.StatusBadRequest)
+		refuse(w, refusal.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -991,7 +999,7 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	r.record(req, requestStart, model, attempts[0].targetModel, attempts[0].server.ID, proxy.ProxyMetrics{}, http.StatusBadGateway, errorBody, len(attempts) > 1, apiType, jev, meta)
 
 	log.Errorf("[%s] model=%q — all backends failed: %v", req.URL.Path, model, lastErr)
-	http.Error(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
+	refuse(w, fmt.Sprintf("all backends failed: %v", lastErr), http.StatusBadGateway)
 }
 
 // serveLastAnswer delivers the last buffered backend answer (429/5xx, no byte of
@@ -1013,7 +1021,7 @@ func (r *Router) serveLastAnswer(w http.ResponseWriter, req *http.Request, reque
 		}
 	}
 	for k, values := range resp.Header {
-		if k == "Content-Length" || k == "Transfer-Encoding" {
+		if k == "Content-Length" || k == "Transfer-Encoding" || k == "Retry-After" {
 			continue // our own framing; the body may have been rewritten
 		}
 		if strings.HasPrefix(k, "X-Router-") {
@@ -1032,6 +1040,9 @@ func (r *Router) serveLastAnswer(w http.ResponseWriter, req *http.Request, reque
 		w.Header().Set("X-Router-Server-Name", srv.Name)
 	}
 	w.Header().Set("X-Router-Status", strconv.Itoa(resp.StatusCode))
+	if answer.retryAfterMs > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(clientRetryAfterSeconds(answer.retryAfterMs)))
+	}
 	w.WriteHeader(resp.StatusCode)
 	if _, err := w.Write(body); err != nil {
 		log.Errorf("[%s] failed to write the backend's answer: %v", req.URL.Path, err)
@@ -1041,6 +1052,19 @@ func (r *Router) serveLastAnswer(w http.ResponseWriter, req *http.Request, reque
 		resp.StatusCode, string(body), answer.wasFallback, apiType, jev, meta)
 	log.Errorf("[%s] model=%q — every attempt failed; served %s's HTTP %d",
 		req.URL.Path, model, answer.serverID, resp.StatusCode)
+}
+
+// refuse answers a request the router authored the answer for: no backend was
+// asked, so a client-side retry policy has nothing to gain from a replay.
+// `x-should-retry` is read BEFORE every classifier by the SDK-side policies
+// (opencode, pi), which makes it the one lever that reaches a harness that has
+// no idea a router sits in front of its provider. LiteLLM's client-side
+// predicate agrees on the policy (it retries 408/409/429/5xx and nothing else in
+// the 4xx range) and emits no such header, because it is the client there; the
+// router is the server, so it answers its own refusals with the verdict.
+func refuse(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("X-Should-Retry", "false")
+	http.Error(w, msg, code)
 }
 
 // record stores a request metric; pm fields feed the usage/timing columns.
@@ -1189,6 +1213,27 @@ type bufferedAnswer struct {
 	targetModel string
 	wasFallback bool
 	translator  proxy.StreamTranslator
+	// retryAfterMs is the longest Retry-After any backend of this run asked for.
+	// The verbatim header is not the client's answer: one backend's 50-minute
+	// throttle hint, relayed as-is, is a client-silent kill switch on that
+	// client's own retry ladder (pi refuses a retry when the server-requested
+	// delay outlasts its max-retry-delay, 60s by default; deepseek-harness drops
+	// the retry past its 10s cap), and a hint on a 5xx body is a delay nobody
+	// asked for. So the router authors the header from the pool's hints, bounded
+	// by a number a client policy actually obeys (clientRetryAfterSeconds).
+	retryAfterMs int64
+}
+
+// clientRetryAfterSeconds is the pool's throttle hint in the seconds the
+// `Retry-After` header carries, bounded to [1, 10]: below it a client that
+// retries at its own backoff beats the backend's cadence by a hair, above it
+// the client-side retry policies above stop obeying the hint at all.
+func clientRetryAfterSeconds(ms int64) int {
+	s := int((ms + 999) / 1000)
+	if s < 1 {
+		return 1
+	}
+	return min(s, 10)
 }
 
 // contextOverflows reports whether a request's estimated prompt can not fit the

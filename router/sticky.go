@@ -35,6 +35,12 @@ var sessionHeaders = []string{
 	"X-Thread-Id", "Thread-Id",
 	"X-Conversation-Id", "Conversation-Id",
 	"X-Openai-Conversation-Id",
+	// The harnesses on the other side of this proxy invent their own: pi sends
+	// x-session-affinity / x-client-request-id to a non-OpenRouter endpoint, and
+	// deepseek-harness sends its own. A conversation whose header is not on this
+	// list rotates across the pool and re-prefills its whole history per turn.
+	"X-Session-Affinity", "X-Client-Request-Id",
+	"X-Deepseek-Harness-Session-Id",
 }
 
 // conversationKey identifies the conversation a request belongs to: a session

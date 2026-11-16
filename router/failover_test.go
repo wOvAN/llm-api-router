@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -397,4 +398,108 @@ func TestHandleMaxFallbacksCapsTheChain(t *testing.T) {
 	if got := hits["fb2"].Load() + hits["fb3"].Load(); got != 0 {
 		t.Errorf("attempts past the cap ran (%d hits on fb2+fb3), want the chain capped at 1 fallback", got)
 	}
+}
+
+// A harness client that is handed the backends' own 429 reads its Retry-After as
+// an order: pi refuses the retry outright when the server-requested delay
+// outlasts its max-retry-delay (60s default) and deepseek-harness drops the
+// retry past its 10s cap, so one backend's 50-minute throttle hint, relayed
+// verbatim, is a client-silent kill switch on that client's whole retry ladder.
+// The router owns the pool, so the pool's answer is what the client hears: the
+// longest hint any backend asked for, bounded by a number a client policy obeys.
+func TestHandleServedAnswerBoundsTheRetryHint(t *testing.T) {
+	for _, tc := range []struct{ name, hint, want string }{
+		{"a hint past the bound is clamped", "3000", "10"},
+		{"a hint inside the bound rides as asked", "5", "5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if answerProbe(w, req) {
+					return
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer primary.Close()
+			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if answerProbe(w, req) {
+					return
+				}
+				w.Header().Set("Retry-After", tc.hint)
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_exceeded","message":"slow down"}}`))
+			}))
+			defer fallback.Close()
+
+			r, store, _, _ := newTestRouter(t)
+			addTestRouteFallback(t, store, "gpt-4", primary.URL, fallback.URL)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+				strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+			w := httptest.NewRecorder()
+			r.Handle(w, req)
+
+			res := w.Result()
+			if res.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want the last backend's 429", res.StatusCode)
+			}
+			if got := res.Header.Get("Retry-After"); got != tc.want {
+				t.Errorf("Retry-After = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A client-side retry policy reads x-should-retry before it reads anything else
+// (opencode, pi). On a response the ROUTER authored — a model it does not route,
+// a body it will not read, a pool where nothing answered, a request it refused
+// to convert — there is no backend left to convince, so replaying the same
+// request at the same router buys the same answer. LiteLLM sets this header on
+// its own refusals for the same reason (its GuardrailInterventionRequires
+// retry-off surface), and olla has no client-facing retry vocabulary at all.
+func TestHandleRouterRefusalsSayDoNotRetry(t *testing.T) {
+	t.Run("an unrouted model", func(t *testing.T) {
+		r, _, _, _ := newTestRouter(t)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"nope","messages":[]}`))
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+		res := w.Result()
+		if res.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", res.StatusCode)
+		}
+		if got := res.Header.Get("X-Should-Retry"); got != "false" {
+			t.Errorf("X-Should-Retry = %q, want false", got)
+		}
+	})
+
+	t.Run("an oversized body", func(t *testing.T) {
+		saved := maxRequestBody
+		maxRequestBody = 1024
+		defer func() { maxRequestBody = saved }()
+
+		r, _, _, _ := newTestRouter(t)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			bytes.NewReader(bytes.Repeat([]byte("a"), 2048)))
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+		if got := w.Result().Header.Get("X-Should-Retry"); got != "false" {
+			t.Errorf("X-Should-Retry = %q, want false", got)
+		}
+	})
+
+	t.Run("a pool where nothing answered", func(t *testing.T) {
+		r, store, _, _ := newTestRouter(t)
+		addTestRoute(t, store, "gpt-4", "http://localhost:1")
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+		w := httptest.NewRecorder()
+		r.Handle(w, req)
+		res := w.Result()
+		if res.StatusCode != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502", res.StatusCode)
+		}
+		if got := res.Header.Get("X-Should-Retry"); got != "false" {
+			t.Errorf("X-Should-Retry = %q, want false", got)
+		}
+	})
 }

@@ -325,6 +325,9 @@ type RouterHeaders struct {
 	ServerName string // Sets X-Router-Server-Name
 	// Attempts sets X-Router-Attempts (e.g. "2/3" — current attempt / total).
 	Attempts string
+	// RequestID mirrors the router's correlation id into the standard
+	// `X-Request-Id` response header, the name clients actually read.
+	RequestID string
 	// Retries sets X-Router-Retries: how many retries on this server happened
 	// before the request succeeded (0 = first try).
 	Retries int
@@ -491,6 +494,11 @@ type metricsWriter struct {
 	retryAfter      time.Duration // backend's Retry-After hint (0 = none)
 	trace           TraceTap      // per-request trace capture (nil = off)
 	injectStatus    bool          // set X-Router-Status at WriteHeader (router mode)
+	// requestID sets X-Request-Id at WriteHeader (router mode). It can not be
+	// stamped eagerly with the other router headers: the reverse proxy ADDs the
+	// upstream's own values to the header map, so an eager Set would end up
+	// beside a backend's `x-request-id` instead of replacing it.
+	requestID string
 }
 
 func newMetricsWriter(w http.ResponseWriter, start time.Time) *metricsWriter {
@@ -521,6 +529,9 @@ func (m *metricsWriter) WriteHeader(code int) {
 	}
 	if m.injectStatus {
 		m.Header().Set("X-Router-Status", strconv.Itoa(code))
+	}
+	if m.requestID != "" {
+		m.Header().Set("X-Request-Id", m.requestID)
 	}
 	m.ResponseWriter.WriteHeader(code)
 }
@@ -1529,6 +1540,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 	if rh != nil {
 		SetRouterHeaders(rw, rh)
 		mw.injectStatus = true
+		mw.requestID = rh.RequestID
 		mw.trace = rh.Trace
 	}
 
