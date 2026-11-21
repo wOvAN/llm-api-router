@@ -481,6 +481,21 @@ func ParseRetryAfter(v string) time.Duration {
 	return 0
 }
 
+// RetryAfterHeader reads the throttle hint off a response's headers. The pair is
+// one hint in two units and `Retry-After-Ms` wins: that is the order the official
+// Anthropic Go SDK reads them in, and LiteLLM's, and the Anthropic family sends
+// the ms spelling. Reading only the seconds header makes an ms-only answer read
+// as no hint, which buys the caller's default (5min of cooldown for a backend
+// that asked for 20 seconds).
+func RetryAfterHeader(h http.Header) time.Duration {
+	if ms := h.Get("Retry-After-Ms"); ms != "" {
+		if n, err := strconv.ParseInt(ms, 10, 64); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return ParseRetryAfter(h.Get("Retry-After"))
+}
+
 // ClientRetryAfterSeconds is a Retry-After hint the ROUTER authors, in the
 // seconds the header carries, bounded to [1, 10]. A backend's own hint is its own
 // business; a hint written by this process lands in front of clients whose retry
@@ -533,7 +548,7 @@ func (m *metricsWriter) WriteHeader(code int) {
 	m.statusCode = code
 	m.contentType = m.ResponseWriter.Header().Get("Content-Type")
 	m.contentEncoding = m.ResponseWriter.Header().Get("Content-Encoding")
-	m.retryAfter = ParseRetryAfter(m.ResponseWriter.Header().Get("Retry-After"))
+	m.retryAfter = RetryAfterHeader(m.Header())
 	if m.trace != nil {
 		// A compressed body is bytes: the relay forwards it as-is and only the
 		// metrics extractor decompresses it, so the trace stubs it (with size +
@@ -1053,7 +1068,17 @@ func isWhitespace(b byte) bool {
 //
 // When a loop is detected, the detector cancels the request context
 // (which cancels the upstream request) and sends an error frame to the client.
-const loopDetectionWindow = 20 // number of recent SSE contents to track
+// 100 is LiteLLM's tuned number for the same guard (`REPEATED_STREAMING_CHUNK_LIMIT`,
+// 20 in the pattern this was first written against), and the short-content rule in
+// Write is what makes that number survivable: a model streaming whitespace, quotes
+// or newlines repeats SHORT deltas legitimately, and a false trip is expensive
+// twice over now that opencode and pi retry the error frame this detector authors.
+const loopDetectionWindow = 100 // number of recent SSE contents to track
+
+// loopShortContentLen is the delta length at and below which a repeat is not
+// evidence of a loop: whitespace, a newline, a quote, a list bullet, a bracket.
+// LiteLLM resets its counter on content this short for the same reason.
+const loopShortContentLen = 2
 
 type loopDetector struct {
 	http.ResponseWriter
@@ -1100,6 +1125,15 @@ func (d *loopDetector) Write(data []byte) (int, error) {
 		// Skip non-content events (role, tool calls, etc.)
 		if len(content) > 1024 {
 			content = content[:1024]
+		}
+		// A repeated SHORT delta is not evidence of a loop: a model streaming
+		// whitespace, newlines, quotes, brackets or list bullets fills a stream
+		// with identical one- and two-char deltas legitimately. LiteLLM resets its
+		// counter on content this short; skipping the count is the same rule with
+		// no state to reset, and it is what lets the window stay small enough to
+		// cut a real loop (which repeats real content) early.
+		if len(content) <= loopShortContentLen {
+			continue
 		}
 		d.recent[d.index%loopDetectionWindow] = content
 		d.index++
@@ -1682,7 +1716,7 @@ func StreamProxy(ctx context.Context, targetURL string, apiKey string, req *http
 		if len(pre) <= peekLimit {
 			// The peek path never writes through mw, so mw.WriteHeader (which is
 			// where Retry-After is normally captured) never ran for this response.
-			mw.retryAfter = ParseRetryAfter(upstreamResp.Header.Get("Retry-After"))
+			mw.retryAfter = RetryAfterHeader(upstreamResp.Header)
 			m := mw.metrics()
 			m.StatusCode = upstreamResp.StatusCode
 			if len(pre) > 4096 {

@@ -582,7 +582,10 @@ func TestHandleConvertStreamLoopDetectionStaysInDialect(t *testing.T) {
 		f := w.(http.Flusher)
 		chunk := "data: {\"id\":\"c1\",\"model\":\"claude\",\"choices\":" +
 			"[{\"index\":0,\"delta\":{\"content\":\"same \"}}]}\n\n"
-		for range 40 {
+		// Past the proxy's loop window (200 identical chunks), a number the router
+		// package can not name: the detector has to be the thing that cuts this
+		// stream short, so the backend has to outrepeat it.
+		for range 210 {
 			if _, err := w.Write([]byte(chunk)); err != nil {
 				return
 			}

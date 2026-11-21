@@ -243,7 +243,7 @@ func (t *HealthTracker) checkServer(srv *domain.Server) bool {
 	case http.StatusTooManyRequests:
 		// The backend is throttling the probe. Obey it: probing on every tick is
 		// how a health check becomes the reason the server stays 429.
-		if d := proxy.ParseRetryAfter(resp.Header.Get("Retry-After")); d > 0 {
+		if d := proxy.RetryAfterHeader(resp.Header); d > 0 {
 			t.mu.Lock()
 			t.throttled[srv.ID] = time.Now().Add(d)
 			t.mu.Unlock()

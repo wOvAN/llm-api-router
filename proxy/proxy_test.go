@@ -2315,6 +2315,77 @@ func TestStreamProxyBuffersRetryableStatus(t *testing.T) {
 
 // A 200 is never buffered, and a plain 4xx (the client's own bad request) is not
 // the router's to retry: both stay byte-for-byte passthrough.
+// `Retry-After-Ms` is the same hint in the finer unit, and the Anthropic family
+// sends it: both the official Go SDK and LiteLLM read that spelling FIRST and
+// fall back to `Retry-After`. Reading only the seconds header turns a backend's
+// "come back in 20s" into no hint at all, which buys the 5min default cooldown.
+func TestRetryAfterHeaderPrefersTheMsSpelling(t *testing.T) {
+	both := http.Header{}
+	both.Set("Retry-After-Ms", "20000")
+	both.Set("Retry-After", "300")
+	if d := RetryAfterHeader(both); d != 20*time.Second {
+		t.Errorf("both spellings: %v, want the ms one (20s)", d)
+	}
+
+	only := http.Header{}
+	only.Set("Retry-After-Ms", "1500")
+	if d := RetryAfterHeader(only); d != 1500*time.Millisecond {
+		t.Errorf("ms only: %v, want 1.5s", d)
+	}
+
+	garbage := http.Header{}
+	garbage.Set("Retry-After-Ms", "soon")
+	garbage.Set("Retry-After", "45")
+	if d := RetryAfterHeader(garbage); d != 45*time.Second {
+		t.Errorf("unparseable ms: %v, want the seconds fallback (45s)", d)
+	}
+
+	if d := RetryAfterHeader(http.Header{}); d != 0 {
+		t.Errorf("no headers: %v, want 0 (no hint)", d)
+	}
+}
+
+// Streaming a SHORT token repeatedly is normal: a model emitting whitespace,
+// quotes, newlines or a bullet fills a stream with identical one- and two-char
+// deltas legitimately. LiteLLM's guard is the same one for the same reason (its
+// counter ignores a repeated chunk whose content is 2 chars or less), and a false
+// trip is expensive twice over now that opencode and pi retry the error frame
+// this detector authors.
+func TestLoopDetectorToleratesASteadyRepeatedToken(t *testing.T) {
+	recorder := &testResponseWriter{header: make(http.Header)}
+	ld := newLoopDetector(recorder, context.Background(), false)
+
+	for _, tok := range []string{" ", "\n", "//"} {
+		frame := fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n", tok)
+		for i := range 3 * loopDetectionWindow {
+			if _, err := ld.Write([]byte(frame)); err != nil {
+				t.Fatalf("token %q write %d: a repeated short token is not a loop: %v", tok, i, err)
+			}
+		}
+	}
+	if ld.detected {
+		t.Error("a repeated short token tripped the loop detector")
+	}
+}
+
+// A repeated token is one class; a repeated RUNAWAY is the class the detector
+// exists for, and the short-token rule must not blind it: a long chunk repeated
+// past the window is still cut.
+func TestLoopDetectorStillCutsARepeatedPhrase(t *testing.T) {
+	recorder := &testResponseWriter{header: make(http.Header)}
+	ld := newLoopDetector(recorder, context.Background(), false)
+
+	frame := "data: {\"choices\":[{\"delta\":{\"content\":\"the answer is 42 \"}}]}\n"
+	for range loopDetectionWindow + 1 {
+		if _, err := ld.Write([]byte(frame)); err != nil {
+			return // detected, which is the point
+		}
+	}
+	if !ld.detected {
+		t.Error("a repeated long chunk past the window must be cut")
+	}
+}
+
 func TestStreamProxyForwardsNonRetryableStatuses(t *testing.T) {
 	for _, status := range []int{http.StatusOK, http.StatusBadRequest, http.StatusNotFound} {
 		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
