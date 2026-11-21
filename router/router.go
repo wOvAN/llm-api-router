@@ -362,9 +362,13 @@ func (r *Router) Handle(w http.ResponseWriter, req *http.Request) {
 	// Every response carries a request id and the metric carries the same one, so
 	// a client can quote a number in a bug report without the trace window being
 	// armed. A client that already has an id keeps it: its logs and the router's
-	// then agree.
+	// then agree. An over-long one is not kept: this value is written into three
+	// response headers, the metric, the GUI and the audit line, so accepting any
+	// size is letting a client choose the size of our logs and headers. LiteLLM
+	// bounds the id it accepts the same way (MAX_LITELLM_CALL_ID_LENGTH, 256) and
+	// generates a fresh one past it.
 	meta.requestID = strings.TrimSpace(req.Header.Get("X-Request-ID"))
-	if meta.requestID == "" {
+	if meta.requestID == "" || len(meta.requestID) > maxRequestIDLen {
 		meta.requestID = newRequestID()
 	}
 	w.Header().Set("X-Router-Request-Id", meta.requestID)
@@ -1198,6 +1202,12 @@ const defaultNumRetries = 10
 // accepted-then-closed path every retry costs a dial plus up to 1s of backoff,
 // so an unbounded number in the header is a self-inflicted outage per request.
 const maxClientRetries = 100
+
+// maxRequestIDLen bounds the request id a client sends in X-Request-ID, which is
+// echoed into three response headers and carried into the metric, the GUI and the
+// audit line. Past this the client is choosing the size of our logs and headers,
+// so the id is regenerated instead (LiteLLM's MAX_LITELLM_CALL_ID_LENGTH, 256).
+const maxRequestIDLen = 256
 
 // sameServerRetries caps the retry loop by what the transport actually reported,
 // because the generous default (absorb a backend that is restarting) is the wrong

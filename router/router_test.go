@@ -2569,6 +2569,39 @@ func TestHandleTraceRecordsErroredAttemptBody(t *testing.T) {
 // surface request-id / x-request-id in their error reports, and an Anthropic
 // backend stamps its own). The router's correlation id is the one the operator
 // can look up, so it outranks the backend's value rather than riding beside it.
+// A client's X-Request-ID is echoed into three response headers, recorded in the
+// metric, rendered in the GUI's IP tooltip and quoted in the audit line, so an
+// unbounded one is a client-chosen header and log size. LiteLLM's rule for the
+// same field: keep the client's value only within 256 chars, else generate a
+// fresh id (MAX_LITELLM_CALL_ID_LENGTH).
+func TestHandleRequestIDFromTheClientIsBounded(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if answerProbe(w, req) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"finish_reason":"stop"}]}`))
+	}))
+	defer backend.Close()
+
+	r, store, _, _ := newTestRouter(t)
+	addTestRoute(t, store, "gpt-4", backend.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("X-Request-ID", strings.Repeat("x", 5000))
+	w := httptest.NewRecorder()
+	r.Handle(w, req)
+
+	got := w.Result().Header.Get("X-Router-Request-Id")
+	if len(got) > 256 {
+		t.Errorf("a client's id is stamped unbounded: %d chars", len(got))
+	}
+	if len(got) == 0 || strings.HasPrefix(got, "xxxx") {
+		t.Errorf("an over-long client id must be replaced by a generated one, got %q", got)
+	}
+}
+
 func TestHandleRequestIDMirrorsTheStandardHeader(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if answerProbe(w, req) {
