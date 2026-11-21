@@ -130,6 +130,27 @@ func TestChatToMessagesResponseReportsWhatItLost(t *testing.T) {
 // one repeated loss must be one note: a multimodal answer carrying a dozen image
 // parts would otherwise evict every other note from the metric and the GUI
 // tooltip (the emitter's own `note()` already dedups — this direction must too).
+// `refusal` is a stop reason Anthropic declares and LiteLLM keeps raw, so the
+// mapping has a row for it: a refused answer must arrive as a refusal, not as an
+// `end_turn` completion whose only tell is a note in a header nobody reads.
+func TestChatToMessagesResponseKeepsARefusalReason(t *testing.T) {
+	out, notes, err := ChatToMessages([]byte(`{"id":"c","model":"m","choices":[` +
+		`{"index":0,"message":{"role":"assistant","content":"no."},"finish_reason":"refusal"}]}`))
+	if err != nil {
+		t.Fatalf("ChatToMessages: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if m["stop_reason"] != "refusal" {
+		t.Fatalf("stop_reason = %v, want refusal", m["stop_reason"])
+	}
+	if slices.Contains(notes, "finish_reason=refusal") {
+		t.Fatalf("a reason the mapping has a row for is not a loss: %v", notes)
+	}
+}
+
 func TestChatToMessagesResponseNotesAreReportedOnce(t *testing.T) {
 	part := `{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}},`
 	body := `{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant",` +
@@ -145,11 +166,13 @@ func TestChatToMessagesResponseNotesAreReportedOnce(t *testing.T) {
 	}
 }
 
-// A refused answer is the case the spec's loss table names: it must arrive as an
-// `end_turn` completion WITH a note, never as a silent end_turn — the client's
-// whole view of why the answer stopped is that field.
+// A finish reason the mapping table has no Anthropic row for is the case the
+// spec's loss table names: it must arrive as an `end_turn` completion WITH a
+// note, never as a silent end_turn — the client's whole view of why the answer
+// stopped is that field. (`refusal` is not in this class: it has a row of its own
+// now, pinned by TestChatToMessagesResponseKeepsARefusalReason.)
 func TestChatToMessagesResponseNotesACollapsedFinishReason(t *testing.T) {
-	for _, fr := range []string{"refusal", "eos_token", "abort"} {
+	for _, fr := range []string{"eos_token", "abort"} {
 		out, notes, err := ChatToMessages([]byte(`{"id":"c","model":"m","choices":[{"message":` +
 			`{"role":"assistant","content":"partial"},"finish_reason":"` + fr + `"}]}`))
 		if err != nil {
@@ -168,7 +191,7 @@ func TestChatToMessagesResponseNotesACollapsedFinishReason(t *testing.T) {
 	}
 	// The mapping's own rows lose nothing, and a backend that reported no finish
 	// reason has nothing to report: no note.
-	for _, fr := range []string{"", "stop", "length", "tool_calls", "function_call"} {
+	for _, fr := range []string{"", "stop", "length", "tool_calls", "function_call", "refusal"} {
 		_, notes, err := ChatToMessages([]byte(`{"id":"c","model":"m","choices":[{"message":` +
 			`{"role":"assistant","content":"t"},"finish_reason":"` + fr + `"}]}`))
 		if err != nil || len(notes) != 0 {

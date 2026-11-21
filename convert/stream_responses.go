@@ -417,7 +417,7 @@ func (r *chatToResponses) closeItems() [][]byte {
 // to [DONE] after the finish_reason chunk must not complete twice, so the terminal
 // event is emitted once (FinishFrames honours `finished`).
 func (r *chatToResponses) finish(fr string) [][]byte {
-	if n := finishNote(fr); n != "" {
+	if n := responsesFinishNote(fr); n != "" {
 		r.note(n)
 	}
 	if fr == "error" {

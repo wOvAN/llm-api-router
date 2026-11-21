@@ -431,7 +431,7 @@ func ChatToResponses(body []byte) ([]byte, []string, error) {
 		notes = append(notes, "choices=dropped:"+strconv.Itoa(len(c.Choices)-1))
 	}
 	ch := c.Choices[0]
-	if n := finishNote(ch.FinishReason); n != "" {
+	if n := responsesFinishNote(ch.FinishReason); n != "" {
 		notes = append(notes, n)
 	}
 	items := make([]any, 0, 3)
@@ -502,7 +502,7 @@ func ChatToResponses(body []byte) ([]byte, []string, error) {
 
 // responsesStatus maps a Chat Completions finish reason onto Responses'
 // `status`/`incomplete_details.reason`. A reason with no row is a completed
-// response plus a note — `finishNote` reports it.
+// response plus a note — `responsesFinishNote` reports it.
 func responsesStatus(fr string) (string, string) {
 	switch fr {
 	case "length":

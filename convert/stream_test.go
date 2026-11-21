@@ -128,6 +128,24 @@ func TestChatToMessagesStreamToolCallsAndThinking(t *testing.T) {
 	}
 }
 
+// A refused answer is a refusal in Anthropic's vocabulary as well: `refusal` is a
+// StopReason row the SDK declares and LiteLLM keeps it raw, so collapsing it to
+// `end_turn` tells the client the answer finished normally. A client that reacts
+// to a refusal at all (deepseek-harness raises a non-retryable CONTENT_REFUSED)
+// can only do that when the answer says so.
+func TestChatToMessagesStreamKeepsARefusalReason(t *testing.T) {
+	out := emit(NewChatToMessages(),
+		`{"choices":[{"index":0,"delta":{"content":"no"}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"refusal"}],` +
+			`"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+	if !strings.Contains(out, `"stop_reason":"refusal"`) {
+		t.Fatalf("a refused answer must not close as end_turn:\n%s", out)
+	}
+	if strings.Contains(out, "finish_reason=refusal") {
+		t.Fatal("a finish reason the mapping has a row for is not a loss")
+	}
+}
+
 func TestChatToMessagesStreamPassesThroughWhatItCannotTranslate(t *testing.T) {
 	s := NewChatToMessages()
 	// A frame that is not a Chat Completions chunk is not ours to translate: an

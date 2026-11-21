@@ -164,15 +164,30 @@ func ChatToMessages(body []byte) ([]byte, []string, error) {
 
 // finishNote reports a Chat Completions finish reason the mapping table has no
 // Anthropic spelling for. `stop`/`length`/`tool_calls` arrive under the mapping's
-// own rows; everything a real engine adds — `content_filter`, `refusal`,
-// `eos_token`, `abort` — collapses to a milder `stop_reason` (content_filter
-// aside, the answer reads as a normal end_turn), and the one thing an operator
-// must see is that the answer did not end the way the envelope says. The spec's
-// loss table names this class explicitly: refusal/content_filter are lost
-// information, written to notes, never to silence.
+// own rows, and so does `refusal` (Anthropic declares it); everything a real
+// engine adds — `eos_token`, `abort`, `content_filter` — collapses to a milder
+// `stop_reason` (content_filter aside, the answer reads as a normal end_turn),
+// and the one thing an operator must see is that the answer did not end the way
+// the envelope says. The spec's loss table names this class explicitly: a collapse
+// is lost information, written to notes, never to silence.
 func finishNote(fr string) string {
-	switch fr {
-	case "", "stop", "length", "tool_calls", "function_call":
+	return collapseNote(fr, anthropicFinishRows)
+}
+
+// responsesFinishNote is the same report against the Responses vocabulary, which
+// has no refusal row: a refused answer collapses to an `incomplete_details.reason`
+// there, so it stays a loss the notes must carry.
+func responsesFinishNote(fr string) string {
+	return collapseNote(fr, responsesFinishRows)
+}
+
+var (
+	anthropicFinishRows = []string{"", "stop", "length", "tool_calls", "function_call", "refusal"}
+	responsesFinishRows = []string{"", "stop", "length", "tool_calls", "function_call"}
+)
+
+func collapseNote(fr string, rows []string) string {
+	if slices.Contains(rows, fr) {
 		return ""
 	}
 	return "finish_reason=" + fr
@@ -223,7 +238,10 @@ func stopReason(fr string) string {
 		return "max_tokens"
 	case "tool_calls", "function_call":
 		return "tool_use"
-	case "content_filter":
+	case "content_filter", "refusal":
+		// `refusal` is a stop reason Anthropic declares and LiteLLM keeps raw, so
+		// this table has its own row: a refused answer that reads as a finished one
+		// is a client that keeps paying for a reply it will never get.
 		return "refusal"
 	}
 	return "end_turn"

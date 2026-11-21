@@ -837,19 +837,23 @@ func TestHandleConvertReportsResponseNotes(t *testing.T) {
 			`{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
 		w := httptest.NewRecorder()
 		r.Handle(w, req)
-		if !strings.Contains(w.Body.String(), `"stop_reason":"end_turn"`) {
-			t.Fatalf("a refused answer must arrive as an end_turn completion: %s", w.Body.String())
+		if !strings.Contains(w.Body.String(), `"stop_reason":"refusal"`) {
+			t.Fatalf("a refused answer must not read as a finished one: %s", w.Body.String())
 		}
 		rec := ms.Recent()
 		if len(rec) != 1 {
 			t.Fatalf("metrics: %+v", rec)
 		}
 		got := strings.Join(rec[0].ConvertNotes, ",")
-		for _, want := range []string{"finish_reason=refusal", "choices=dropped:1",
+		for _, want := range []string{"choices=dropped:1",
 			"content_part=dropped:image_url"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("the loss of %s must be on the metric, notes=%q", want, got)
 			}
+		}
+		// The finish reason is carried in the body, so it is not a loss.
+		if strings.Contains(got, "finish_reason") {
+			t.Fatalf("a refusal the client receives must not be noted as dropped: %q", got)
 		}
 	})
 
